@@ -2,7 +2,7 @@
 
 В этой директории находится временный Streamlit-интерфейс для просмотра
 нормализованных файлов из `data/processed/`. Интерфейс не изменяет эти файлы и
-предназначен для разработки.
+предназначен для разработки и воспроизводимых demo-сценариев.
 
 Страница «Проверка выполнимости задачи» вызывает бизнес-логику из
 `src/planning/`. На ней можно временно задать занятые SP команды, использованные
@@ -31,3 +31,14 @@ DEV UI не изменяет CSV или исходный Excel, не запус�
 сохраняет ручные изменения или рассчитанный план. Он не является частью
 финального продукта. Перед сдачей проекта директорию `dev_ui/` можно полностью
 удалить без влияния на preprocessing и production-модули.
+
+## KPI и пересчёт
+
+The `KPI & Replanning` page demonstrates the contract already available to the future
+planner: immutable baseline, actual Sprint 1 results, Fact/Forecast KPIs, plan diff,
+multi-sprint effort, and explainable RED/ORANGE/YELLOW alerts. Its plan is a fixture,
+not optimizer output.
+
+На странице «KPI и пересчёт» можно менять факт Sprint 1, переключать
+сценарий дефицита QA и риск Bus Factor. План на этой странице —
+детерминированный fixture, а не результат `src/planning/`.
