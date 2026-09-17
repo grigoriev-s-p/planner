@@ -1,16 +1,33 @@
-# Temporary DEV UI
+# Временный DEV UI
 
-This directory contains a development-only, read-only Streamlit inspector for the
-normalized files in `data/processed/`.
+В этой директории находится временный Streamlit-интерфейс для просмотра
+нормализованных файлов из `data/processed/`. Интерфейс не изменяет эти файлы и
+предназначен для разработки.
 
-From the project root, install dependencies and run:
+Страница «Проверка выполнимости задачи» вызывает бизнес-логику из
+`src/planning/`. На ней можно временно задать занятые SP команды, использованные
+часы инженеров и спринты завершения блокирующих задач. Эти значения существуют
+только в текущей сессии интерфейса.
+
+Страница «Квартальный план» запускает автоматический planner со scoring v1 на
+шесть спринтов. Результат хранится только в памяти сессии: на странице видны
+score и его компоненты, задачи и ресурсы каждого спринта, пропорциональная
+SP-нагрузка, плановый и фактический SP завершения, исходные baseline-даты,
+итоговые причины и отдельная история
+попыток. Неуспешные пробные размещения не занимают ресурс.
+
+Задачи, для которых среди профилей инженеров нет специалиста требуемой
+нормализованной роли, показаны отдельно в блоке «Задачи, невозможные к
+планированию». Они не смешиваются с `MOVED` и не проходят симуляцию ресурсов.
+
+Установите зависимости и запустите интерфейс из корня проекта:
 
 ```powershell
 python -m pip install -r requirements.txt
 streamlit run dev_ui/app.py
 ```
 
-The UI does not edit CSV files or the raw workbook, run preprocessing, save manual
-changes, or perform planning. It is not part of the final product. The entire
-`dev_ui/` directory can be removed before final submission without breaking the
-preprocessing or production modules.
+DEV UI не изменяет CSV или исходный Excel, не запускает preprocessing и не
+сохраняет ручные изменения или рассчитанный план. Он не является частью
+финального продукта. Перед сдачей проекта директорию `dev_ui/` можно полностью
+удалить без влияния на preprocessing и production-модули.

@@ -61,6 +61,8 @@ data/processed/
 *.temp
 *.bak
 ~$*
+.tmp_tests/
+/tmp????????/
 
 # Operating system files
 .DS_Store

@@ -38,6 +38,18 @@ TASK_HEADER_MAPPING = {
 PLACEHOLDER_TASK_SUMMARY = "Unknown task"
 
 
+# Semantic aliases confirmed by the data audit. Do not extend this mapping with
+# fuzzy, case-insensitive, or inferred matches: role names are business data.
+ROLE_NAME_ALIASES = {
+    "ДевОпс": "ДевОпс",
+    "Девопс": "ДевОпс",
+    "Разработчик BigData": "Разработчик Big Data",
+    "Разработчик Big Data": "Разработчик Big Data",
+    "Разработчик iOS": "Разработчик iOS",
+    "Разработчик IOS": "Разработчик iOS",
+}
+
+
 @dataclass(frozen=True)
 class NormalizedDataset:
     tables: dict[str, list[dict[str, Any]]]
@@ -57,6 +69,23 @@ def clean_value(value: Any) -> Any:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return value
+
+
+def normalize_role_name(value: Any) -> str | None:
+    """Return a safely cleaned role name and one explicitly approved alias.
+
+    This intentionally does not casefold, translate, fuzzy-match, or otherwise
+    infer a semantic relation between roles. The source spelling belongs in
+    ``role_raw``; the returned value is the planner-facing canonical ``role``.
+    """
+
+    if value is None:
+        return None
+    text = str(value).replace("\u00a0", " ").replace("\u202f", " ").replace("\u2007", " ")
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return None
+    return ROLE_NAME_ALIASES.get(cleaned, cleaned)
 
 
 NUMBER_TEXT = re.compile(r"^-?\d+(?:[.,]\d+)?$")
@@ -114,10 +143,10 @@ def melt_effort(table: RawTable) -> tuple[list[dict[str, Any]], set[str], set[st
     records: list[dict[str, Any]] = []
     roles: set[str] = set()
     for row in table.rows:
-        role = clean_value(row[0] if row else None)
-        if is_blank(role):
+        role_raw = clean_value(row[0] if row else None)
+        role_text = normalize_role_name(role_raw)
+        if role_text is None:
             continue
-        role_text = str(role)
         roles.add(role_text)
         for column_index, task_id in enumerate(table.headers[1:], start=1):
             task_id = clean_value(task_id)
@@ -127,6 +156,7 @@ def melt_effort(table: RawTable) -> tuple[list[dict[str, Any]], set[str], set[st
             records.append(
                 {
                     "task_id": str(task_id),
+                    "role_raw": role_raw,
                     "role": role_text,
                     "required_hours": required_hours,
                 }
@@ -176,7 +206,8 @@ def normalize_engineers(table: RawTable) -> tuple[list[dict[str, Any]], list[dic
             {
                 "engineer_id": engineer_id,
                 "team_id": source.get("team_id"),
-                "role": source.get("role"),
+                "role_raw": source.get("role"),
+                "role": normalize_role_name(source.get("role")),
                 "grade": source.get("grade"),
                 "capacity_rate": coerce_number(source.get("capacity_rate")),
             }
