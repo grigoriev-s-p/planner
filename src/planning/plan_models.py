@@ -90,7 +90,9 @@ class EngineerTaskAllocation:
             "assigned_task_team_id": self.assigned_task_team_id,
             "source_team_id": self.source_team_id,
             "source_bucket_capacity_hours": self.source_bucket_capacity_hours,
+            "capacity_bucket_hours": self.source_bucket_capacity_hours,
             "capacity_share": self.capacity_share,
+            "capacity_used_share": self.capacity_share,
             "cross_team": self.cross_team,
         }
 
@@ -312,6 +314,9 @@ class TaskPlanResult:
         return self.source_rung
 
     def to_dict(self) -> dict[str, Any]:
+        from .explanations import build_task_explanation
+
+        explanation = build_task_explanation(self)
         return {
             "task_id": self.task_id,
             "initiative_id": self.initiative_id,
@@ -352,6 +357,7 @@ class TaskPlanResult:
             "capacity_sp_load": self.capacity_sp_load,
             "planned_completion_sp": self.planned_completion_sp,
             "completed_sp": self.completed_sp,
+            "explanation": explanation.to_dict(),
         }
 
 
@@ -452,6 +458,36 @@ class QuarterPlan:
     def available_story_points(self) -> float:
         return sum(sum(sprint.team_capacity_sp.values()) for sprint in self.sprints)
 
+    @property
+    def task_explanations(self):
+        """Structured, JSON-safe explanations built from committed plan facts."""
+
+        from .explanations import build_task_explanation
+
+        completions = {
+            item.task_id: item.completion_sprint
+            for item in self.task_results
+            if item.completion_sprint is not None
+        }
+        return tuple(
+            build_task_explanation(item, blocker_completion_sprints=completions)
+            for item in self.task_results
+        )
+
+    @property
+    def initiative_explanations(self):
+        from .explanations import build_initiative_explanations
+
+        return build_initiative_explanations(self.task_explanations)
+
+    @property
+    def explainability_summary(self):
+        from .explanations import build_plan_explanation_summary
+
+        return build_plan_explanation_summary(
+            self.task_explanations, self.initiative_explanations
+        )
+
     def summary(self) -> dict[str, Any]:
         return {
             "total_tasks": len(self.task_results),
@@ -480,4 +516,9 @@ class QuarterPlan:
             "summary": self.summary(),
             "quarter_start_date": self.quarter_start_date,
             "quarter_end_date": self.quarter_end_date,
+            "explanations": {
+                "tasks": [item.to_dict() for item in self.task_explanations],
+                "initiatives": [item.to_dict() for item in self.initiative_explanations],
+                "summary": self.explainability_summary.to_dict(),
+            },
         }

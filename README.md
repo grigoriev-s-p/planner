@@ -2,8 +2,8 @@
 
 Проект разбирает единый Excel-файл организаторов, нормализует его в CSV,
 проверяет качество данных и строит квартальный план на шесть двухнедельных
-спринтов. Временный интерфейс Streamlit показывает исходные данные, проверки
-выполнимости и рассчитанный план.
+спринтов. Product frontend работает через FastAPI и показывает реальный результат
+planner-а. Streamlit остаётся техническим интерфейсом для диагностики.
 
 ## Быстрый запуск
 
@@ -13,10 +13,10 @@
 python -m pip install -r requirements.txt
 python scripts/prepare_dataset.py
 python scripts/data_audit.py
-python -m streamlit run dev_ui/app.py
+python -m uvicorn src.web.api:app --reload
 ```
 
-После запуска интерфейс обычно доступен по адресу `http://localhost:8501`.
+Product frontend доступен по адресу `http://127.0.0.1:8000`.
 
 ## Структура проекта
 
@@ -28,6 +28,8 @@ python -m streamlit run dev_ui/app.py
 | `data/processed/` | Генерируемые CSV и manifest с хешами. Не коммитируется. |
 | `src/data/` | Поиск файла, parser Excel, нормализация и валидация. |
 | `src/planning/` | Feasibility checker, scoring, resource allocation и quarter planner. |
+| `src/web/` | FastAPI, загрузка processed snapshot и стабильные API DTO. |
+| `frontend/` | Product SPA из HTML, CSS и JavaScript без build pipeline. |
 | `dev_ui/` | Временный русскоязычный интерфейс Streamlit. |
 | `tests/` | Unit, integration и synthetic acceptance tests. |
 | `reports/` | Локальные отчёты data audit. |
@@ -97,13 +99,38 @@ Audit отделяет проблемы входных данных от обы�
 работу. Например, несовпадение `estimated_hh` и суммы role-hours — warning
 качества данных; дефицит часов инженера — причина решения planner-а.
 
-## Запуск интерфейса
+## Запуск product frontend и API
+
+После preprocessing запустите одну команду:
+
+```powershell
+python -m uvicorn src.web.api:app --reload
+```
+
+Откройте `http://127.0.0.1:8000`. FastAPI раздаёт статические файлы из
+`frontend/`, а browser получает данные через `/api/*`. Source of truth для
+статусов, SP, allocations, причин, рисков и рекомендаций — backend/planner.
+
+Основные endpoints:
+
+- `/api/dashboard`, `/api/plan`, `/api/summary`;
+- `/api/tasks`, `/api/tasks/{task_id}`, `/api/initiatives`;
+- `/api/risks`;
+- `/api/teams`, `/api/teams/{team_id}`;
+- `/api/engineers`, `/api/engineers/{engineer_id}`, `/api/star-map`.
+
+«Главная», «Планирование», «Задачи», «Риски» и «Звёздная карта» используют
+реальный processed dataset. «Пересчёт плана» остаётся интерфейсной заготовкой:
+выбранный файл не обрабатывается, потому что production replanning backend ещё
+не реализован. Bus Factor также явно помечен как не рассчитанный.
+
+## Запуск технического Streamlit UI
 
 ```powershell
 python -m streamlit run dev_ui/app.py
 ```
 
-Интерфейс читает CSV из `data/processed/`. На странице «Загрузка датасета»
+Streamlit читает CSV из `data/processed/`. На странице «Загрузка датасета»
 можно проверить загруженный Excel изолированно: файл обрабатывается во временном
 каталоге и не заменяет `data/raw/` или `data/processed/`.
 
@@ -188,11 +215,12 @@ Acceptance tests создают маленькие данные программ
 1. Поместить Excel в `data/raw/`.
 2. Запустить `python scripts/prepare_dataset.py`.
 3. Запустить `python scripts/data_audit.py` и прочитать отчёт из `reports/`.
-4. Открыть `python -m streamlit run dev_ui/app.py`.
-5. На странице «Качество данных» проверить warnings.
-6. На странице «Квартальный план» построить план и проверить задачи `MOVED`,
+4. Запустить `python -m uvicorn src.web.api:app --reload` и открыть product UI.
+5. При необходимости открыть `python -m streamlit run dev_ui/app.py`.
+6. На странице «Качество данных» проверить warnings.
+7. На странице «Квартальный план» построить план и проверить задачи `MOVED`,
    причины, cross-team allocations и рекомендации.
-7. Перед изменениями логики выполнить полный набор тестов.
+8. Перед изменениями логики выполнить полный набор тестов.
 
 ## Ограничения текущей версии
 
@@ -201,10 +229,13 @@ Acceptance tests создают маленькие данные программ
   `blocking_task_id → blocked_task_id`.
 - Dataset не содержит достаточной подтверждённой информации для автоматического
   вывода требуемых skills из названия задачи.
-- Интерфейс предназначен для разработки. Он не сохраняет рассчитанный план как
-  production-артефакт.
+- Текущий спринт в product API равен Sprint 1, пока нет факта replanning.
+- Replanning и Bus Factor пока не реализованы в backend и не имитируются
+  frontend-ом.
+- План рассчитывается и кэшируется при первом API-запросе; после пересборки CSV
+  перезапустите FastAPI.
 
 ```text
-http://localhost:8501
+http://127.0.0.1:8000
 ```
 

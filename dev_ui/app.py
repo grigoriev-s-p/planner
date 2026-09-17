@@ -869,6 +869,136 @@ def _reason_rows(reasons) -> list[dict]:
     return rows
 
 
+def _structured_reason_rows(explanations, allowed_codes: set[str] | None = None) -> list[dict]:
+    """Build a UI view from backend explanations without inferring decisions."""
+
+    return [
+        {
+            "task_id": explanation.task_id,
+            "initiative_id": explanation.initiative_id,
+            "assigned_team_id": explanation.assigned_team_id,
+            "code": reason.code.value,
+            "severity": reason.severity.value,
+            "title": reason.title,
+            "message": reason.message,
+            "details": reason.details,
+        }
+        for explanation in explanations
+        for reason in explanation.reasons
+        if allowed_codes is None or reason.code.value in allowed_codes
+    ]
+
+
+def _structured_recommendation_rows(explanations) -> list[dict]:
+    return [
+        {
+            "task_id": explanation.task_id,
+            "initiative_id": explanation.initiative_id,
+            "assigned_team_id": explanation.assigned_team_id,
+            "code": recommendation.code.value,
+            "title": recommendation.title,
+            "message": recommendation.message,
+            "available": recommendation.available,
+            "details": recommendation.details,
+        }
+        for explanation in explanations
+        for recommendation in explanation.recommendations
+    ]
+
+
+def _show_structured_rows(rows: list[dict], empty_message: str) -> None:
+    if rows:
+        show_dataframe(pd.DataFrame(rows))
+    else:
+        st.info(empty_message)
+
+
+def _render_plan_diagnostics(plan) -> None:
+    """Diagnostic UI backed only by the planner explainability contract."""
+
+    explanations = plan.task_explanations
+    initiatives = plan.initiative_explanations
+    summary = plan.explainability_summary
+    tab_names = (
+        "Обзор", "Весь план", "Закрываемые инициативы", "Несколько спринтов",
+        "Помощь других команд", "Переназначенные задачи", "Зависимости / задержки",
+        "Дефицит ресурсов", "Не помещаются в квартал", "Невыполнимые", "Рекомендации",
+    )
+    tabs = st.tabs(tab_names)
+    with tabs[0]:
+        metrics = (
+            ("Запланировано", summary.planned_tasks), ("Завершено", summary.done_tasks),
+            ("Закрыто инициатив", summary.completed_initiatives),
+            ("Несколько спринтов", summary.multi_sprint_tasks),
+            ("Помощь других команд", summary.cross_team_tasks),
+            ("Переназначено", summary.reassigned_tasks),
+            ("За пределами квартала", summary.quarter_overflow_tasks),
+            ("Невыполнимо", summary.unplannable_tasks),
+        )
+        for start in range(0, len(metrics), 4):
+            columns = st.columns(4)
+            for container, (label, value) in zip(columns, metrics[start : start + 4]):
+                container.metric(label, value)
+    with tabs[1]:
+        _show_structured_rows([
+            {"task_id": item.task_id, "initiative_id": item.initiative_id,
+             "status": item.status.value, "original_team_id": item.original_team_id,
+             "assigned_team_id": item.assigned_team_id, "planned_sprints": list(item.planned_sprints),
+             "completion_sprint": item.completion_sprint, "summary": item.summary}
+            for item in explanations
+        ], "В плане нет задач.")
+    with tabs[2]:
+        _show_structured_rows([
+            {"initiative_id": item.initiative_id, "task_count": item.task_count,
+             "planned_task_count": item.planned_task_count,
+             "completed_in_quarter": item.completed_in_quarter,
+             "completion_sprint": item.completion_sprint,
+             "selection_reasons": [reason.to_dict() for reason in item.selection_reasons]}
+            for item in initiatives
+        ], "Инициативы с задачами не найдены.")
+    with tabs[3]:
+        rows = [
+            {"task_id": item.task_id, "initiative_id": item.initiative_id,
+             "assigned_team_id": item.assigned_team_id, "total_hours": allocation["allocated_hours"],
+             "total_sp": item.task_story_points, "sprint": allocation["sprint"],
+             "hours_in_sprint": allocation["allocated_hours"],
+             "sp_in_sprint": allocation["capacity_sp_load"], "completion_sprint": item.completion_sprint}
+            for item in explanations if item.multi_sprint for allocation in item.allocations
+        ]
+        _show_structured_rows(rows, "Задач на несколько спринтов нет.")
+    with tabs[4]:
+        _show_structured_rows(_structured_reason_rows(explanations, {"CROSS_TEAM_HELP"}),
+                              "Помощь других команд не потребовалась.")
+    with tabs[5]:
+        _show_structured_rows([
+            {"task_id": item.task_id, "initiative_id": item.initiative_id,
+             "original_team_id": item.original_team_id, "assigned_team_id": item.assigned_team_id,
+             "completion_sprint": item.completion_sprint,
+             "reason": next((reason.message for reason in item.reasons if reason.code.value == "TEAM_REASSIGNED"), None)}
+            for item in explanations if item.team_reassigned
+        ], "Переназначенных задач нет.")
+    with tabs[6]:
+        _show_structured_rows(_structured_reason_rows(explanations, {"DEPENDENCY_DELAY"}),
+                              "Задержек из-за зависимостей нет.")
+    with tabs[7]:
+        _show_structured_rows(_structured_reason_rows(explanations, {
+            "INSUFFICIENT_SP_CAPACITY", "INSUFFICIENT_ROLE_CAPACITY",
+            "INSUFFICIENT_ENGINEER_CAPACITY", "INSUFFICIENT_SKILL_CAPACITY", "MISSING_SPECIALIST",
+        }), "Дефицитов ресурсов не найдено.")
+    with tabs[8]:
+        _show_structured_rows(_structured_reason_rows(explanations, {"QUARTER_OVERFLOW"}),
+                              "Задач за пределами квартала нет.")
+    with tabs[9]:
+        _show_structured_rows([
+            {"task_id": item.task_id, "initiative_id": item.initiative_id,
+             "summary": item.summary, "reasons": [reason.to_dict() for reason in item.reasons]}
+            for item in explanations if item.status.value == "UNPLANNABLE"
+        ], "Невыполнимых задач нет.")
+    with tabs[10]:
+        _show_structured_rows(_structured_recommendation_rows(explanations),
+                              "Рекомендаций для текущего плана нет.")
+
+
 def quarter_plan_page(tables: dict[str, pd.DataFrame]) -> None:
     st.header("Квартальный план")
     uploaded_audit = st.session_state.get("uploaded_audit")
@@ -926,6 +1056,10 @@ def quarter_plan_page(tables: dict[str, pd.DataFrame]) -> None:
         columns = st.columns(4)
         for container, (label, value) in zip(columns, metrics[start : start + 4]):
             container.metric(label, value)
+
+    st.subheader("Диагностика решений планировщика")
+    st.caption("Причины, риски и рекомендации подготовлены backend-планировщиком.")
+    _render_plan_diagnostics(plan)
 
     st.subheader("Задачи в квартальном плане")
     if plan.planned_tasks:

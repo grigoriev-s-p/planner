@@ -10,6 +10,15 @@ from .eligibility import (
 )
 from .feasibility import FeasibilityContext, FeasibilityService, check_task_feasibility
 from .models import FeasibilityResult, SprintState
+from .explanations import (
+    DecisionReason,
+    ExplanationStatus,
+    InitiativePlanningExplanation,
+    PlanExplanationSummary,
+    PlanningRisk,
+    TaskPlanningExplanation,
+    TaskRecommendation,
+)
 from .plan_models import (
     PlacementAttempt,
     PlacementOutcome,
@@ -32,6 +41,8 @@ from .scoring import (
 __all__ = [
     "BaselineQuarterPlanner",
     "EligibilityContext",
+    "DecisionReason",
+    "ExplanationStatus",
     "EligibilityReason",
     "EligibilityReport",
     "EligibilityResult",
@@ -42,6 +53,8 @@ __all__ = [
     "PlacementAttempt",
     "PlacementOutcome",
     "PlanStatus",
+    "PlanExplanationSummary",
+    "PlanningRisk",
     "PlanningRecommendation",
     "PlanningContext",
     "QuarterPlan",
@@ -51,6 +64,9 @@ __all__ = [
     "SprintPlan",
     "SprintState",
     "TaskPlanResult",
+    "TaskPlanningExplanation",
+    "TaskRecommendation",
+    "InitiativePlanningExplanation",
     "TaskScore",
     "build_quarter_plan",
     "calculate_task_score",
