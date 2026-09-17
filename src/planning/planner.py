@@ -558,6 +558,49 @@ class BaselineQuarterPlanner:
                 if not remaining:
                     break
 
+        # A task can exhaust the team SP budget before all of its role-hours
+        # are allocated. Record that concrete constraint for the result layer;
+        # the trial ledger is still discarded unless the whole task succeeds.
+        if (
+            remaining
+            and story_points is not None
+            and story_points > 0
+            and team_id is not None
+            and assigned_capacity_sp < story_points - 1e-9
+        ):
+            free_sp = sum(
+                max(
+                    trial_ledgers[sprint].team_capacity_sp.get(team_id, 0.0)
+                    - trial_ledgers[sprint].team_sp_used.get(team_id, 0.0),
+                    0.0,
+                )
+                for sprint in range(earliest_sprint, SPRINT_COUNT + 1)
+            )
+            sp_reason = FeasibilityReason(
+                ReasonCode.INSUFFICIENT_TEAM_CAPACITY,
+                {
+                    "team_id": team_id,
+                    "required_sp": story_points - assigned_capacity_sp,
+                    "available_sp": free_sp,
+                    "deficit_sp": max(story_points - assigned_capacity_sp - free_sp, 0.0),
+                    "attempted_sprint": SPRINT_COUNT,
+                },
+            )
+            # Preserve one placement attempt per tried sprint. This adds the
+            # SP bottleneck to the last trial rather than manufacturing an
+            # additional planner action only for explainability.
+            if attempts:
+                last = attempts[-1]
+                attempts[-1] = PlacementAttempt(
+                    last.sprint_number,
+                    last.outcome,
+                    allocated_hours=last.allocated_hours,
+                    capacity_sp_load=last.capacity_sp_load,
+                    planned_completion_sp=last.planned_completion_sp,
+                    completed_sp=last.completed_sp,
+                    reasons=last.reasons + (sp_reason,),
+                )
+
         can_distribute_sp = (
             not remaining
             and start_sprint is not None

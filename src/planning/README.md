@@ -84,6 +84,13 @@
 - **Reasons.** `final_reasons` объясняет итоговый статус. `placement_attempts`
   отдельно хранит отклонённые, подтверждённые и rollback-попытки со спринтом и
   reason codes. Совместимое свойство `reasons` возвращает только final decision.
+- **Structured explainability.** `QuarterPlan.to_dict()["explanations"]` —
+  JSON-совместимый контракт для API и UI. Он содержит task-level explanations
+  (статус `DONE` / `PLANNED` / `MOVED` / `UNPLANNABLE`, причины, риски,
+  рекомендации, назначения и SP-load по спринтам), summaries по инициативам и
+  агрегаты всего плана. Этот слой строится только по зафиксированному результату
+  planner-а: он не меняет scoring, feasibility или allocation. Legacy
+  `final_reasons` и `PlanningRecommendation` сохранены для совместимости.
 
 Ресурс команды рассчитывается через capacity layer как
 `mean(team_history.velocity_achieved) * 0.8`. Ресурс инженера для каждой команды —
