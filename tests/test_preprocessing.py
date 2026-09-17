@@ -13,7 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.prepare_dataset import run_preprocessing
-from src.data.normalization import melt_effort, normalize, split_skills
+from src.data.normalization import (
+    melt_effort,
+    normalize,
+    normalize_engineers,
+    normalize_role_name,
+    split_skills,
+)
 from src.data.parser import RawTable, parse_workbook
 from src.data.validation import dependency_reference_issues, validate, validate_capacity_rate
 
@@ -216,9 +222,18 @@ class NormalizationTests(unittest.TestCase):
         )
         rows, task_ids, roles = melt_effort(table)
         self.assertEqual(len(rows), 4)
-        self.assertIn({"task_id": "T-1", "role": "Аналитик", "required_hours": 8}, rows)
-        self.assertIn({"task_id": "T-2", "role": "Аналитик", "required_hours": 0}, rows)
-        self.assertIn({"task_id": "T-1", "role": "Тестировщик", "required_hours": None}, rows)
+        self.assertIn(
+            {"task_id": "T-1", "role_raw": "Аналитик", "role": "Аналитик", "required_hours": 8},
+            rows,
+        )
+        self.assertIn(
+            {"task_id": "T-2", "role_raw": "Аналитик", "role": "Аналитик", "required_hours": 0},
+            rows,
+        )
+        self.assertIn(
+            {"task_id": "T-1", "role_raw": "Тестировщик", "role": "Тестировщик", "required_hours": None},
+            rows,
+        )
         self.assertEqual(task_ids, {"T-1", "T-2"})
         self.assertEqual(roles, {"Аналитик", "Тестировщик"})
 
@@ -226,6 +241,65 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(
             split_skills("Python, CI/CD (GitLab, Jenkins); PostgreSQL"),
             ["Python", "CI/CD (GitLab, Jenkins)", "PostgreSQL"],
+        )
+
+
+class RoleNormalizationTests(unittest.TestCase):
+    def test_confirmed_aliases_have_canonical_forms(self) -> None:
+        self.assertEqual(normalize_role_name("ДевОпс"), "ДевОпс")
+        self.assertEqual(normalize_role_name("Девопс"), "ДевОпс")
+        self.assertEqual(normalize_role_name("Разработчик BigData"), "Разработчик Big Data")
+        self.assertEqual(normalize_role_name("Разработчик Big Data"), "Разработчик Big Data")
+        self.assertEqual(normalize_role_name("Разработчик iOS"), "Разработчик iOS")
+        self.assertEqual(normalize_role_name("Разработчик IOS"), "Разработчик iOS")
+
+    def test_role_whitespace_is_cleaned_before_alias_lookup(self) -> None:
+        self.assertEqual(normalize_role_name("\u00a0 Разработчик   BigData \u202f"), "Разработчик Big Data")
+
+    def test_unknown_role_is_not_semantically_changed(self) -> None:
+        self.assertEqual(normalize_role_name("Руководитель проекта"), "Руководитель проекта")
+        self.assertEqual(normalize_role_name("Руководитель  проекта"), "Руководитель проекта")
+
+    def test_effort_and_engineer_roles_use_the_same_canonical_field(self) -> None:
+        effort_table = RawTable(
+            name="effort",
+            marker_row=None,
+            header_row=1,
+            headers=["Роль", "T-1"],
+            rows=[["Разработчик BigData", 8]],
+        )
+        engineer_table = RawTable(
+            name="engineers",
+            marker_row=None,
+            header_row=1,
+            headers=["engineer_id", "team_id", "role", "grade", "skills_declared", "capacity_rate"],
+            rows=[["ENG-1", "Team-A", "Разработчик Big Data", "Middle", "", 1]],
+        )
+        effort_rows, _, _ = melt_effort(effort_table)
+        engineers, _ = normalize_engineers(engineer_table)
+        self.assertEqual(effort_rows[0]["role"], engineers[0]["role"])
+        self.assertEqual(effort_rows[0]["role"], "Разработчик Big Data")
+
+    def test_role_raw_preserves_source_spelling_while_role_is_canonical(self) -> None:
+        table = RawTable(
+            name="engineers",
+            marker_row=None,
+            header_row=1,
+            headers=["engineer_id", "team_id", "role", "grade", "skills_declared", "capacity_rate"],
+            rows=[["ENG-1", "Team-A", "Разработчик IOS", "Middle", "", 1]],
+        )
+        engineers, _ = normalize_engineers(table)
+        self.assertEqual(engineers[0]["role_raw"], "Разработчик IOS")
+        self.assertEqual(engineers[0]["role"], "Разработчик iOS")
+
+    def test_mapping_keeps_distinct_roles_distinct(self) -> None:
+        self.assertNotEqual(
+            normalize_role_name("Разработчик Big Data"),
+            normalize_role_name("Разработчик Java"),
+        )
+        self.assertNotEqual(
+            normalize_role_name("Руководитель проекта"),
+            normalize_role_name("Аналитик"),
         )
 
 

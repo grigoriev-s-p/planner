@@ -1,0 +1,1308 @@
+"""Deterministic score-driven atomic planner for a six-sprint quarter."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from .allocation import allocate_available_hours
+from .capacity import calculate_team_capacity
+from .eligibility import EligibilityContext, EligibilityResult, EligibilityService
+from .feasibility import FeasibilityContext, FeasibilityService
+from .models import FeasibilityReason
+from .plan_models import (
+    PlacementAttempt,
+    PlacementOutcome,
+    PlanStatus,
+    PlanningRecommendation,
+    QuarterPlan,
+    RecommendationType,
+    TaskAllocation,
+    TaskPlanResult,
+)
+from .planning_calendar import PlanningCalendar, shift_days, shift_direction
+from .reasons import ReasonCode
+from .scoring import (
+    PlanningContext,
+    ScoringConfig,
+    TaskScore,
+    calculate_task_score,
+    score_sort_key,
+)
+from .sprint_state import SprintLedger
+from .story_points import (
+    StoryPointDistribution,
+    distribute_capacity_sp_load,
+)
+
+
+SPRINT_COUNT = 6
+EXACT_INITIATIVE_SEARCH_LIMIT = 5
+PLANNABLE_SOURCE_STATUSES = {"todo", "inprogress"}
+COMPLETED_SOURCE_STATUS = "done"
+
+
+@dataclass(frozen=True)
+class _TaskSimulation:
+    assigned_team_id: str
+    success: bool
+    ledgers: dict[int, SprintLedger]
+    allocations: tuple[TaskAllocation, ...]
+    attempts: tuple[PlacementAttempt, ...]
+    remaining: dict[str, float]
+    start_sprint: int | None
+    completion_sprint: int | None
+    no_hours_warning: FeasibilityReason | None
+
+
+def _missing(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and math.isnan(value)) or (
+        isinstance(value, str) and not value.strip()
+    )
+
+
+def _text(value: Any) -> str | None:
+    return None if _missing(value) else str(value).strip()
+
+
+def _number(value: Any) -> float | None:
+    if _missing(value):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _boolean(value: Any) -> bool:
+    return value is True or str(value).strip().casefold() in {"true", "1", "yes"}
+
+
+def sort_tasks_for_planning(
+    tasks: Iterable[Mapping[str, Any]],
+    dependencies: Iterable[Mapping[str, Any]],
+    scoring_config: ScoringConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Return the score order assuming each selected task is then committed."""
+
+    task_rows = [dict(task) for task in tasks]
+    dependency_rows = [dict(row) for row in dependencies]
+    scoring_context = PlanningContext.from_records(task_rows, dependency_rows)
+    config = scoring_config or ScoringConfig()
+    candidates = {
+        task_id: dict(task)
+        for task in task_rows
+        if (task_id := _text(task.get("task_id")))
+        and not _boolean(task.get("is_placeholder"))
+        and (_text(task.get("status")) or "").casefold() in PLANNABLE_SOURCE_STATUSES
+    }
+    outgoing: dict[str, set[str]] = {task_id: set() for task_id in candidates}
+    indegree = {task_id: 0 for task_id in candidates}
+    for dependency in dependency_rows:
+        blocker = _text(dependency.get("blocking_task_id"))
+        blocked = _text(dependency.get("blocked_task_id"))
+        if blocker in candidates and blocked in candidates and blocked not in outgoing[blocker]:
+            outgoing[blocker].add(blocked)
+            indegree[blocked] += 1
+
+    ready = {task_id for task_id, degree in indegree.items() if degree == 0}
+    ordered: list[dict[str, Any]] = []
+    while ready:
+        scored = {
+            task_id: calculate_task_score(candidates[task_id], scoring_context, config)
+            for task_id in ready
+        }
+        task_id = min(
+            ready,
+            key=lambda candidate_id: score_sort_key(
+                candidates[candidate_id], scored[candidate_id]
+            ),
+        )
+        ready.remove(task_id)
+        ordered.append(candidates[task_id])
+        scoring_context = scoring_context.with_committed(task_id)
+        for dependent in sorted(outgoing[task_id]):
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                ready.add(dependent)
+
+    planned_ids = {_text(task.get("task_id")) for task in ordered}
+    unresolved = sorted(
+        (task for task_id, task in candidates.items() if task_id not in planned_ids),
+        key=lambda task: score_sort_key(
+            task, calculate_task_score(task, scoring_context, config)
+        ),
+    )
+    return ordered + unresolved
+
+
+def _deduplicate_reasons(reasons: Iterable[FeasibilityReason]) -> tuple[FeasibilityReason, ...]:
+    unique: list[FeasibilityReason] = []
+    seen: set[tuple[str, str]] = set()
+    for reason in reasons:
+        key = (reason.code.value, repr(sorted(reason.details.items())))
+        if key not in seen:
+            seen.add(key)
+            unique.append(reason)
+    return tuple(unique)
+
+
+class BaselineQuarterPlanner:
+    """Score-driven dependency-aware planner with atomic resource commits."""
+
+    def __init__(
+        self,
+        context: FeasibilityContext,
+        quarter_start_date: Any = None,
+        scoring_config: ScoringConfig | None = None,
+    ):
+        self.context = context
+        self.feasibility = FeasibilityService(context)
+        self.calendar = PlanningCalendar.from_value(quarter_start_date)
+        self.scoring_config = scoring_config or ScoringConfig()
+        self.tasks = {
+            task_id: dict(task)
+            for task in context.tasks
+            if (task_id := _text(task.get("task_id"))) is not None
+        }
+        self.eligibility = EligibilityService(
+            EligibilityContext.from_records(
+                task_role_effort=context.task_role_effort,
+                engineers=context.engineers,
+            )
+        )
+        self.eligibility_results = {
+            task_id: self.eligibility.check(task)
+            for task_id, task in self.tasks.items()
+        }
+        self.ineligible_task_ids = frozenset(
+            task_id
+            for task_id, task in self.tasks.items()
+            if not self.eligibility_results[task_id].eligible
+            and not _boolean(task.get("is_placeholder"))
+            and (_text(task.get("status")) or "").casefold() in PLANNABLE_SOURCE_STATUSES
+        )
+        self.scoring_context = PlanningContext.from_records(
+            context.tasks,
+            context.dependencies,
+            excluded_task_ids=self.ineligible_task_ids,
+        )
+        self.priority_order: dict[str, int] = {}
+        self.team_ids = tuple(
+            sorted(
+                {
+                    team_id
+                    for row in (*context.team_history, *context.engineers)
+                    if (team_id := _text(row.get("team_id"))) is not None
+                }
+            )
+        )
+        self._initiative_work = self._build_initiative_work()
+        self._primary_initiative_id: str | None = None
+
+    def _build_initiative_work(self) -> dict[str, tuple[float, float, float, str]]:
+        """Return deterministic initiative objective keys.
+
+        Smaller feasible initiatives are attempted first to maximize completed
+        initiative count. Rung is the secondary criterion and expected finish
+        (approximated by total required work) is tertiary.
+        """
+
+        members: dict[str, list[dict[str, Any]]] = {}
+        for task_id in self.scoring_context.eligible_task_ids:
+            task = self.tasks[task_id]
+            initiative_id = _text(task.get("initiative_id"))
+            if initiative_id in self.scoring_context.reliable_initiative_ids:
+                members.setdefault(initiative_id, []).append(task)
+        keys: dict[str, tuple[float, float, float, str]] = {}
+        for initiative_id, tasks in members.items():
+            total_sp = sum(max(_number(task.get("story_points")) or 0.0, 0.0) for task in tasks)
+            total_hours = sum(
+                sum(self.feasibility.task_role_requirements(_text(task.get("task_id")) or "").values())
+                for task in tasks
+            )
+            rung = max((_number(task.get("rung")) or 0.0 for task in tasks), default=0.0)
+            keys[initiative_id] = (total_sp, total_hours, -rung, initiative_id)
+        return keys
+
+    def _initiative_sort_key(self, task: Mapping[str, Any]) -> tuple[Any, ...]:
+        initiative_id = _text(task.get("initiative_id"))
+        if initiative_id in self._initiative_work:
+            return (0, *self._initiative_work[initiative_id])
+        return (1, math.inf, math.inf, 0.0, initiative_id or "")
+
+    def _task_result(
+        self,
+        task: Mapping[str, Any],
+        *,
+        status: PlanStatus,
+        start_sprint: int | None = None,
+        completion_sprint: int | None = None,
+        remaining_role_hours: dict[str, float] | None = None,
+        allocations: tuple[TaskAllocation, ...] = (),
+        dependencies: tuple[str, ...] = (),
+        final_reasons: tuple[FeasibilityReason, ...] = (),
+        placement_attempts: tuple[PlacementAttempt, ...] = (),
+        outside_quarter: bool = False,
+        task_score: TaskScore | None = None,
+        eligibility_result: EligibilityResult | None = None,
+        assigned_team_id: str | None = None,
+        team_assignment_reason: str | None = None,
+        recommendations: tuple[PlanningRecommendation, ...] = (),
+    ) -> TaskPlanResult:
+        task_id = _text(task.get("task_id")) or ""
+        score = task_score or calculate_task_score(
+            task, self.scoring_context, self.scoring_config
+        )
+        eligibility = eligibility_result or self.eligibility_results.get(
+            task_id, EligibilityResult(task_id=task_id, eligible=True)
+        )
+        baseline_start = _text(task.get("planned_start"))
+        baseline_end = _text(task.get("planned_end"))
+        forecast_start = (
+            self.calendar.sprint_start(start_sprint) if self.calendar and start_sprint else None
+        )
+        forecast_end = (
+            self.calendar.sprint_end(completion_sprint)
+            if self.calendar and completion_sprint and completion_sprint > 0
+            else None
+        )
+        start_shift = shift_days(forecast_start, baseline_start)
+        end_shift = shift_days(forecast_end, baseline_end)
+        original_team_id = _text(task.get("team_id"))
+        selected_team_id = assigned_team_id or original_team_id
+        return TaskPlanResult(
+            task_id=task_id,
+            initiative_id=_text(task.get("initiative_id")),
+            team_id=selected_team_id,
+            original_team_id=original_team_id,
+            assigned_team_id=selected_team_id,
+            team_reassigned=(
+                selected_team_id is not None and selected_team_id != original_team_id
+            ),
+            team_assignment_reason=team_assignment_reason,
+            story_points=_number(task.get("story_points")),
+            source_status=_text(task.get("status")),
+            source_rung=_number(task.get("rung")),
+            eligibility=eligibility,
+            score=score,
+            priority_order=self.priority_order.get(task_id),
+            status=status,
+            start_sprint=start_sprint,
+            completion_sprint=completion_sprint,
+            remaining_role_hours=remaining_role_hours or {},
+            allocations=allocations,
+            dependencies=dependencies,
+            final_reasons=final_reasons,
+            placement_attempts=placement_attempts,
+            baseline_start_date=baseline_start,
+            baseline_end_date=baseline_end,
+            forecast_start_date=forecast_start.isoformat() if forecast_start else None,
+            forecast_end_date=forecast_end.isoformat() if forecast_end else None,
+            start_shift_days=start_shift,
+            end_shift_days=end_shift,
+            start_shift_direction=shift_direction(start_shift),
+            end_shift_direction=shift_direction(end_shift),
+            outside_quarter=outside_quarter,
+            recommendations=recommendations,
+        )
+
+    def _incoming_blockers(self, task_id: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    blocker
+                    for row in self.feasibility.incoming_task_dependencies(task_id)
+                    if (blocker := _text(row.get("blocking_task_id"))) is not None
+                }
+            )
+        )
+
+    def _dependency_start(
+        self,
+        task_id: str,
+        results: dict[str, TaskPlanResult],
+        completed_tasks: dict[str, int],
+    ) -> tuple[int | None, tuple[FeasibilityReason, ...], tuple[str, ...]]:
+        blockers = self._incoming_blockers(task_id)
+        earliest = 1
+        reasons: list[FeasibilityReason] = []
+        for blocker in blockers:
+            if blocker in completed_tasks:
+                earliest = max(earliest, completed_tasks[blocker] + 1)
+                continue
+            blocker_result = results.get(blocker)
+            blocker_task = self.tasks.get(blocker)
+            details = {
+                "blocking_task_id": blocker,
+                "blocked_task_id": task_id,
+                "blocking_plan_status": blocker_result.status.value if blocker_result else None,
+                "blocking_is_placeholder": bool(
+                    blocker_task and _boolean(blocker_task.get("is_placeholder"))
+                ),
+            }
+            reasons.append(FeasibilityReason(ReasonCode.DEPENDENCY_NOT_COMPLETED, details))
+            diagnostic_code = (
+                ReasonCode.MISSING_DEPENDENCY_REFERENCE
+                if blocker_task is None
+                else ReasonCode.UNKNOWN_DEPENDENCY_DATE
+            )
+            reasons.append(FeasibilityReason(diagnostic_code, details))
+        return (None if reasons else earliest), tuple(reasons), blockers
+
+    @staticmethod
+    def _clone_ledgers(ledgers: dict[int, SprintLedger]) -> dict[int, SprintLedger]:
+        return {number: ledger.clone() for number, ledger in ledgers.items()}
+
+    @staticmethod
+    def _attempt_bottleneck_reasons(
+        attempts: Iterable[PlacementAttempt],
+    ) -> tuple[FeasibilityReason, ...]:
+        """Return one final resource reason per code from diagnostic attempts."""
+
+        by_code: dict[ReasonCode, FeasibilityReason] = {}
+        for attempt in attempts:
+            for reason in attempt.reasons:
+                if reason.code == ReasonCode.MULTI_SPRINT_REQUIRED:
+                    continue
+                by_code.setdefault(reason.code, reason)
+        return tuple(by_code[code] for code in sorted(by_code, key=lambda item: item.value))
+
+    def _simulate_task(
+        self,
+        task: Mapping[str, Any],
+        earliest_sprint: int,
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+        assigned_team_id: str,
+    ) -> tuple[
+        bool,
+        dict[int, SprintLedger],
+        tuple[TaskAllocation, ...],
+        tuple[PlacementAttempt, ...],
+        dict[str, float],
+        int | None,
+        int | None,
+        FeasibilityReason | None,
+    ]:
+        task_id = _text(task.get("task_id")) or ""
+        team_id = assigned_team_id
+        story_points = _number(task.get("story_points"))
+        original_requirements = self.feasibility.task_role_requirements(task_id)
+        remaining = dict(original_requirements)
+        total_required_hours = sum(original_requirements.values())
+        trial_ledgers = self._clone_ledgers(ledgers)
+        allocations: list[TaskAllocation] = []
+        attempts: list[PlacementAttempt] = []
+        start_sprint: int | None = None
+        completion_sprint: int | None = None
+        no_hours_warning = None
+        assigned_capacity_sp = 0.0
+        allocated_hours_total = 0.0
+
+        if story_points is not None and story_points > 0 and total_required_hours <= 0:
+            no_hours_warning = FeasibilityReason(
+                ReasonCode.STORY_POINTS_WITHOUT_HOURS,
+                {
+                    "task_id": task_id,
+                    "story_points": story_points,
+                    "fallback": "Distribute capacity SP load without inventing hours.",
+                },
+            )
+
+        if total_required_hours <= 0:
+            state = trial_ledgers[earliest_sprint].feasibility_state(completed_tasks)
+            feasibility = self.feasibility.check(
+                task_id,
+                state,
+                role_hours_override={},
+                story_points_override=0.0 if story_points is not None else None,
+                team_id_override=team_id,
+            )
+            if not feasibility.can_complete or team_id is None:
+                attempts.append(
+                    PlacementAttempt(
+                        earliest_sprint,
+                        PlacementOutcome.REJECTED,
+                        reasons=feasibility.reasons,
+                    )
+                )
+            else:
+                start_sprint = earliest_sprint
+        else:
+            for sprint_number in range(earliest_sprint, SPRINT_COUNT + 1):
+                ledger = trial_ledgers[sprint_number]
+                max_task_hours = float("inf")
+                available_sp = 0.0
+                sp_capacity_reason: FeasibilityReason | None = None
+                if (
+                    story_points is not None
+                    and story_points > 0
+                    and team_id is not None
+                ):
+                    available_sp = max(
+                        ledger.team_capacity_sp.get(team_id, 0.0)
+                        - ledger.team_sp_used.get(team_id, 0.0),
+                        0.0,
+                    )
+                    assignable_sp = min(
+                        available_sp,
+                        max(story_points - assigned_capacity_sp, 0.0),
+                    )
+                    max_task_hours = assignable_sp * total_required_hours / story_points
+                    if max_task_hours <= 1e-9:
+                        sp_capacity_reason = FeasibilityReason(
+                            ReasonCode.INSUFFICIENT_TEAM_CAPACITY,
+                            {
+                                "team_id": team_id,
+                                "required_sp": story_points - assigned_capacity_sp,
+                                "available_sp": available_sp,
+                            },
+                        )
+                state = ledger.feasibility_state(completed_tasks)
+                feasibility = self.feasibility.check(
+                    task_id,
+                    state,
+                    role_hours_override=remaining,
+                    story_points_override=0.0 if story_points is not None else None,
+                    team_id_override=team_id,
+                )
+                if not feasibility.can_start:
+                    attempts.append(
+                        PlacementAttempt(
+                            sprint_number,
+                            PlacementOutcome.REJECTED,
+                            reasons=feasibility.reasons
+                            + ((sp_capacity_reason,) if sp_capacity_reason else ()),
+                        )
+                    )
+                    continue
+                if sp_capacity_reason is not None:
+                    attempts.append(
+                        PlacementAttempt(
+                            sprint_number,
+                            PlacementOutcome.REJECTED,
+                            reasons=feasibility.reasons + (sp_capacity_reason,),
+                        )
+                    )
+                    continue
+
+                outcome = allocate_available_hours(
+                    remaining,
+                    feasibility,
+                    max_total_hours=max_task_hours,
+                )
+                if outcome.total_hours <= 1e-9:
+                    attempts.append(
+                        PlacementAttempt(
+                            sprint_number,
+                            PlacementOutcome.REJECTED,
+                            reasons=feasibility.reasons,
+                        )
+                    )
+                    continue
+
+                next_allocated_hours = allocated_hours_total + outcome.total_hours
+                capacity_sp_load = 0.0
+                if story_points is not None and story_points > 0:
+                    capacity_sp_load = (
+                        story_points * outcome.total_hours / total_required_hours
+                    )
+
+                next_remaining = dict(remaining)
+                for role, hours in outcome.allocated_role_hours.items():
+                    next_remaining[role] = max(
+                        next_remaining.get(role, 0.0) - hours, 0.0
+                    )
+                next_remaining = {
+                    role: hours
+                    for role, hours in next_remaining.items()
+                    if hours > 1e-9
+                }
+                if not next_remaining and story_points is not None:
+                    # Absorb only floating-point residue in the completion sprint.
+                    capacity_sp_load = max(
+                        story_points - assigned_capacity_sp,
+                        0.0,
+                    )
+                allocation = TaskAllocation(
+                    task_id=task_id,
+                    sprint_number=sprint_number,
+                    allocated_role_hours=dict(outcome.allocated_role_hours),
+                    engineer_allocations=outcome.engineer_allocations,
+                    task_story_points=story_points or 0.0,
+                    capacity_sp_load=capacity_sp_load,
+                    planned_completion_sp=0.0,
+                    completed_sp=0.0,
+                    is_started=start_sprint is None,
+                    is_completed=False,
+                    check_reasons=feasibility.reasons,
+                )
+                allocations.append(allocation)
+                attempts.append(
+                    PlacementAttempt(
+                        sprint_number,
+                        PlacementOutcome.TENTATIVE,
+                        allocated_hours=outcome.total_hours,
+                        reasons=feasibility.reasons,
+                    )
+                )
+                if start_sprint is None:
+                    start_sprint = sprint_number
+                assigned_capacity_sp += capacity_sp_load
+                allocated_hours_total = next_allocated_hours
+                remaining = next_remaining
+                if not remaining:
+                    break
+
+        can_distribute_sp = (
+            not remaining
+            and start_sprint is not None
+            and team_id is not None
+            and story_points is not None
+        )
+        distribution = None
+        if can_distribute_sp:
+            if total_required_hours > 0:
+                distribution = StoryPointDistribution(
+                    capacity_sp_load={
+                        allocation.sprint_number: allocation.capacity_sp_load
+                        for allocation in allocations
+                    },
+                    remaining_sp=max(story_points - assigned_capacity_sp, 0.0),
+                )
+            else:
+                available_sp = {
+                    sprint: max(
+                        trial_ledgers[sprint].team_capacity_sp.get(team_id, 0.0)
+                        - trial_ledgers[sprint].team_sp_used.get(team_id, 0.0),
+                        0.0,
+                    )
+                    for sprint in range(start_sprint, SPRINT_COUNT + 1)
+                }
+                try:
+                    distribution = distribute_capacity_sp_load(
+                        task_story_points=story_points,
+                        active_sprint_hours={start_sprint: 0.0},
+                        available_sp_by_sprint=available_sp,
+                        last_sprint=SPRINT_COUNT,
+                    )
+                except ValueError as error:
+                    attempts.append(
+                        PlacementAttempt(
+                            start_sprint,
+                            PlacementOutcome.REJECTED,
+                            reasons=(
+                                FeasibilityReason(
+                                    ReasonCode.UNKNOWN_TASK_DATA,
+                                    {"task_id": task_id, "message": str(error)},
+                                ),
+                            ),
+                        )
+                    )
+
+            if distribution is not None and distribution.remaining_sp > 1e-9:
+                free_sp = sum(
+                    max(
+                        trial_ledgers[sprint].team_capacity_sp.get(team_id, 0.0)
+                        - trial_ledgers[sprint].team_sp_used.get(team_id, 0.0),
+                        0.0,
+                    )
+                    for sprint in range(start_sprint, SPRINT_COUNT + 1)
+                )
+                attempts.append(
+                    PlacementAttempt(
+                        SPRINT_COUNT,
+                        PlacementOutcome.REJECTED,
+                        reasons=(
+                            FeasibilityReason(
+                                ReasonCode.INSUFFICIENT_TEAM_CAPACITY,
+                                {
+                                    "team_id": team_id,
+                                    "required_sp": story_points,
+                                    "available_sp": free_sp,
+                                    "deficit_sp": distribution.remaining_sp,
+                                },
+                            ),
+                        ),
+                    )
+                )
+
+        success = bool(
+            distribution is not None and distribution.remaining_sp <= 1e-9
+        )
+        if success and distribution is not None and team_id is not None and story_points is not None:
+            provisional = {item.sprint_number: item for item in allocations}
+            active_sprints = sorted(
+                set(provisional)
+                | {
+                    sprint
+                    for sprint, load in distribution.capacity_sp_load.items()
+                    if load > 0
+                }
+            )
+            if not active_sprints:
+                active_sprints = [start_sprint or earliest_sprint]
+            start_sprint = min(active_sprints)
+            completion_sprint = max(active_sprints)
+            finalized_allocations: list[TaskAllocation] = []
+            attempts_by_sprint = {
+                attempt.sprint_number: attempt
+                for attempt in attempts
+                if attempt.outcome == PlacementOutcome.TENTATIVE
+            }
+            for sprint_number in active_sprints:
+                previous = provisional.get(sprint_number)
+                load = distribution.capacity_sp_load.get(sprint_number, 0)
+                completes_now = sprint_number == completion_sprint
+                allocation = TaskAllocation(
+                    task_id=task_id,
+                    sprint_number=sprint_number,
+                    allocated_role_hours=(
+                        dict(previous.allocated_role_hours) if previous else {}
+                    ),
+                    engineer_allocations=(
+                        previous.engineer_allocations if previous else ()
+                    ),
+                    task_story_points=story_points,
+                    capacity_sp_load=load,
+                    planned_completion_sp=(story_points if completes_now else 0.0),
+                    completed_sp=0.0,
+                    is_started=sprint_number == start_sprint,
+                    is_completed=completes_now,
+                    check_reasons=(previous.check_reasons if previous else ()),
+                )
+                trial_ledgers[sprint_number].add_allocation(team_id, allocation)
+                finalized_allocations.append(allocation)
+                previous_attempt = attempts_by_sprint.get(sprint_number)
+                updated_attempt = PlacementAttempt(
+                    sprint_number,
+                    PlacementOutcome.TENTATIVE,
+                    allocated_hours=allocation.allocated_hours,
+                    capacity_sp_load=load,
+                    planned_completion_sp=allocation.planned_completion_sp,
+                    completed_sp=allocation.completed_sp,
+                    reasons=(previous_attempt.reasons if previous_attempt else ()),
+                )
+                if previous_attempt is None:
+                    attempts.append(updated_attempt)
+                else:
+                    attempts[attempts.index(previous_attempt)] = updated_attempt
+            allocations = finalized_allocations
+
+        final_outcome = PlacementOutcome.COMMITTED if success else PlacementOutcome.ROLLED_BACK
+        finalized_attempts = tuple(
+            attempt.with_outcome(final_outcome)
+            if attempt.outcome == PlacementOutcome.TENTATIVE
+            else attempt
+            for attempt in attempts
+        )
+        return (
+            success,
+            trial_ledgers,
+            tuple(allocations),
+            finalized_attempts,
+            remaining,
+            start_sprint,
+            completion_sprint,
+            no_hours_warning,
+        )
+
+    def _select_team_assignment(
+        self,
+        task: Mapping[str, Any],
+        earliest_sprint: int,
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+    ) -> tuple[_TaskSimulation, str | None, _TaskSimulation | None]:
+        """Simulate existing teams and prefer the source team on equal finish."""
+
+        original_team_id = _text(task.get("team_id"))
+        candidate_team_ids = list(self.team_ids)
+        if original_team_id in candidate_team_ids:
+            candidate_team_ids.remove(original_team_id)
+            candidate_team_ids.insert(0, original_team_id)
+        if not candidate_team_ids:
+            candidate_team_ids = [original_team_id or ""]
+        simulations: list[_TaskSimulation] = []
+        for team_id in candidate_team_ids:
+            simulation = self._simulate_task(
+                task,
+                earliest_sprint,
+                ledgers,
+                completed_tasks,
+                team_id,
+            )
+            simulations.append(_TaskSimulation(team_id, *simulation))
+
+        original = next(
+            (
+                simulation
+                for simulation in simulations
+                if simulation.assigned_team_id == original_team_id
+            ),
+            None,
+        )
+        successful = [simulation for simulation in simulations if simulation.success]
+        if successful:
+            chosen = min(
+                successful,
+                key=lambda simulation: (
+                    simulation.completion_sprint or SPRINT_COUNT + 1,
+                    simulation.start_sprint or SPRINT_COUNT + 1,
+                    0 if simulation.assigned_team_id == original_team_id else 1,
+                    simulation.assigned_team_id,
+                ),
+            )
+        else:
+            chosen = original or simulations[0]
+
+        assignment_reason = None
+        if chosen.assigned_team_id != original_team_id:
+            if original is None or not original.success:
+                assignment_reason = "ORIGINAL_TEAM_INFEASIBLE"
+            else:
+                assignment_reason = "EARLIER_COMPLETION_WITH_EXISTING_TEAM"
+        return chosen, assignment_reason, original
+
+    def _simulate_complete_initiative(
+        self,
+        initiative_id: str,
+        pending: Mapping[str, Mapping[str, Any]],
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+        results: dict[str, TaskPlanResult],
+    ) -> tuple[bool, dict[int, SprintLedger], dict[str, int]]:
+        """Preflight all remaining tasks without committing partial initiative work."""
+
+        remaining = {
+            task_id: dict(task)
+            for task_id, task in pending.items()
+            if _text(task.get("initiative_id")) == initiative_id
+        }
+        trial_ledgers = self._clone_ledgers(ledgers)
+        trial_completed = dict(completed_tasks)
+        while remaining:
+            ready = [
+                task_id
+                for task_id in remaining
+                if not set(self._incoming_blockers(task_id)).intersection(remaining)
+            ]
+            if not ready:
+                return False, ledgers, completed_tasks
+            scored = {
+                task_id: calculate_task_score(
+                    remaining[task_id], self.scoring_context, self.scoring_config
+                )
+                for task_id in ready
+            }
+            task_id = min(
+                ready,
+                key=lambda candidate_id: score_sort_key(
+                    remaining[candidate_id], scored[candidate_id]
+                ),
+            )
+            task = remaining.pop(task_id)
+            earliest, dependency_reasons, _ = self._dependency_start(
+                task_id, results, trial_completed
+            )
+            if earliest is None or dependency_reasons or earliest > SPRINT_COUNT:
+                return False, ledgers, completed_tasks
+            chosen, _, _ = self._select_team_assignment(
+                task, earliest, trial_ledgers, trial_completed
+            )
+            if not chosen.success or chosen.completion_sprint is None:
+                return False, ledgers, completed_tasks
+            trial_ledgers = chosen.ledgers
+            trial_completed[task_id] = chosen.completion_sprint
+        return True, trial_ledgers, trial_completed
+
+    def _can_complete_initiative(
+        self,
+        initiative_id: str,
+        pending: Mapping[str, Mapping[str, Any]],
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+        results: dict[str, TaskPlanResult],
+    ) -> bool:
+        return self._simulate_complete_initiative(
+            initiative_id, pending, ledgers, completed_tasks, results
+        )[0]
+
+    def _primary_initiative_choice(
+        self,
+        pending: Mapping[str, Mapping[str, Any]],
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+        results: dict[str, TaskPlanResult],
+    ) -> str | None:
+        """Choose a first initiative that maximizes complete initiatives.
+
+        The bounded exhaustive search is used only for the small number of
+        reliable initiatives normally considered in a quarterly plan. It keeps
+        resource and dependency simulation authoritative instead of treating
+        task count, SP, or hours as the primary objective.
+        """
+
+        initiative_ids = tuple(sorted({
+            _text(task.get("initiative_id"))
+            for task in pending.values()
+            if _text(task.get("initiative_id")) in self._initiative_work
+        }))
+        if not initiative_ids or len(initiative_ids) > EXACT_INITIATIVE_SEARCH_LIMIT:
+            return None
+
+        def search(
+            remaining: Mapping[str, Mapping[str, Any]],
+            state: dict[int, SprintLedger],
+            completed: dict[str, int],
+        ) -> tuple[int, tuple[float, ...], tuple[str, ...]]:
+            candidates = sorted({
+                _text(task.get("initiative_id"))
+                for task in remaining.values()
+                if _text(task.get("initiative_id")) in self._initiative_work
+            })
+            best = (0, (), ())
+            for initiative_id in candidates:
+                success, next_state, next_completed = self._simulate_complete_initiative(
+                    initiative_id, remaining, state, completed, results
+                )
+                if not success:
+                    continue
+                next_remaining = {
+                    task_id: task
+                    for task_id, task in remaining.items()
+                    if _text(task.get("initiative_id")) != initiative_id
+                }
+                count, rungs, order = search(next_remaining, next_state, next_completed)
+                # Initiative work stores negative rung so lexical ordering keeps
+                # the higher business priority first when counts are equal.
+                initiative_rung = self._initiative_work[initiative_id][2]
+                candidate = (count + 1, (initiative_rung, *rungs), (initiative_id, *order))
+                if candidate[0] > best[0] or (
+                    candidate[0] == best[0] and candidate[1:] < best[1:]
+                ):
+                    best = candidate
+            return best
+
+        _, _, order = search(pending, ledgers, completed_tasks)
+        return order[0] if order else None
+
+    def plan(self) -> QuarterPlan:
+        team_ids = list(self.team_ids)
+        team_capacities = {
+            team_id: calculate_team_capacity(team_id, self.context.team_history).capacity_sp
+            for team_id in team_ids
+        }
+        ledgers = {
+            sprint: SprintLedger(sprint, dict(team_capacities))
+            for sprint in range(1, SPRINT_COUNT + 1)
+        }
+        completed_tasks: dict[str, int] = {}
+        results: dict[str, TaskPlanResult] = {}
+        quarter_warnings: list[FeasibilityReason] = []
+
+        for task_id, task in sorted(self.tasks.items()):
+            if _boolean(task.get("is_placeholder")):
+                reason = FeasibilityReason(
+                    ReasonCode.UNKNOWN_TASK_DATA,
+                    {"task_id": task_id, "is_placeholder": True},
+                )
+                results[task_id] = self._task_result(
+                    task, status=PlanStatus.UNKNOWN, final_reasons=(reason,)
+                )
+                quarter_warnings.append(reason)
+            elif (_text(task.get("status")) or "").casefold() == COMPLETED_SOURCE_STATUS:
+                completed_tasks[task_id] = 0
+                results[task_id] = self._task_result(
+                    task,
+                    status=PlanStatus.COMPLETED,
+                    completion_sprint=0,
+                    final_reasons=(
+                        FeasibilityReason(
+                            ReasonCode.ALREADY_COMPLETED,
+                            {"task_id": task_id, "completed_before_quarter": True},
+                        ),
+                    ),
+                )
+            elif task_id in self.ineligible_task_ids:
+                eligibility = self.eligibility_results[task_id]
+                reasons = tuple(
+                    FeasibilityReason(
+                        reason.code,
+                        {
+                            "task_id": task_id,
+                            "role": reason.role,
+                            "required_hours": reason.required_hours,
+                            "available_specialists": reason.available_specialists,
+                        },
+                    )
+                    for reason in eligibility.reasons
+                )
+                results[task_id] = self._task_result(
+                    task,
+                    status=PlanStatus.INELIGIBLE_DATA_CONSTRAINT,
+                    remaining_role_hours=self.feasibility.task_role_requirements(task_id),
+                    final_reasons=reasons,
+                    eligibility_result=eligibility,
+                )
+                quarter_warnings.extend(reasons)
+
+        candidates = {
+            task_id: task
+            for task_id, task in self.tasks.items()
+            if task_id in self.scoring_context.eligible_task_ids
+        }
+        pending = dict(candidates)
+        pending_blockers: dict[str, set[str]] = {
+            task_id: set() for task_id in candidates
+        }
+        for dependency in self.context.dependencies:
+            blocker = _text(dependency.get("blocking_task_id"))
+            blocked = _text(dependency.get("blocked_task_id"))
+            if blocker in candidates and blocked in candidates:
+                pending_blockers[blocked].add(blocker)
+
+        while pending:
+            ready_ids = [
+                task_id
+                for task_id in pending
+                if not pending_blockers[task_id].intersection(pending)
+            ]
+            # Cycles are invalid input, but selecting deterministically lets the
+            # existing dependency checks reject them without hanging the planner.
+            selectable_ids = ready_ids or list(pending)
+            selectable_initiatives = {
+                initiative_id
+                for task_id in selectable_ids
+                if (
+                    initiative_id := _text(
+                        pending[task_id].get("initiative_id")
+                    )
+                )
+                in self._initiative_work
+            }
+            completable_initiatives = {
+                initiative_id
+                for initiative_id in selectable_initiatives
+                if self._can_complete_initiative(
+                    initiative_id,
+                    pending,
+                    ledgers,
+                    completed_tasks,
+                    results,
+                )
+            }
+            if completable_initiatives:
+                selectable_ids = [
+                    task_id
+                    for task_id in selectable_ids
+                    if _text(pending[task_id].get("initiative_id"))
+                    in completable_initiatives
+                ]
+            primary_initiative = self._primary_initiative_id
+            if not any(
+                _text(task.get("initiative_id")) == primary_initiative
+                for task in pending.values()
+            ):
+                primary_initiative = self._primary_initiative_choice(
+                    pending, ledgers, completed_tasks, results
+                )
+                self._primary_initiative_id = primary_initiative
+            if primary_initiative:
+                primary_tasks = [
+                    task_id
+                    for task_id in selectable_ids
+                    if _text(pending[task_id].get("initiative_id")) == primary_initiative
+                ]
+                if primary_tasks:
+                    selectable_ids = primary_tasks
+            scored = {
+                task_id: calculate_task_score(
+                    pending[task_id], self.scoring_context, self.scoring_config
+                )
+                for task_id in selectable_ids
+            }
+            task_id = min(
+                selectable_ids,
+                key=lambda candidate_id: (
+                    self._initiative_sort_key(pending[candidate_id]),
+                    score_sort_key(pending[candidate_id], scored[candidate_id]),
+                ),
+            )
+            task = pending.pop(task_id)
+            task_score = scored[task_id]
+            self.priority_order[task_id] = len(self.priority_order) + 1
+            earliest, dependency_reasons, blockers = self._dependency_start(
+                task_id, results, completed_tasks
+            )
+            if earliest is None or earliest > SPRINT_COUNT:
+                final_reasons = list(dependency_reasons)
+                outside_quarter = earliest is not None and earliest > SPRINT_COUNT
+                if outside_quarter:
+                    final_reasons.append(
+                        FeasibilityReason(
+                            ReasonCode.OUTSIDE_QUARTER,
+                            {
+                                "task_id": task_id,
+                                "forecast_start_sprint": earliest,
+                                "forecast_completion_sprint_minimum": earliest,
+                                "last_sprint": SPRINT_COUNT,
+                                "blocking_task_ids": list(blockers),
+                                "resources_committed": False,
+                            },
+                        )
+                    )
+                final_reason_tuple = _deduplicate_reasons(final_reasons)
+                results[task_id] = self._task_result(
+                    task,
+                    status=PlanStatus.MOVED,
+                    remaining_role_hours=self.feasibility.task_role_requirements(task_id),
+                    dependencies=blockers,
+                    final_reasons=final_reason_tuple,
+                    outside_quarter=outside_quarter,
+                    task_score=task_score,
+                    recommendations=(
+                        (
+                            PlanningRecommendation(
+                                RecommendationType.REASSIGN_TO_EXISTING_TEAM,
+                                False,
+                                "A team change cannot resolve the current dependency constraint.",
+                            ),
+                            PlanningRecommendation(
+                                RecommendationType.MOVE_TO_NEXT_QUARTER,
+                                True,
+                                "The earliest dependency-based forecast is beyond Sprint 6.",
+                            ),
+                        )
+                        if outside_quarter
+                        else ()
+                    ),
+                )
+                quarter_warnings.extend(final_reason_tuple)
+                continue
+
+            chosen, team_assignment_reason, original_simulation = (
+                self._select_team_assignment(
+                    task, earliest, ledgers, completed_tasks
+                )
+            )
+            success = chosen.success
+            trial_ledgers = chosen.ledgers
+            allocations = chosen.allocations
+            attempts = chosen.attempts
+            simulated_remaining = chosen.remaining
+            simulated_start = chosen.start_sprint
+            completion_sprint = chosen.completion_sprint
+            no_hours_warning = chosen.no_hours_warning
+
+            if success and completion_sprint is not None:
+                ledgers = trial_ledgers
+                completed_tasks[task_id] = completion_sprint
+                self.scoring_context = self.scoring_context.with_committed(task_id)
+                final_reasons: list[FeasibilityReason] = [
+                    FeasibilityReason(
+                        ReasonCode.PLANNED_IN_QUARTER,
+                        {
+                            "task_id": task_id,
+                            "start_sprint": simulated_start,
+                            "completion_sprint": completion_sprint,
+                            "priority_order": self.priority_order.get(task_id),
+                            "checked_constraints": [
+                                "team_sp",
+                                "roles",
+                                "engineer_hours",
+                                "dependencies",
+                                "quarter_horizon",
+                            ],
+                            "dependency_completion_sprints": {
+                                blocker: completed_tasks.get(blocker) for blocker in blockers
+                            },
+                        },
+                    )
+                ]
+                if len(allocations) > 1:
+                    final_reasons.append(
+                        FeasibilityReason(
+                            ReasonCode.MULTI_SPRINT_REQUIRED,
+                            {
+                                "task_id": task_id,
+                                "start_sprint": simulated_start,
+                                "completion_sprint": completion_sprint,
+                                "sprint_count": len(allocations),
+                                "total_required_hours": sum(
+                                    allocation.allocated_hours for allocation in allocations
+                                ),
+                                "source_story_points": _number(task.get("story_points")),
+                                "allocations": [
+                                    {
+                                        "sprint_number": allocation.sprint_number,
+                                        "allocated_hours": allocation.allocated_hours,
+                                        "capacity_sp_load": allocation.capacity_sp_load,
+                                        "planned_completion_sp": allocation.planned_completion_sp,
+                                        "completed_sp": allocation.completed_sp,
+                                    }
+                                    for allocation in allocations
+                                ],
+                            },
+                        )
+                    )
+                if no_hours_warning:
+                    final_reasons.append(no_hours_warning)
+                    quarter_warnings.append(no_hours_warning)
+                if team_assignment_reason:
+                    original_reason_codes = sorted(
+                        {
+                            reason.code.value
+                            for attempt in (
+                                original_simulation.attempts
+                                if original_simulation is not None
+                                else ()
+                            )
+                            for reason in attempt.reasons
+                        }
+                    )
+                    final_reasons.append(
+                        FeasibilityReason(
+                            ReasonCode.TEAM_REASSIGNED,
+                            {
+                                "task_id": task_id,
+                                "original_team_id": _text(task.get("team_id")),
+                                "assigned_team_id": chosen.assigned_team_id,
+                                "reason": team_assignment_reason,
+                                "original_team_reason_codes": original_reason_codes,
+                                "assigned_completion_sprint": completion_sprint,
+                                "original_completion_sprint": (
+                                    original_simulation.completion_sprint
+                                    if original_simulation is not None
+                                    else None
+                                ),
+                            },
+                        )
+                    )
+                results[task_id] = self._task_result(
+                    task,
+                    status=PlanStatus.PLANNED,
+                    start_sprint=simulated_start,
+                    completion_sprint=completion_sprint,
+                    allocations=allocations,
+                    dependencies=blockers,
+                    final_reasons=tuple(final_reasons),
+                    placement_attempts=attempts,
+                    task_score=task_score,
+                    assigned_team_id=chosen.assigned_team_id,
+                    team_assignment_reason=team_assignment_reason,
+                    recommendations=(
+                        (
+                            PlanningRecommendation(
+                                RecommendationType.REASSIGN_TO_EXISTING_TEAM,
+                                True,
+                                "Reassignment to an existing team makes the task feasible in the quarter.",
+                                target_team_id=chosen.assigned_team_id,
+                            ),
+                        )
+                        if team_assignment_reason
+                        else ()
+                    ),
+                )
+                continue
+
+            rolled_back_hours = sum(
+                attempt.allocated_hours
+                for attempt in attempts
+                if attempt.outcome == PlacementOutcome.ROLLED_BACK
+            )
+            rolled_back_sp = sum(
+                attempt.capacity_sp_load
+                for attempt in attempts
+                if attempt.outcome == PlacementOutcome.ROLLED_BACK
+            )
+            final_reasons = []
+            if rolled_back_hours > 0 or rolled_back_sp > 0:
+                final_reasons.append(
+                    FeasibilityReason(
+                        ReasonCode.ALLOCATION_ROLLED_BACK,
+                        {
+                            "task_id": task_id,
+                            "simulated_start_sprint": simulated_start,
+                            "rolled_back_hours": rolled_back_hours,
+                            "rolled_back_capacity_sp_load": rolled_back_sp,
+                            "rolled_back_completed_sp": 0,
+                        },
+                    )
+                )
+            final_reasons.extend(self._attempt_bottleneck_reasons(attempts))
+            if no_hours_warning:
+                final_reasons.append(no_hours_warning)
+                quarter_warnings.append(no_hours_warning)
+            results[task_id] = self._task_result(
+                task,
+                status=PlanStatus.MOVED,
+                remaining_role_hours=self.feasibility.task_role_requirements(task_id),
+                dependencies=blockers,
+                final_reasons=tuple(final_reasons),
+                placement_attempts=attempts,
+                outside_quarter=False,
+                task_score=task_score,
+                assigned_team_id=chosen.assigned_team_id,
+                recommendations=(
+                    PlanningRecommendation(
+                        RecommendationType.REASSIGN_TO_EXISTING_TEAM,
+                        False,
+                        "No existing team can complete the task within the current quarter.",
+                    ),
+                    PlanningRecommendation(
+                        RecommendationType.MOVE_TO_NEXT_QUARTER,
+                        True,
+                        "Move the uncommitted task to the next quarter for replanning.",
+                    ),
+                ),
+            )
+            quarter_warnings.extend(final_reasons)
+
+        for task_id, task in sorted(self.tasks.items()):
+            if task_id in results:
+                continue
+            reason = FeasibilityReason(
+                ReasonCode.UNSUPPORTED_TASK_STATUS,
+                {
+                    "task_id": task_id,
+                    "message": "Source status is not handled by the quarterly planner.",
+                    "source_status": _text(task.get("status")),
+                    "resources_committed": False,
+                },
+            )
+            results[task_id] = self._task_result(
+                task,
+                status=PlanStatus.MOVED,
+                final_reasons=(reason,),
+                outside_quarter=False,
+            )
+            quarter_warnings.append(reason)
+
+        return QuarterPlan(
+            sprints=tuple(ledgers[number].freeze() for number in range(1, SPRINT_COUNT + 1)),
+            task_results=tuple(results[task_id] for task_id in sorted(results)),
+            warnings=_deduplicate_reasons(quarter_warnings),
+            quarter_start_date=(
+                self.calendar.quarter_start.isoformat() if self.calendar else None
+            ),
+            quarter_end_date=self.calendar.quarter_end.isoformat() if self.calendar else None,
+        )
+
+
+def build_quarter_plan(
+    context: FeasibilityContext,
+    quarter_start_date: Any = None,
+    scoring_config: ScoringConfig | None = None,
+) -> QuarterPlan:
+    """Build the scored plan; resource state and atomic rollback are automatic."""
+
+    return BaselineQuarterPlanner(
+        context,
+        quarter_start_date=quarter_start_date,
+        scoring_config=scoring_config,
+    ).plan()

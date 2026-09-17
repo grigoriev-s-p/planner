@@ -27,6 +27,39 @@ TABLE_FILES = {
 }
 
 
+def count_unique_engineers(frame: pd.DataFrame | None) -> int:
+    """Count people once even when an engineer has several profile rows."""
+
+    if frame is None or "engineer_id" not in frame.columns:
+        return 0
+    identifiers = frame["engineer_id"].dropna().astype(str).str.strip()
+    return int(identifiers[identifiers.ne("")].nunique())
+
+
+def unique_engineer_counts(
+    frame: pd.DataFrame | None,
+    group_column: str,
+    *,
+    label: str,
+) -> pd.Series:
+    """Count unique engineer IDs inside a role, team, or another UI group."""
+
+    if frame is None or not {"engineer_id", group_column}.issubset(frame.columns):
+        return pd.Series(dtype="int64", name=label)
+    values = frame[["engineer_id", group_column]].dropna().copy()
+    values = values[
+        values["engineer_id"].astype(str).str.strip().ne("")
+        & values[group_column].astype(str).str.strip().ne("")
+    ]
+    return (
+        values.drop_duplicates()
+        .groupby(group_column)["engineer_id"]
+        .nunique()
+        .sort_values(ascending=False)
+        .rename(label)
+    )
+
+
 @dataclass(frozen=True)
 class LoadResult:
     frame: pd.DataFrame | None
@@ -46,11 +79,11 @@ def load_csv(filename: str) -> LoadResult:
 
     path = PROCESSED_DIR / filename
     if not path.is_file():
-        return LoadResult(None, f"Processed file is missing: {filename}")
+        return LoadResult(None, f"Нет processed-файла: {filename}")
     try:
         return LoadResult(_read_csv(str(path), path.stat().st_mtime_ns))
     except (OSError, UnicodeError, pd.errors.ParserError) as error:
-        return LoadResult(None, f"Could not read {filename}: {error}")
+        return LoadResult(None, f"Не удалось прочитать {filename}: {error}")
 
 
 def load_known_tables() -> tuple[dict[str, pd.DataFrame], list[str]]:
@@ -59,7 +92,7 @@ def load_known_tables() -> tuple[dict[str, pd.DataFrame], list[str]]:
     for table_name, filename in TABLE_FILES.items():
         result = load_csv(filename)
         if result.frame is None:
-            errors.append(result.error or f"Could not read {filename}")
+            errors.append(result.error or f"Не удалось прочитать {filename}")
         else:
             tables[table_name] = result.frame
     return tables, errors
@@ -118,7 +151,7 @@ def derive_data_quality_issues(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                     "issue_type": "DUPLICATE_TASK",
                     "entity_id": task_id,
                     "source": "tasks",
-                    "details": "Task identifier occurs more than once.",
+                    "details": "Идентификатор задачи встречается более одного раза.",
                 }
             )
 
@@ -141,7 +174,7 @@ def derive_data_quality_issues(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 sources.append("task_role_effort")
             if task_id in dependency_ids:
                 sources.append("Task_dependencies")
-            source = " and ".join(sources) or "tasks"
+            source = " и ".join(sources) or "tasks"
             issues.append(
                 {
                     "severity": "WARNING",
@@ -149,8 +182,8 @@ def derive_data_quality_issues(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                     "entity_id": task_id,
                     "source": source,
                     "details": (
-                        f"Placeholder task created for {task_id}: referenced by {source} "
-                        "but absent from Tasks."
+                        f"Создана задача-заглушка {task_id}: она упоминается в {source}, "
+                        "но отсутствует в исходной таблице Tasks."
                     ),
                 }
             )
@@ -168,7 +201,9 @@ def derive_data_quality_issues(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                         "issue_type": "ORPHAN_TASK_REFERENCE",
                         "entity_id": task_id,
                         "source": "task_dependencies",
-                        "details": f"Row {row_number + 1}: {column} is absent from tasks.",
+                        "details": (
+                            f"Строка {row_number + 1}: значение {column} отсутствует в tasks."
+                        ),
                     }
                 )
 
@@ -200,7 +235,10 @@ def derive_data_quality_issues(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                     "issue_type": "INVALID_NUMERIC_VALUE",
                     "entity_id": entity,
                     "source": table_name,
-                    "details": f"Row {row_number + 1}: invalid {field}={frame.at[row_number, field]!r}.",
+                    "details": (
+                        f"Строка {row_number + 1}: некорректное значение "
+                        f"{field}={frame.at[row_number, field]!r}."
+                    ),
                 }
             )
 

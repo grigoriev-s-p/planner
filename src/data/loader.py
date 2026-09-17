@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-PREPROCESSING_VERSION = "1.3.0"
+PREPROCESSING_VERSION = "1.4.0"
 REQUIRED_PROCESSED_FILES = (
     "tasks.csv",
     "task_role_effort.csv",
