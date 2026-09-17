@@ -61,6 +61,7 @@ class DevUiTests(unittest.TestCase):
         app.run()
         self.assertEqual(list(app.exception), [])
         for page in (
+            "KPI и пересчёт",
             "Задачи",
             "Трудозатраты по ролям",
             "Зависимости",
@@ -113,6 +114,22 @@ class DevUiTests(unittest.TestCase):
                     }.issubset(frame.columns)
                     for frame in completed_sp_tables
                 ))
+
+    def test_replanning_page_reacts_to_sprint_fact(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "dev_ui" / "app.py", default_timeout=20)
+        app.run()
+        app.sidebar.radio[0].set_value("KPI и пересчёт").run()
+        self.assertEqual(list(app.exception), [])
+        metrics = {metric.label: metric.value for metric in app.metric}
+        self.assertEqual(metrics["PI Predictability — FACT"], "25.0%")
+        self.assertEqual(metrics["PI Predictability — FORECAST"], "75.0%")
+        self.assertEqual(metrics["Sprint 1 Say/Do"], "100.0%")
+
+        app.slider[0].set_value(3).run()
+        self.assertEqual(list(app.exception), [])
+        metrics = {metric.label: metric.value for metric in app.metric}
+        self.assertEqual(metrics["PI Predictability — FACT"], "0.0%")
+        self.assertEqual(metrics["Sprint 1 Say/Do"], "60.0%")
 
 
 if __name__ == "__main__":
