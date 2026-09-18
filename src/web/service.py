@@ -284,10 +284,36 @@ class PlanningAPIService:
         incoming = []
         outgoing = []
         for row in self.tables["task_dependencies"]:
+            blocker_id = _text(row.get("blocking_task_id"))
+            blocker = self._raw_tasks.get(blocker_id or "")
+            if blocker is None:
+                dependency_state = "MISSING"
+                satisfied = False
+                blocker_title = None
+            elif (_text(blocker.get("status")) or "").casefold() == "done":
+                dependency_state = "HISTORICAL_DONE"
+                satisfied = True
+                blocker_title = _text(blocker.get("summary"))
+            else:
+                dependency_state = "ACTIVE"
+                satisfied = False
+                blocker_title = _text(blocker.get("summary"))
             payload = {
-                "blocking_task_id": _text(row.get("blocking_task_id")),
+                "blocking_task_id": blocker_id,
                 "blocked_task_id": _text(row.get("blocked_task_id")),
                 "dependency_type": _text(row.get("dependency_type")),
+                "state": dependency_state,
+                "satisfied": satisfied,
+                "blocking_task_title": blocker_title,
+                "status_message": (
+                    "Задача завершена до начала квартала"
+                    if dependency_state == "HISTORICAL_DONE"
+                    else (
+                        "Блокирующая задача неизвестна каталогу"
+                        if dependency_state == "MISSING"
+                        else "Активная зависимость"
+                    )
+                ),
             }
             if payload["blocked_task_id"] == task_id:
                 incoming.append(payload)
@@ -739,7 +765,7 @@ class PlanningAPIService:
                 "plan_constructor": "AVAILABLE_EPHEMERAL",
                 "replanning": "NOT_IMPLEMENTED",
                 "bus_factor": "NOT_IMPLEMENTED",
-                "initial_excel_upload": "AVAILABLE_EPHEMERAL",
+                "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
             },
         }
 

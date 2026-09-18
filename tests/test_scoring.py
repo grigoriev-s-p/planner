@@ -88,7 +88,7 @@ class ScoringTests(unittest.TestCase):
                 [row["task_id"] for row in sort_tasks_for_planning(rows, [])], ["A", "B"]
             )
 
-    def test_additional_factors_can_outweigh_a_small_rung_difference(self) -> None:
+    def test_additional_factors_cannot_override_a_higher_rung_in_priority(self) -> None:
         tasks = [
             task("HIGH", rung=100), task("ACTIVE", rung=90, status="InProgress"),
             task("LOW", rung=0),
@@ -96,8 +96,28 @@ class ScoringTests(unittest.TestCase):
         context = scoring_context(tasks)
         high, active = [calculate_task_score(row, context) for row in tasks[:2]]
         self.assertGreater(high.components["rung_score"], active.components["rung_score"])
+        # The scalar score remains explainability metadata for equal-rung
+        # secondary preferences. It is not the primary ordering objective.
         self.assertGreater(active.total_score, high.total_score)
-        self.assertEqual(sort_tasks_for_planning(tasks, [])[0]["task_id"], "ACTIVE")
+        self.assertEqual(sort_tasks_for_planning(tasks, [])[0]["task_id"], "HIGH")
+
+    def test_equal_rung_uses_earlier_planned_start_as_soft_preference(self) -> None:
+        tasks = [
+            task("LATE", rung=8, planned_start="2026-09-15"),
+            task("EARLY", rung=8, planned_start="2026-09-01"),
+        ]
+        self.assertEqual(
+            [row["task_id"] for row in sort_tasks_for_planning(tasks, [])],
+            ["EARLY", "LATE"],
+        )
+
+    def test_missing_planned_start_falls_back_deterministically(self) -> None:
+        tasks = [task("B", rung=8), task("A", rung=8)]
+        for rows in (tasks, list(reversed(tasks))):
+            self.assertEqual(
+                [row["task_id"] for row in sort_tasks_for_planning(rows, [])],
+                ["A", "B"],
+            )
 
     def test_superseded_lower_rung_direction_is_rejected(self) -> None:
         tasks = [task("HIGH", rung=100), task("LOW", rung=10)]

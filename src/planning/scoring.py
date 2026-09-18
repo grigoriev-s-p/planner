@@ -38,7 +38,7 @@ def _boolean(value: Any) -> bool:
     return value is True or str(value).strip().casefold() in {"true", "1", "yes"}
 
 
-def _date_ordinal(value: Any) -> int | None:
+def date_ordinal(value: Any) -> int | None:
     text = _text(value)
     if text is None:
         return None
@@ -188,7 +188,7 @@ class PlanningContext:
         deadlines = {
             task_id: ordinal
             for task_id in eligible
-            if (ordinal := _date_ordinal(source_tasks[task_id].get("planned_end"))) is not None
+            if (ordinal := date_ordinal(source_tasks[task_id].get("planned_end"))) is not None
         }
         return cls(
             done_task_ids=done,
@@ -343,11 +343,27 @@ def calculate_task_score(
     )
 
 
-def score_sort_key(task: Mapping[str, Any], score: TaskScore) -> tuple[Any, ...]:
-    """Sort descending by score with the documented deterministic tie-break."""
+def score_sort_key(
+    task: Mapping[str, Any],
+    score: TaskScore,
+    *,
+    use_planned_start: bool = True,
+) -> tuple[Any, ...]:
+    """Return the absolute business-priority key for one comparable task set.
+
+    ``rung`` is deliberately outside the additive score so no combination of
+    status, initiative, or dependency bonuses can overtake a higher rung.
+    Callers disable the date component when any task in the equal-rung set has
+    no usable ``planned_start``; that keeps a missing date from becoming an
+    invented earliest or latest value.
+    """
 
     status = (_text(task.get("status")) or "").casefold()
+    rung = _number(task.get("rung"))
+    planned_start = date_ordinal(task.get("planned_start"))
     return (
+        -(rung if rung is not None else 0.0),
+        planned_start if use_planned_start and planned_start is not None else 0,
         -score.total_score,
         0 if status == "inprogress" else 1,
         _text(task.get("task_id")) or "",

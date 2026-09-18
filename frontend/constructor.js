@@ -7,7 +7,8 @@ window.planConstructor = (() => {
   let draft = emptyDraft();
   let mode = 'manual';
   let api = null;
-  let onPlanBuilt = null;
+  let previewPlan = null;
+  let onPlanApproved = null;
   let bound = false;
 
   const $c = (selector, root = document) => root.querySelector(selector);
@@ -21,6 +22,76 @@ window.planConstructor = (() => {
   const findCatalog = (type, id) => catalog[type].find((item) => item[idField(type)] === id);
   const csvValues = (value) => [...new Set(String(value || '').split(',').map((item) => item.trim()).filter(Boolean))];
   const optionList = (items, selected = '') => items.map((item) => `<option value="${esc(item)}" ${item === selected ? 'selected' : ''}>${esc(item)}</option>`).join('');
+  const isCompletedTask = (task) => ['done', 'completed'].includes(String(task?.status || '').trim().toLowerCase());
+  const number = (value) => new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 1}).format(Number(value || 0));
+
+  function invalidatePreview() {
+    if (!previewPlan) return;
+    previewPlan = null;
+    renderPreview();
+  }
+
+  function previewReasons(task) {
+    const missingRoleCodes = new Set(['MISSING_SPECIALIST', 'NO_AVAILABLE_ROLE_SPECIALIST']);
+    const missingRoles = [...new Set((task.reasons || [])
+      .filter((reason) => missingRoleCodes.has(reason.code) && reason.details?.role)
+      .map((reason) => reason.details.role))];
+    const messages = (task.reasons || [])
+      .filter((reason) => !missingRoleCodes.has(reason.code) || !reason.details?.role)
+      .map((reason) => reason.message || reason.title)
+      .filter(Boolean);
+    if (missingRoles.length) messages.unshift(`Нет специалистов ролей: ${missingRoles.join(', ')}.`);
+    return [...new Set(messages)];
+  }
+
+  function previewSprintCard(task, sprint) {
+    const continuation = Number(task.start_sprint) < sprint;
+    const helpers = (task.allocations || []).filter((item) => item.sprint === sprint && item.cross_team);
+    const helperNote = helpers.length ? `<small class="preview-cross-team">+ ${new Set(helpers.map((item) => item.engineer_id)).size} специалист(а) из другой команды</small>` : '';
+    const reassigned = task.team_reassigned && task.original_team_id
+      ? `<small class="preview-reassigned">Исходная команда: ${esc(task.original_team_id)}</small>` : '';
+    return `<article class="preview-task-card ${continuation ? 'preview-continuation' : ''}"><div><b>${continuation ? '↳ ' : ''}${esc(task.task_id)}</b><span class="rung-badge">R${esc(task.rung)}</span></div><strong>${continuation ? 'Продолжение' : esc(task.title)}</strong><small>${esc(task.assigned_team_id || 'Команда не назначена')}</small>${reassigned}${helperNote}</article>`;
+  }
+
+  function previewCrossTeamRows(plan) {
+    const engineers = new Map((plan.engineers || []).map((engineer) => [engineer.engineer_id, engineer]));
+    const rows = new Map();
+    (plan.tasks || []).forEach((task) => (task.allocations || []).filter((item) => item.cross_team).forEach((item) => {
+      const key = [item.engineer_id, item.source_team_id, item.assigned_task_team_id, task.task_id, item.sprint].join('|');
+      const row = rows.get(key) || {...item, task_id: task.task_id, title: task.title, hours: 0};
+      row.hours += Number(item.allocated_hours || 0);
+      rows.set(key, row);
+    }));
+    return [...rows.values()].sort((left, right) => left.sprint - right.sprint || left.task_id.localeCompare(right.task_id, 'ru')).map((row) => {
+      const engineer = engineers.get(row.engineer_id);
+      return `<article class="preview-help-row"><div><b>${esc(engineer?.name || row.engineer_id)}</b><span>${esc(row.source_team_id)} → ${esc(row.assigned_task_team_id)}</span></div><div><span>Sprint ${esc(row.sprint)} · ${esc(row.task_id)}</span><strong>${number(row.hours)} ч</strong></div></article>`;
+    }).join('') || '<p class="muted">Внешняя помощь между командами не потребовалась.</p>';
+  }
+
+  function renderPreview() {
+    const target = $c('#constructorPreview');
+    if (!target) return;
+    if (!previewPlan) {
+      target.hidden = true;
+      target.innerHTML = '';
+      return;
+    }
+    const plannedTasks = (previewPlan.tasks || []).filter((task) => task.status === 'PLANNED');
+    const excludedTasks = (previewPlan.tasks || []).filter((task) => ['MOVED', 'UNPLANNABLE'].includes(task.status));
+    const sprintBoard = Array.from({length: 6}, (_, index) => {
+      const sprint = index + 1;
+      const cards = plannedTasks.filter((task) => (task.planned_sprints || []).includes(sprint))
+        .sort((left, right) => Number(right.rung || 0) - Number(left.rung || 0) || left.task_id.localeCompare(right.task_id, 'ru'))
+        .map((task) => previewSprintCard(task, sprint)).join('') || '<p class="preview-sprint-empty">Нет задач</p>';
+      return `<section class="preview-sprint"><h3>Sprint ${sprint}</h3><div>${cards}</div></section>`;
+    }).join('');
+    const exclusions = excludedTasks.map((task) => {
+      const reasons = previewReasons(task);
+      return `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><p>${esc(reasons.join(' ') || task.summary || 'Причина не указана.')}</p></article>`;
+    }).join('') || '<p class="muted">Все задачи удалось разместить в квартальном плане.</p>';
+    target.hidden = false;
+    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>Проверьте распределение задач и ресурсов перед утверждением плана.</p></div></div><section class="preview-section"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section><section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section"><h3>Переносы и исключения</h3><div class="preview-exclusion-list">${exclusions}</div></section><div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
+  }
 
   function loadDraft() {
     try {
@@ -73,15 +144,19 @@ window.planConstructor = (() => {
       setDatasetStatus('Размер Excel-файла не должен превышать 25 МБ.', 'error');
       return;
     }
+    invalidatePreview();
     const button = $c('#uploadConstructorDataset');
     button.disabled = true;
     button.textContent = 'Строим план…';
     setDatasetStatus(`Проверяем ${file.name} и рассчитываем шесть спринтов…`);
     try {
       const planResult = await api.buildConstructorPlanFromDataset(file);
+      if (planResult.catalog) catalog = planResult.catalog;
       const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
-      setDatasetStatus(`${file.name} · план готов · ${planned} задач вошли в квартал`, 'success');
-      onPlanBuilt(planResult);
+      setDatasetStatus(`${file.name} · предварительный план готов · ${planned} задач вошли в квартал`, 'success');
+      previewPlan = planResult;
+      render();
+      $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
     } catch (error) {
       setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
     } finally {
@@ -102,6 +177,25 @@ window.planConstructor = (() => {
     } else {
       draft[type] = draft[type].filter((item) => item[idField(type)] !== id);
     }
+    invalidatePreview();
+    saveDraft();
+    render();
+  }
+
+  function toggleAllCatalog(type, items, selected) {
+    const key = idField(type);
+    const ids = new Set(items.map((item) => item[key]));
+    if (selected) {
+      items.forEach((item) => {
+        if (findDraft(type, item[key])) return;
+        const copy = clone(findCatalog(type, item[key]) || item);
+        if (type === 'tasks') copy.team_id = null;
+        draft[type].push(copy);
+      });
+    } else {
+      draft[type] = draft[type].filter((item) => !ids.has(item[key]));
+    }
+    invalidatePreview();
     saveDraft();
     render();
   }
@@ -119,6 +213,20 @@ window.planConstructor = (() => {
     return [...scenarioOnly, ...sourceCatalog];
   }
 
+  function selectAllControl(type, items) {
+    const key = idField(type);
+    const selected = items.filter((item) => findDraft(type, item[key])).length;
+    const all = items.length > 0 && selected === items.length;
+    const partial = selected > 0 && !all;
+    return `<label class="constructor-select-all"><input type="checkbox" data-constructor-select-all="${type}" ${all ? 'checked' : ''} data-partial="${partial}"><span>${all ? 'Выбраны все' : 'Выбрать все'}</span></label>`;
+  }
+
+  function updateSelectAllIndeterminate() {
+    $$c('[data-constructor-select-all]').forEach((input) => {
+      input.indeterminate = input.dataset.partial === 'true';
+    });
+  }
+
   function renderCatalogs() {
     const teamQuery = searchValue('#constructorTeamSearch');
     const teams = catalog.teams
@@ -127,11 +235,14 @@ window.planConstructor = (() => {
         Number(right.expected_velocity_sp || 0) - Number(left.expected_velocity_sp || 0)
         || String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru')
       ));
-    $c('#constructorTeamCatalog').innerHTML = teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>';
+    $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && catalog.teams.length ? selectAllControl('teams', catalog.teams) : ''}${teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
 
     const taskQuery = searchValue('#constructorTaskSearch');
-    const tasks = catalogWithDraft('tasks').filter((task) => `${task.task_id} ${task.title} ${task.initiative_id || ''}`.toLowerCase().includes(taskQuery));
-    $c('#constructorTaskCatalog').innerHTML = tasks.map((task) => `<label class="constructor-option constructor-task-option"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${findDraft('tasks', task.task_id) ? 'checked' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b></span></label>`).join('') || '<div class="empty-state">Задачи не найдены.</div>';
+    const allTasks = catalogWithDraft('tasks');
+    const tasks = allTasks.filter((task) => `${task.task_id} ${task.title} ${task.initiative_id || ''}`.toLowerCase().includes(taskQuery));
+    const selectableTasks = allTasks.filter((task) => !isCompletedTask(task));
+    $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isCompletedTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b>${completed ? '<small>Задача завершена</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
+    updateSelectAllIndeterminate();
   }
 
   function entityRows(title, type, items, describe) {
@@ -261,6 +372,7 @@ window.planConstructor = (() => {
     if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
     else draft[type].push(entity);
     if (type === 'tasks' && !editing) $c('#constructorTaskSearch').value = '';
+    invalidatePreview();
     saveDraft();
     $c('#constructorDialog').close();
     render();
@@ -277,7 +389,9 @@ window.planConstructor = (() => {
       const tasks = draft.tasks.map((task) => ({...task, team_id: null}));
       const planResult = await api.buildConstructorPlan({teams: draft.teams, engineers: automaticEngineers(), tasks});
       showErrors([]);
-      onPlanBuilt(planResult);
+      previewPlan = planResult;
+      renderPreview();
+      $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
     } catch (error) {
       showErrors(String(error?.message || error).split('\n').filter(Boolean));
     } finally {
@@ -297,14 +411,23 @@ window.planConstructor = (() => {
       const file = event.target.files?.[0];
       if (file) uploadDataset(file);
     });
-    $$c('[data-constructor-mode]').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.constructorMode)));
+    $$c('[data-constructor-mode]').forEach((button) => button.addEventListener('click', () => {
+      if (button.dataset.constructorMode !== mode) invalidatePreview();
+      setMode(button.dataset.constructorMode);
+    }));
     $c('#buildConstructorPlan').addEventListener('click', buildPlan);
     $c('#clearConstructorDraft').addEventListener('click', () => {
       if (!confirm('Очистить весь локальный черновик? Исходный датасет не изменится.')) return;
-      draft = emptyDraft(); saveDraft(); showErrors([]); render();
+      draft = emptyDraft(); invalidatePreview(); saveDraft(); showErrors([]); render();
     });
     $c('#constructorDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
     document.addEventListener('change', (event) => {
+      const selectAll = event.target.closest('[data-constructor-select-all]');
+      if (selectAll) {
+        const type = selectAll.dataset.constructorSelectAll;
+        toggleAllCatalog(type, type === 'teams' ? catalog.teams : catalogWithDraft('tasks').filter((task) => !isCompletedTask(task)), selectAll.checked);
+        return;
+      }
       const pick = event.target.closest('[data-constructor-pick]');
       if (pick) { toggleCatalog(pick.dataset.constructorPick, pick.value, pick.checked); return; }
       if (event.target.matches('[name="dependency_id"]')) updateDependencyView();
@@ -315,6 +438,7 @@ window.planConstructor = (() => {
       $$c('[data-dependency-option]').forEach((option) => { option.hidden = !option.dataset.search.includes(query); });
     });
     document.addEventListener('click', (event) => {
+      if (event.target.closest('#approveConstructorPlan')) { approvePlan(); return; }
       const edit = event.target.closest('[data-constructor-edit]');
       if (edit) { openForm(edit.dataset.constructorEdit, edit.dataset.id); return; }
       const remove = event.target.closest('[data-constructor-remove]');
@@ -349,16 +473,41 @@ window.planConstructor = (() => {
     setMode(mode);
     renderCatalogs();
     renderDraft();
+    renderPreview();
   }
 
-  function initialize(sourceCatalog, apiClient, handlePlanBuilt) {
+  function initialize(sourceCatalog, apiClient, handlePlanApproved) {
     catalog = sourceCatalog;
     api = apiClient;
-    onPlanBuilt = typeof handlePlanBuilt === 'function' ? handlePlanBuilt : () => {};
+    onPlanApproved = typeof handlePlanApproved === 'function' ? handlePlanApproved : () => {};
     loadDraft();
     bindEvents();
     render();
   }
 
-  return Object.freeze({initialize, render});
+  async function approvePlan() {
+    if (!previewPlan?.draft?.id) return;
+    const button = $c('#approveConstructorPlan');
+    const errorBox = $c('#constructorApprovalError');
+    button.disabled = true;
+    button.textContent = 'Утверждаем план…';
+    errorBox.hidden = true;
+    try {
+      const approvedPlan = await api.approveConstructorPlan(previewPlan.draft.id);
+      previewPlan = null;
+      onPlanApproved(approvedPlan);
+    } catch (error) {
+      errorBox.textContent = String(error?.message || error);
+      errorBox.hidden = false;
+      button.disabled = false;
+      button.textContent = 'Утвердить план';
+    }
+  }
+
+  function updateCatalog(sourceCatalog) {
+    catalog = sourceCatalog;
+    render();
+  }
+
+  return Object.freeze({initialize, updateCatalog, render});
 })();

@@ -35,6 +35,15 @@ window.postcodeApi = (() => {
     getEngineer: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}`),
     getStarMap: () => request('/api/star-map'),
     getConstructorCatalog: () => request('/api/plan-constructor/catalog'),
+    getArchiveReasons: () => request('/api/catalog/archive-reasons'),
+    archiveEntity: (entityType, entityId, reason) => {
+      const collection = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];
+      return request(`/api/${collection}/${encodeURIComponent(entityId)}/archive`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(reason),
+      });
+    },
     buildConstructorPlanFromDataset: (file) => request(`/api/plan-constructor/plan/upload?filename=${encodeURIComponent(file.name)}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/octet-stream'},
@@ -44,6 +53,11 @@ window.postcodeApi = (() => {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(scenario),
+    }),
+    approveConstructorPlan: (draftId) => request('/api/plan-constructor/drafts/approve', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({draft_id: draftId}),
     }),
   });
 })();

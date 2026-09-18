@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+from copy import deepcopy
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,6 +24,7 @@ from src.data.parser import DatasetParsingError, parse_workbook
 from src.data.validation import DataValidationError, validate
 
 from .service import TABLE_FILES, PlanningAPIService, ServiceDataError
+from .catalog import CatalogRepository
 
 
 MAX_CONSTRUCTOR_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -131,7 +133,10 @@ def _cycle_nodes(tasks: list[ConstructorTask]) -> tuple[str, ...]:
     return ()
 
 
-def validate_constructor_scenario(scenario: ConstructorScenario) -> None:
+def validate_constructor_scenario(
+    scenario: ConstructorScenario,
+    catalog_tables: dict[str, list[dict[str, Any]]] | None = None,
+) -> None:
     """Validate cross-entity rules that cannot be expressed by field types."""
 
     errors: list[str] = []
@@ -150,7 +155,12 @@ def validate_constructor_scenario(scenario: ConstructorScenario) -> None:
             errors.append(f"ID {entity} не может быть пустым.")
 
     known_teams = set(team_ids)
-    known_tasks = set(task_ids)
+    selected_tasks = set(task_ids)
+    catalog_task_rows = {
+        _clean_text(row.get("task_id")): row
+        for row in (catalog_tables or {}).get("tasks", [])
+        if _clean_text(row.get("task_id"))
+    }
     for team in scenario.teams:
         if abs(team.focus_factor - 0.8) > 1e-9:
             errors.append(
@@ -200,10 +210,17 @@ def validate_constructor_scenario(scenario: ConstructorScenario) -> None:
         for dependency_id in task.depends_on:
             if dependency_id == task.task_id:
                 errors.append(f"Задача {task.task_id} не может зависеть сама от себя.")
-            elif dependency_id not in known_tasks:
+            elif dependency_id in selected_tasks:
+                continue
+            elif dependency_id not in catalog_task_rows:
                 errors.append(
                     f"Задача {task.task_id}: блокирующая задача "
-                    f"{dependency_id} не добавлена в сценарий."
+                    f"{dependency_id} неизвестна общему каталогу."
+                )
+            elif _clean_text(catalog_task_rows[dependency_id].get("status")).casefold() != "done":
+                errors.append(
+                    f"Задача {task.task_id}: активная блокирующая задача "
+                    f"{dependency_id} должна быть добавлена в сценарий."
                 )
 
     cycle = _cycle_nodes(scenario.tasks)
@@ -213,10 +230,13 @@ def validate_constructor_scenario(scenario: ConstructorScenario) -> None:
         raise ScenarioValidationError(errors)
 
 
-def scenario_tables(scenario: ConstructorScenario) -> dict[str, list[dict[str, Any]]]:
+def scenario_tables(
+    scenario: ConstructorScenario,
+    catalog_tables: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """Convert a validated browser draft into normalized in-memory tables."""
 
-    validate_constructor_scenario(scenario)
+    validate_constructor_scenario(scenario, catalog_tables)
     tasks: list[dict[str, Any]] = []
     role_effort: list[dict[str, Any]] = []
     dependencies: list[dict[str, Any]] = []
@@ -224,6 +244,21 @@ def scenario_tables(scenario: ConstructorScenario) -> dict[str, list[dict[str, A
     engineer_skills: list[dict[str, Any]] = []
     team_history: list[dict[str, Any]] = []
     task_skill_requirements: list[dict[str, Any]] = []
+    selected_task_ids = {task.task_id for task in scenario.tasks}
+    catalog_task_rows = {
+        _clean_text(row.get("task_id")): row
+        for row in (catalog_tables or {}).get("tasks", [])
+        if _clean_text(row.get("task_id"))
+    }
+    historical_done_ids = {
+        dependency_id
+        for task in scenario.tasks
+        for dependency_id in task.depends_on
+        if dependency_id not in selected_task_ids
+        and dependency_id in catalog_task_rows
+        and _clean_text(catalog_task_rows[dependency_id].get("status")).casefold()
+        == "done"
+    }
 
     for team in scenario.teams:
         team_id = _clean_text(team.team_id)
@@ -293,6 +328,23 @@ def scenario_tables(scenario: ConstructorScenario) -> dict[str, list[dict[str, A
                 }
             )
 
+    # Done-before-quarter blockers are planning facts, not selected work. They
+    # are injected only into the planner context and removed from the result.
+    for task_id in sorted(historical_done_ids):
+        source = catalog_task_rows[task_id]
+        tasks.append(
+            {
+                "task_id": task_id,
+                "summary": _clean_text(source.get("summary")) or "Unknown task",
+                "initiative_id": _clean_text(source.get("initiative_id")) or task_id,
+                "team_id": _clean_text(source.get("team_id")) or None,
+                "status": "Done",
+                "rung": source.get("rung"),
+                "story_points": source.get("story_points"),
+                "is_placeholder": False,
+            }
+        )
+
     return {
         "tasks": tasks,
         "task_role_effort": role_effort,
@@ -304,14 +356,45 @@ def scenario_tables(scenario: ConstructorScenario) -> dict[str, list[dict[str, A
     }
 
 
-def build_constructor_plan(scenario: ConstructorScenario) -> dict[str, Any]:
+def _without_support_tasks(
+    dashboard: dict[str, Any], support_task_ids: Iterable[str]
+) -> dict[str, Any]:
+    hidden = set(support_task_ids)
+    if not hidden:
+        return dashboard
+    payload = deepcopy(dashboard)
+    payload["tasks"] = [
+        task for task in payload.get("tasks", []) if task.get("task_id") not in hidden
+    ]
+    plan = payload.get("plan", {})
+    plan["tasks"] = [
+        task for task in plan.get("tasks", []) if task.get("task_id") not in hidden
+    ]
+    plan["allocations"] = [
+        row for row in plan.get("allocations", []) if row.get("task_id") not in hidden
+    ]
+    for summary in (payload.get("summary"), plan.get("summary")):
+        if isinstance(summary, dict):
+            summary["total_tasks"] = len(payload["tasks"])
+    return payload
+
+
+def build_constructor_plan(
+    scenario: ConstructorScenario,
+    catalog_tables: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Run the real quarter planner against an ephemeral constructor scenario."""
 
-    service = PlanningAPIService.from_tables(
-        scenario_tables(scenario), plan_version="constructor-draft"
-    )
+    selected_ids = {task.task_id for task in scenario.tasks}
+    tables = scenario_tables(scenario, catalog_tables)
+    support_ids = {
+        _clean_text(row.get("task_id"))
+        for row in tables["tasks"]
+        if _clean_text(row.get("task_id")) not in selected_ids
+    }
+    service = PlanningAPIService.from_tables(tables, plan_version="constructor-draft")
     return {
-        **service.dashboard,
+        **_without_support_tasks(service.dashboard, support_ids),
         "draft": {
             "storage": "browser_local_storage",
             "server_persisted": False,
@@ -326,8 +409,9 @@ def build_constructor_plan(scenario: ConstructorScenario) -> dict[str, Any]:
 def build_constructor_plan_from_workbook(
     filename: str,
     content: bytes,
+    repository: CatalogRepository,
 ) -> dict[str, Any]:
-    """Parse an uploaded workbook and immediately build its six-sprint plan."""
+    """Validate, atomically merge, then plan from the accumulated catalog."""
 
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
@@ -349,13 +433,22 @@ def build_constructor_plan_from_workbook(
             normalized = normalize(parse_workbook(workbook))
             validation = validate(normalized)
             validation.require_success()
-            planning_tables = {
+            imported_tables = {
                 table_name: normalized.tables[csv_name]
                 for table_name, csv_name in TABLE_FILES.items()
             }
+            for table_name, csv_name in {
+                "task_skill_requirements": "task_skill_requirements.csv",
+                "planning_results": "planning_results.csv",
+                "plan_mismatch_reasons": "plan_mismatch_reasons.csv",
+                "task_closure_results": "task_closure_results.csv",
+            }.items():
+                if csv_name in normalized.tables:
+                    imported_tables[table_name] = normalized.tables[csv_name]
+            merge_result = repository.merge_tables(imported_tables)
             fingerprint = hashlib.sha256(content).hexdigest()[:8]
             service = PlanningAPIService.from_tables(
-                planning_tables,
+                repository.active_planning_tables(),
                 plan_version=f"constructor-upload-{fingerprint}",
             )
     except (
@@ -370,21 +463,33 @@ def build_constructor_plan_from_workbook(
     ) as error:
         raise ConstructorDatasetUploadError(str(error)) from error
 
+    hidden_archived_tasks = repository.archived_ids("task")
+    catalog = build_constructor_catalog(
+        service, archived_task_ids=hidden_archived_tasks
+    )
     return {
-        **service.dashboard,
+        **_without_support_tasks(service.dashboard, hidden_archived_tasks),
+        "catalog": catalog,
         "uploaded_dataset": {
             "name": safe_name,
             "size_bytes": len(content),
             "fingerprint": fingerprint,
-            "warnings": list(validation.warnings),
-            "server_persisted": False,
+            "warnings": [*validation.warnings, *merge_result.warnings],
+            "catalog_merge": merge_result.to_dict(),
+            "server_persisted": True,
             "source_dataset_modified": False,
         },
     }
 
 
-def build_constructor_catalog(service: PlanningAPIService) -> dict[str, Any]:
-    """Expose editable copies of the immutable processed-data catalog."""
+def build_constructor_catalog(
+    service: PlanningAPIService,
+    *,
+    archived_task_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Expose active catalog entities plus preserved dependency references."""
+
+    archived_tasks = set(archived_task_ids)
 
     skills_by_engineer: dict[str, set[str]] = defaultdict(set)
     for row in service.tables["engineer_skills"]:
@@ -464,7 +569,7 @@ def build_constructor_catalog(service: PlanningAPIService) -> dict[str, Any]:
     }
     catalog_tasks = []
     for task in service.tasks:
-        if task["is_placeholder"]:
+        if task["is_placeholder"] or task["task_id"] in archived_tasks:
             continue
         task_id = task["task_id"]
         raw = raw_tasks[task_id]
@@ -494,13 +599,10 @@ def build_constructor_catalog(service: PlanningAPIService) -> dict[str, Any]:
             }
         )
 
-    catalog_task_ids = {task["task_id"] for task in catalog_tasks}
+    known_task_ids = set(raw_tasks)
     for task in catalog_tasks:
-        # A constructor dependency can only target another selectable task.
-        # Missing source rows and placeholders remain data-audit concerns and
-        # are not silently injected into an isolated browser scenario.
         task["depends_on"] = [
-            task_id for task_id in task["depends_on"] if task_id in catalog_task_ids
+            task_id for task_id in task["depends_on"] if task_id in known_task_ids
         ]
 
     roles = sorted(
@@ -547,4 +649,5 @@ def build_constructor_catalog(service: PlanningAPIService) -> dict[str, Any]:
             "focus_factor": 0.8,
         },
         "source_dataset_read_only": True,
+        "working_catalog_persistent": True,
     }
