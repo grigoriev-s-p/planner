@@ -28,6 +28,7 @@ Product frontend доступен по адресу `http://127.0.0.1:8000`.
 | `data/processed/` | Генерируемые CSV и manifest с хешами. Не коммитируется. |
 | `src/data/` | Поиск файла, parser Excel, нормализация и валидация. |
 | `src/planning/` | Feasibility checker, scoring, resource allocation и quarter planner. |
+| `src/replanning/` | Baseline/fact/forecast KPI, diff версий плана и объяснимые алерты. |
 | `src/web/` | FastAPI, загрузка processed snapshot и стабильные API DTO. |
 | `frontend/` | Product SPA из HTML, CSS и JavaScript без build pipeline. |
 | `dev_ui/` | Временный русскоязычный интерфейс Streamlit. |
@@ -146,7 +147,23 @@ Streamlit читает CSV из `data/processed/`. На странице «За�
   спринта;
 - «Квартальный план» — расчёт плана, allocations, причины решений и
   рекомендации;
+- «KPI и пересчёт» — воспроизводимый сценарий факта Sprint 1, FACT/FORECAST,
+  diff, многоспринтовые часы и RED/ORANGE/YELLOW-алерты;
 - «Справочники» — три справочника, извлечённые из конца Excel.
+
+## KPI, риски и replanning-модель
+
+`src/replanning/` хранит раздельные неизменяемые снимки:
+
+- `original_plan` — baseline на неделе 0 и знаменатель KPI;
+- `previous_plan` — версия до пересчёта;
+- `current_plan` — новый forecast, включая спринты за пределами кварта;
+- `actual_results` — факты только закрытых спринтов.
+
+PI Predictability и Sprint Say/Do всегда используют baseline из `original_plan`.
+`build_replanning_snapshot(...)` возвращает FACT, FORECAST, task-level diff и алерты
+с числовым evidence. Текущая Streamlit-страница использует детерминированный
+fixture; адаптер к `src/planning/` ещё нужно подключить.
 
 ## Как работает планировщик
 
@@ -180,10 +197,10 @@ Streamlit читает CSV из `data/processed/`. На странице «За�
 
 ## Запуск тестов
 
-Для тестов установите `pytest`:
+Для тестов установите `pytest` и HTTP-клиент Starlette:
 
 ```powershell
-python -m pip install pytest
+python -m pip install pytest httpx2
 ```
 
 Запуск всех тестов:
@@ -206,7 +223,7 @@ python -m pytest tests/test_quarter_planner.py tests/test_cross_team.py -q -p no
 python -m pytest tests/test_preprocessing.py -q -p no:cacheprovider
 
 # Streamlit UI и upload/audit flow
-python -m pytest tests/test_dev_ui.py tests/test_upload_flow.py -q -p no:cacheprovider
+python -m pytest tests/test_dev_ui.py tests/test_upload_flow.py tests/test_replanning_demo.py -q -p no:cacheprovider
 ```
 
 Acceptance tests создают маленькие данные программно и проверяют итоговый план,
@@ -232,12 +249,11 @@ Acceptance tests создают маленькие данные программ
 - Dataset не содержит достаточной подтверждённой информации для автоматического
   вывода требуемых skills из названия задачи.
 - Текущий спринт в product API равен Sprint 1, пока нет факта replanning.
-- Replanning и Bus Factor пока не реализованы в backend и не имитируются
-  frontend-ом.
+- Production replanning и Bus Factor пока не подключены к backend/frontend;
+  Streamlit показывает только явно помеченный demo-fixture.
 - План рассчитывается и кэшируется при первом API-запросе; после пересборки CSV
   перезапустите FastAPI.
 
 ```text
 http://127.0.0.1:8000
 ```
-

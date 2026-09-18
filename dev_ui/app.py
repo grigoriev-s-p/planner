@@ -1,4 +1,4 @@
-"""Temporary Streamlit UI for inspecting normalized development data."""
+"""Development UI for source-data inspection and reproducible product demos."""
 
 from __future__ import annotations
 
@@ -40,9 +40,18 @@ from src.planning.dependency_rules import RAW_DIRECTION_DESCRIPTION
 from src.planning.feasibility import FeasibilityContext, FeasibilityService
 from src.planning.models import SprintState
 from src.planning.planner import build_quarter_plan
+from src.replanning import (
+    AlertCode,
+    AlertLevel,
+    ChangeType,
+    MeasureKind,
+    ReferenceCatalog,
+    validate_reference_usage,
+)
+from replanning_demo import DemoScenario, build_demo_snapshot
 
 
-st.set_page_config(page_title="Просмотр processed-данных", layout="wide")
+st.set_page_config(page_title="Планирование команд — DEV UI", layout="wide")
 
 
 def show_load_errors(errors: list[str]) -> None:
@@ -1229,16 +1238,287 @@ def reference_data_page(tables: dict[str, pd.DataFrame]) -> None:
             else:
                 show_dataframe(frame)
 
+def reference_catalog(tables: dict[str, pd.DataFrame]) -> ReferenceCatalog | None:
+    required = (
+        "planning_results",
+        "plan_mismatch_reasons",
+        "task_closure_results",
+    )
+    if any(name not in tables or "value" not in tables[name].columns for name in required):
+        return None
+
+    def values(table_name: str) -> tuple[str, ...]:
+        frame = tables[table_name]
+        if "source_order" in frame.columns:
+            frame = frame.sort_values("source_order")
+        return tuple(
+            str(value).strip()
+            for value in frame["value"]
+            if pd.notna(value) and str(value).strip()
+        )
+
+    try:
+        return ReferenceCatalog(
+            values("planning_results"),
+            values("plan_mismatch_reasons"),
+            values("task_closure_results"),
+        )
+    except ValueError:
+        return None
+
+
+def percentage_text(value: float | None) -> str:
+    return "н/д" if value is None else f"{value:.1f}%"
+
+
+def sprint_text(value: int | None) -> str:
+    if value is None:
+        return "—"
+    suffix = " (за кварталом)" if value > 6 else ""
+    return f"Sprint {value}{suffix}"
+
+
+CHANGE_LABELS = {
+    ChangeType.ADDED: "добавлена",
+    ChangeType.REMOVED: "удалена",
+    ChangeType.SPRINT_CHANGED: "изменён спринт",
+    ChangeType.STATE_CHANGED: "изменено состояние",
+    ChangeType.STORY_POINTS_CHANGED: "изменены SP",
+    ChangeType.STATUS_CHANGED: "изменён статус",
+    ChangeType.REASON_CHANGED: "изменена причина",
+    ChangeType.TEAM_CHANGED: "изменена команда",
+    ChangeType.INITIATIVE_CHANGED: "изменена инициатива",
+    ChangeType.ALLOCATIONS_CHANGED: "изменено распределение часов",
+}
+
+
+ALERT_MESSAGES = {
+    AlertCode.DEADLINE_OUTSIDE_QUARTER: "Прогноз вышел за границу кварта.",
+    AlertCode.ROLE_CAPACITY_DEFICIT: "Не хватает часов подходящей роли.",
+    AlertCode.DEPENDENCY_SHIFT: "Задержка сдвинула цепочку зависимостей.",
+    AlertCode.BUS_FACTOR: "Критическая компетенция зависит от одного или ни одного инженера.",
+    AlertCode.PLAN_SCOPE_CHANGE: "Изменился состав или состояние плана.",
+    AlertCode.TASK_MOVED: "Задача перенесена в более поздний спринт.",
+}
+
+
+def replanning_page(tables: dict[str, pd.DataFrame]) -> None:
+    st.header("KPI и пересчёт плана")
+    st.caption(
+        "Воспроизводимый demo-сценарий после Sprint 1. "
+        "Planner пока не подключён; страница показывает готовый контракт KPI/diff/alerts."
+    )
+
+    controls = st.columns((2, 2, 1))
+    scenario_label = controls[0].selectbox(
+        "Сценарий",
+        (
+            "Дефицит QA и каскадный сдвиг",
+            "План выполняется",
+        ),
+        key="replanning_scenario",
+    )
+    delivered_sp = controls[1].slider(
+        "Факт Sprint 1, SP",
+        min_value=0,
+        max_value=5,
+        value=5,
+        key="replanning_delivered_sp",
+    )
+    bus_factor_risk = controls[2].checkbox(
+        "Bus Factor = 1",
+        value=True,
+        key="replanning_bus_factor",
+    )
+    scenario = (
+        DemoScenario.QA_SHORTAGE
+        if scenario_label.startswith("Дефицит")
+        else DemoScenario.ON_TRACK
+    )
+    catalog = reference_catalog(tables)
+    snapshot = build_demo_snapshot(
+        scenario,
+        delivered_story_points=float(delivered_sp),
+        critical_bus_factor=bus_factor_risk,
+        catalog=catalog,
+    )
+
+    if catalog is None:
+        st.warning(
+            "Справочники не загружены: demo работает, но статусы и причины не проверены."
+        )
+    else:
+        reference_issues = validate_reference_usage(
+            snapshot.current_plan, snapshot.actual_results, catalog
+        )
+        if reference_issues:
+            for issue in reference_issues:
+                st.error(issue)
+        else:
+            st.caption("✓ Статусы и причины прошли проверку по справочникам датасета.")
+
+    fact = snapshot.pi_predictability_fact
+    forecast = snapshot.pi_predictability_forecast
+    sprint_one = snapshot.sprint_say_do[0]
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("PI Predictability — FACT", percentage_text(fact.percentage))
+    forecast_delta = None
+    if fact.percentage is not None and forecast is not None and forecast.percentage is not None:
+        forecast_delta = f"{forecast.percentage - fact.percentage:+.1f} п.п. к факту"
+    metric_columns[1].metric(
+        "PI Predictability — FORECAST",
+        percentage_text(forecast.percentage if forecast else None),
+        delta=forecast_delta,
+    )
+    metric_columns[2].metric("Sprint 1 Say/Do", percentage_text(sprint_one.percentage))
+    metric_columns[3].metric("Изменений в плане", len(snapshot.plan_diff.entries))
+
+    kpi_tab, plan_tab, alerts_tab, methodology_tab = st.tabs(
+        ("KPI", "Изменения плана", "Риски", "Как это считается")
+    )
+
+    with kpi_tab:
+        st.subheader("Факт и прогноз кварта")
+        pi_rows = [
+            {"Метрика": "PI Predictability FACT", "Значение": fact.percentage or 0},
+        ]
+        if forecast is not None:
+            pi_rows.append(
+                {"Метрика": "PI Predictability FORECAST", "Значение": forecast.percentage or 0}
+            )
+        st.bar_chart(pd.DataFrame(pi_rows).set_index("Метрика"))
+
+        st.subheader("Sprint Say/Do")
+        say_do_rows = [
+            {
+                "Sprint": index,
+                "Тип": "FACT" if metric.kind is MeasureKind.FACT else "FORECAST",
+                "Выполнено / запланировано SP": metric.numerator,
+                "Baseline SP": metric.denominator,
+                "Say/Do": percentage_text(metric.percentage),
+            }
+            for index, metric in enumerate(snapshot.sprint_say_do, start=1)
+        ]
+        st.dataframe(pd.DataFrame(say_do_rows), width="stretch", hide_index=True)
+
+    with plan_tab:
+        st.subheader("Original plan → Current plan")
+        original = snapshot.original_plan.by_task_id()
+        current = snapshot.current_plan.by_task_id()
+        plan_rows = []
+        for task_id in sorted(set(original) | set(current)):
+            before = original.get(task_id)
+            after = current.get(task_id)
+            plan_rows.append(
+                {
+                    "Task": task_id,
+                    "Initiative": (after or before).initiative_id,
+                    "Team": (after or before).team_id,
+                    "Original": sprint_text(before.completion_sprint if before else None),
+                    "Current": sprint_text(after.completion_sprint if after else None),
+                    "State": after.state.value if after else "removed",
+                    "SP": (after or before).story_points,
+                    "Reason": after.mismatch_reason if after else None,
+                    "Decision status": after.decision_status if after else None,
+                }
+            )
+        st.dataframe(pd.DataFrame(plan_rows), width="stretch", hide_index=True)
+
+        allocation_rows = []
+        for version_name, version_plan in (
+            ("Original", snapshot.original_plan),
+            ("Current", snapshot.current_plan),
+        ):
+            for plan_item in version_plan.items:
+                for allocation in plan_item.allocations:
+                    role_hours = ", ".join(
+                        f"{item.role}: {item.hours:g} ч"
+                        for item in allocation.role_hours
+                    )
+                    engineer_hours = ", ".join(
+                        f"{item.engineer_id}: {item.hours:g} ч"
+                        for item in allocation.engineer_hours
+                    )
+                    allocation_rows.append(
+                        {
+                            "Plan": version_name,
+                            "Task": plan_item.task_id,
+                            "Sprint": allocation.sprint_number,
+                            "Role hours": role_hours,
+                            "Engineer hours": engineer_hours,
+                        }
+                    )
+        if allocation_rows:
+            st.subheader("Многоспринтовые трудозатраты")
+            st.caption(
+                "T-104 требует 130 часов Backend: 80 ч в первом спринте "
+                "выполнения и 50 ч во втором."
+            )
+            st.dataframe(pd.DataFrame(allocation_rows), width="stretch", hide_index=True)
+
+        st.subheader("Машинный diff")
+        diff_rows = [
+            {
+                "Task": entry.task_id,
+                "Changes": ", ".join(CHANGE_LABELS[change] for change in entry.changes),
+                "Before": sprint_text(entry.before.completion_sprint if entry.before else None),
+                "After": sprint_text(entry.after.completion_sprint if entry.after else None),
+                "Reason": entry.after.mismatch_reason if entry.after else None,
+            }
+            for entry in snapshot.plan_diff.entries
+        ]
+        if diff_rows:
+            st.dataframe(pd.DataFrame(diff_rows), width="stretch", hide_index=True)
+        else:
+            st.success("План не изменился.")
+
+    with alerts_tab:
+        if not snapshot.alerts:
+            st.success("Активных рисков нет.")
+        for alert in snapshot.alerts:
+            icon = {
+                AlertLevel.RED: "🔴",
+                AlertLevel.ORANGE: "🟠",
+                AlertLevel.YELLOW: "🟡",
+            }[alert.level]
+            evidence = ", ".join(f"{key}={value}" for key, value in alert.evidence)
+            message = (
+                f"{icon} {alert.level.value} · {alert.entity_id} — "
+                f"{ALERT_MESSAGES[alert.code]}"
+            )
+            if evidence:
+                message += f"  Данные: {evidence}."
+            if alert.level is AlertLevel.RED:
+                st.error(message)
+            elif alert.level is AlertLevel.ORANGE:
+                st.warning(message)
+            else:
+                st.info(message)
+
+    with methodology_tab:
+        st.markdown(
+            """
+            **FACT** считается только по закрытому Sprint 1.
+
+            **FORECAST** добавляет инициативы, все baseline-задачи которых ещё помещаются до Sprint 6.
+
+            **Say/Do** всегда делится на SP из `original_plan`, даже если задачи перенесли.
+
+            **RED** — выход за квартал, **ORANGE** — дефицит роли, **YELLOW** — каскадный сдвиг.
+            """
+        )
+
 
 def main() -> None:
-    st.title("Просмотр processed-данных")
+    st.title("Планирование команд — DEV UI")
     st.caption(
-        "Временный интерфейс для разработки. Он читает processed-данные, строит план "
-        "только в памяти и не изменяет файлы."
+        "Технический read-only интерфейс: processed-данные, planner "
+        "в памяти и воспроизводимый replanning demo. Файлы не изменяются."
     )
     pages = {
         "Загрузка датасета": upload_page,
         "Обзор": overview_page,
+        "KPI и пересчёт": replanning_page,
         "Задачи": tasks_page,
         "Трудозатраты по ролям": effort_page,
         "Зависимости": dependencies_page,
