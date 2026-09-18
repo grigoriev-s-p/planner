@@ -4,7 +4,7 @@ const state = {
   page: 'home', taskId: null, taskSprint: null,
   teamId: null, engineerId: null, starTab: 'teams', riskId: null,
   riskFilter: 'Все', skillTeam: 'all', skillRole: 'all', skillTech: 'all',
-  taskReturnPage: 'planning', loading: true, error: null,
+  taskReturnPage: 'current-plan', loading: true, error: null,
 };
 
 const data = {
@@ -143,7 +143,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, constructor: window.planConstructor.render, planning: renderPlanning, tasks: renderTasks, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
+  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
 }
 
 function renderUnavailable() {
@@ -402,9 +402,9 @@ function bindEvents() {
   $('#factInput').addEventListener('change', (event) => { const file = event.target.files?.[0]; $('#uploadFileStatus').textContent = file ? `Выбран файл: ${file.name}. Backend пересчёта не подключён, файл не обработан.` : 'Файл не выбран'; });
   document.addEventListener('click', (event) => {
     if (event.target.closest('[data-close-drawer]')) { closeEmployee(); return; }
-    if (event.target.closest('[data-task-back]')) { show(state.taskReturnPage || 'planning'); return; }
+    if (event.target.closest('[data-task-back]')) { show(state.taskReturnPage || 'current-plan'); return; }
     const nav = event.target.closest('button[data-page]'); if (nav) { show(nav.dataset.page); return; }
-    const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('planning'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
+    const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('current-plan'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
     const planTask = event.target.closest('[data-plan-task]'); if (planTask) { gotoTask(planTask.dataset.planTask); return; }
     const task = event.target.closest('[data-open-task]'); if (task) { gotoTask(task.dataset.openTask); return; }
     const risk = event.target.closest('[data-open-risk]'); if (risk) { state.riskId = risk.dataset.openRisk; state.riskFilter = 'Все'; show('risks'); return; }
@@ -431,6 +431,7 @@ function hydrate(payload) {
   data.features = payload.features || {};
   data.ready = true;
   state.loading = false;
+  state.error = null;
   state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
   state.teamId = data.teams[0]?.team_id || null;
   state.riskId = data.risks[0]?.risk_id || null;
@@ -445,7 +446,10 @@ async function initialize() {
       window.postcodeApi.getConstructorCatalog(),
     ]);
     hydrate(dashboard);
-    window.planConstructor.initialize(constructorCatalog, window.postcodeApi);
+    window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
+      hydrate(plannerResult);
+      show('current-plan');
+    });
     renderPage(state.page);
   } catch (error) {
     state.loading = false;

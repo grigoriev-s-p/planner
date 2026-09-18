@@ -13,8 +13,8 @@
       <button class="brand" type="button" data-page="home" aria-label="PostCode — главная"><span class="brand-icon">п<span class="brand-spark">✦</span></span><span class="brand-name">PostCode<small>TEAM INTELLIGENCE</small></span></button>
       <nav class="nav" aria-label="Основная навигация">
         <button type="button" class="nav-link active" data-page="home">Главная</button>
-        <button type="button" class="nav-link" data-page="constructor">Конструктор</button>
         <button type="button" class="nav-link" data-page="planning">Планирование</button>
+        <button type="button" class="nav-link" data-page="current-plan">Текущий план</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
         <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
@@ -23,46 +23,40 @@
 
     <main id="mainContent" class="main">
       <section class="page active" id="page-home" aria-labelledby="homeTitle">
-        <div class="hero home-hero"><div class="hero-copy"><h1 id="homeTitle">План на виду.<br><em>Команда в фокусе.</em></h1><p>Шесть спринтов, работающие задачи и риски — одна точка входа в сервис.</p><button class="btn btn-white" type="button" data-page="planning">Открыть квартальный план <span>↗</span></button></div><div class="hero-graphic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="abstract-card one">✦</div><div class="abstract-card two">◎</div><div class="abstract-card three">▦</div></div></div>
-        <div class="section-heading"><h2>Шесть спринтов</h2><button class="text-button" type="button" data-page="planning">Всё планирование <span>↗</span></button></div>
+        <div class="hero home-hero"><div class="hero-copy"><h1 id="homeTitle">План на виду.<br><em>Команда в фокусе.</em></h1><p>Шесть спринтов, работающие задачи и риски — одна точка входа в сервис.</p><button class="btn btn-white" type="button" data-page="current-plan">Открыть текущий план <span>↗</span></button></div><div class="hero-graphic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="abstract-card one">✦</div><div class="abstract-card two">◎</div><div class="abstract-card three">▦</div></div></div>
+        <div class="section-heading"><h2>Шесть спринтов</h2><button class="text-button" type="button" data-page="current-plan">Текущий план <span>↗</span></button></div>
         <div id="homeSprints" class="home-sprints"></div>
         <div class="recalc-banner"><span class="recalc-banner-icon">↻</span><div><h3>Завершили спринт?</h3><p>Перейдите к загрузке факта и посмотрите сценарий пересчёта плана.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Пересчитать план →</button></div>
         <div class="two-cols home-sections"><article class="panel"><div class="panel-heading"><h2>Текущие задачи</h2></div><div id="homeTasks" class="stack"></div></article><article class="panel"><div class="panel-heading"><h2>Ключевые риски</h2><button class="text-button" data-page="risks" type="button">Все риски ↗</button></div><div id="homeRisks" class="stack"></div></article></div>
         <div class="star-banner"><div class="star-banner-icon">✳</div><div><h2>Узнайте, кто в чём силён</h2><p>Команды, инженеры, технологии, занятость и Bus Factor.</p></div><button class="btn btn-blue" type="button" data-page="star">Посмотреть звёздную карту ↗</button></div>
       </section>
 
-      <section class="page" id="page-constructor" aria-labelledby="constructorTitle">
-        <div class="page-intro"><div><h1 id="constructorTitle">Конструктор плана</h1><p>Соберите сценарий вручную или загрузите полный Excel-датасет для автоматического расчёта квартала.</p></div><div class="page-intro-icon" aria-hidden="true">✶</div></div>
+      <section class="page" id="page-planning" aria-labelledby="planningTitle">
+        <div class="page-intro"><div><h1 id="planningTitle">Планирование</h1><p>Сформируйте состав задач и команд для построения квартального плана.</p></div><div class="page-intro-icon" aria-hidden="true">✶</div></div>
         <div class="constructor-mode-switch" role="tablist" aria-label="Сценарий построения плана"><button class="constructor-mode-button active" type="button" role="tab" aria-selected="true" data-constructor-mode="manual">Составить вручную</button><button class="constructor-mode-button" type="button" role="tab" aria-selected="false" data-constructor-mode="upload">Загрузить датасет</button></div>
 
         <section id="constructorManualMode" class="constructor-mode-view">
           <div class="constructor-layout">
             <div class="constructor-catalog">
               <article class="panel constructor-section">
-                <div class="panel-heading"><div><div class="eyebrow">КОМАНДЫ</div><h2>Выберите команды</h2></div><button class="btn btn-outline" id="addConstructorTeam" type="button">+ Добавить</button></div>
+                <div class="panel-heading"><h2>Выберите команды</h2><button class="btn btn-outline" id="addConstructorTeam" type="button">+ Добавить</button></div>
                 <input class="constructor-search" id="constructorTeamSearch" type="search" placeholder="Поиск по ID или названию">
                 <div class="constructor-pick-list" id="constructorTeamCatalog"></div>
               </article>
               <article class="panel constructor-section">
-                <div class="panel-heading"><div><div class="eyebrow">ЗАДАЧИ</div><h2>Выберите задачи</h2></div><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить</button></div>
+                <div class="panel-heading"><h2>Выберите задачи</h2><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить</button></div>
                 <input class="constructor-search" id="constructorTaskSearch" type="search" placeholder="Поиск по ID или названию">
                 <div class="constructor-pick-list tall" id="constructorTaskCatalog"></div>
               </article>
             </div>
             <aside class="panel constructor-draft">
-              <div class="eyebrow">ЧЕРНОВИК</div><h2>Состав сценария</h2>
+              <h2>Состав сценария</h2>
               <div class="constructor-counters" id="constructorCounters"></div>
               <div id="constructorDraftEntities"></div>
               <div id="constructorErrors" class="constructor-errors" hidden></div>
               <div class="constructor-actions"><button class="btn btn-blue" id="buildConstructorPlan" type="button">Построить план</button><button class="btn btn-outline" id="clearConstructorDraft" type="button">Очистить черновик</button></div>
             </aside>
           </div>
-          <section id="constructorResult" class="constructor-result" hidden>
-            <div class="section-heading"><div><div class="eyebrow">РЕЗУЛЬТАТ PLANNER</div><h2>План на шесть спринтов</h2></div><span class="tag green">Рассчитано в памяти</span></div>
-            <div id="constructorResultSummary" class="metric-grid"></div>
-            <article class="panel"><div class="board-viewport"><div id="constructorSprintBoard" class="sprint-board constructor-board"></div></div></article>
-            <article class="panel outside-panel"><div class="panel-heading"><div><div class="eyebrow">НЕ ВОШЛИ В КВАРТАЛ</div><h2>Перенесённые и невыполнимые задачи</h2></div></div><div id="constructorOutsideTasks"></div></article>
-          </section>
         </section>
 
         <section id="constructorUploadMode" class="constructor-mode-view" hidden>
@@ -70,17 +64,11 @@
             <div class="constructor-dataset-copy"><span class="constructor-upload-icon" aria-hidden="true">↑</span><div><h2>Автоматическое планирование из Excel</h2><p id="constructorDatasetStatus" aria-live="polite">Загрузите датасет — planner сам выберет задачи, команды и распределит работу по шести спринтам.</p></div></div>
             <div class="constructor-dataset-actions"><input id="constructorDatasetInput" type="file" accept=".xlsx,.xlsm" hidden><button class="btn btn-blue" id="uploadConstructorDataset" type="button">Загрузить и построить план</button></div>
           </div>
-          <section id="constructorAutoResult" class="constructor-result" hidden>
-            <div class="section-heading"><div><div class="eyebrow">АВТОМАТИЧЕСКИЙ РЕЗУЛЬТАТ</div><h2>План на шесть спринтов</h2></div><span class="tag green">Рассчитано из Excel</span></div>
-            <div id="constructorAutoResultSummary" class="metric-grid"></div>
-            <article class="panel"><div class="board-viewport"><div id="constructorAutoSprintBoard" class="sprint-board constructor-board"></div></div></article>
-            <article class="panel outside-panel"><div class="panel-heading"><div><div class="eyebrow">НЕ ВОШЛИ В КВАРТАЛ</div><h2>Перенесённые и невыполнимые задачи</h2></div></div><div id="constructorAutoOutsideTasks"></div></article>
-          </section>
         </section>
       </section>
 
-      <section class="page" id="page-planning" aria-labelledby="planningTitle">
-        <div class="page-intro planning-hero"><div><h1 id="planningTitle">Планирование</h1><p>Актуальный план по спринтам, инициативы и причины решений.</p></div></div>
+      <section class="page" id="page-current-plan" aria-labelledby="currentPlanTitle">
+        <div class="page-intro planning-hero"><div><h1 id="currentPlanTitle">Текущий план</h1><p>Актуальный квартальный план по спринтам, инициативам и причинам решений.</p></div></div>
         <div class="panel planning-board-panel"><div class="panel-heading align-end"><div><h2>Квартал по спринтам</h2><p class="hint">Нажмите на задачу, чтобы открыть подробную информацию.</p></div><div class="legend"><span><i class="legend-mark blue"></i>Текущий спринт</span></div></div><div class="board-viewport"><div id="sprintBoard" class="sprint-board"></div></div></div>
         <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">Ожидаемый KPI плана</h2><p class="hint">Результат при успешном выполнении всех задач текущего квартального плана.</p></div></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
         <div class="initiative-grid">
