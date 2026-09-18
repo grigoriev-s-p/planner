@@ -235,11 +235,20 @@ class BaselineQuarterPlanner:
         context: FeasibilityContext,
         quarter_start_date: Any = None,
         scoring_config: ScoringConfig | None = None,
+        *,
+        allow_team_reassignment: bool = True,
+        allow_cross_team: bool = True,
+        cross_team_task_ids: set[str] | None = None,
     ):
         self.context = context
         self.feasibility = FeasibilityService(context)
         self.calendar = PlanningCalendar.from_value(quarter_start_date)
         self.scoring_config = scoring_config or ScoringConfig()
+        self.allow_team_reassignment = allow_team_reassignment
+        self.allow_cross_team = allow_cross_team
+        # Recommendation simulations may open external help only for explicitly
+        # accepted tasks.  The regular plan keeps its former all-or-nothing API.
+        self.cross_team_task_ids = frozenset(cross_team_task_ids or ())
         self.tasks = {
             task_id: dict(task)
             for task in context.tasks
@@ -542,6 +551,9 @@ class BaselineQuarterPlanner:
                 role_hours_override={},
                 story_points_override=0.0 if story_points is not None else None,
                 team_id_override=team_id,
+                allow_cross_team=(self.allow_cross_team and (
+                    not self.cross_team_task_ids or task_id in self.cross_team_task_ids
+                )),
             )
             if not feasibility.can_complete or team_id is None:
                 attempts.append(
@@ -587,9 +599,12 @@ class BaselineQuarterPlanner:
                 feasibility = self.feasibility.check(
                     task_id,
                     state,
-                    role_hours_override=remaining,
-                    story_points_override=0.0 if story_points is not None else None,
-                    team_id_override=team_id,
+                role_hours_override=remaining,
+                story_points_override=0.0 if story_points is not None else None,
+                team_id_override=team_id,
+                allow_cross_team=(self.allow_cross_team and (
+                    not self.cross_team_task_ids or task_id in self.cross_team_task_ids
+                )),
                 )
                 if not feasibility.can_start:
                     attempts.append(
@@ -885,7 +900,11 @@ class BaselineQuarterPlanner:
         """Simulate existing teams and prefer the source team on equal finish."""
 
         original_team_id = _text(task.get("team_id"))
-        candidate_team_ids = list(self.team_ids)
+        candidate_team_ids = (
+            list(self.team_ids)
+            if self.allow_team_reassignment or original_team_id is None
+            else [original_team_id]
+        )
         if original_team_id in candidate_team_ids:
             candidate_team_ids.remove(original_team_id)
             candidate_team_ids.insert(0, original_team_id)
@@ -1461,6 +1480,10 @@ def build_quarter_plan(
     context: FeasibilityContext,
     quarter_start_date: Any = None,
     scoring_config: ScoringConfig | None = None,
+    *,
+    allow_team_reassignment: bool = True,
+    allow_cross_team: bool = True,
+    cross_team_task_ids: set[str] | None = None,
 ) -> QuarterPlan:
     """Build the scored plan; resource state and atomic rollback are automatic."""
 
@@ -1468,4 +1491,7 @@ def build_quarter_plan(
         context,
         quarter_start_date=quarter_start_date,
         scoring_config=scoring_config,
+        allow_team_reassignment=allow_team_reassignment,
+        allow_cross_team=allow_cross_team,
+        cross_team_task_ids=cross_team_task_ids,
     ).plan()

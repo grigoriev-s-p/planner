@@ -220,6 +220,30 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
         self.assertIn("onPlanApproved(approvedPlan);", constructor_source)
 
+    def test_constructor_kpi_uses_backend_percent_without_second_multiplication(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("format(parsed)", constructor_source)
+        self.assertNotIn("Number(value) * 100", constructor_source)
+        self.assertNotIn("Math.round(expectedKpi * 100)", constructor_source)
+        self.assertIn("KPI недоступен", constructor_source)
+
+    def test_constructor_renders_changed_task_effect_without_reoptimizing(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("changed_tasks", constructor_source)
+        self.assertIn("scrollIntoView", constructor_source)
+        self.assertIn("task-card--just-added", constructor_source)
+        self.assertIn("prefers-reduced-motion", constructor_source)
+        self.assertIn("applyOptimisticDelta", constructor_source)
+        self.assertNotIn("refreshRecommendations(draftId", constructor_source)
+
+    def test_recommendation_ui_uses_work_volume_and_saved_best_state(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Лучший найденный вариант выбран", constructor_source)
+        self.assertIn("Перераспределение задач", constructor_source)
+        self.assertIn("Помощь между командами", constructor_source)
+        self.assertIn("После подключения", constructor_source)
+        self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+
     def test_home_plan_links_open_current_plan(self) -> None:
         home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
         self.assertIn('data-page="current-plan"', home)

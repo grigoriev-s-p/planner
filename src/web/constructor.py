@@ -392,9 +392,23 @@ def build_constructor_plan(
         for row in tables["tasks"]
         if _clean_text(row.get("task_id")) not in selected_ids
     }
-    service = PlanningAPIService.from_tables(tables, plan_version="constructor-draft")
+    service = PlanningAPIService.from_tables(
+        tables,
+        plan_version="constructor-base-draft",
+        planner_options={
+            "allow_team_reassignment": False,
+            "allow_cross_team": False,
+        },
+    )
     return {
         **_without_support_tasks(service.dashboard, support_ids),
+        # Kept only by the in-memory draft store; it is removed before the
+        # response is sent to a browser.  Rebuilding from these inputs makes
+        # recommendation evaluation side-effect free.
+        "_recommendation_context": {
+            "tables": tables,
+            "support_task_ids": sorted(support_ids),
+        },
         "draft": {
             "storage": "browser_local_storage",
             "server_persisted": False,
@@ -450,6 +464,10 @@ def build_constructor_plan_from_workbook(
             service = PlanningAPIService.from_tables(
                 repository.active_planning_tables(),
                 plan_version=f"constructor-upload-{fingerprint}",
+                planner_options={
+                    "allow_team_reassignment": False,
+                    "allow_cross_team": False,
+                },
             )
     except (
         DatasetParsingError,
@@ -469,6 +487,10 @@ def build_constructor_plan_from_workbook(
     )
     return {
         **_without_support_tasks(service.dashboard, hidden_archived_tasks),
+        "_recommendation_context": {
+            "tables": repository.active_planning_tables(),
+            "support_task_ids": sorted(hidden_archived_tasks),
+        },
         "catalog": catalog,
         "uploaded_dataset": {
             "name": safe_name,

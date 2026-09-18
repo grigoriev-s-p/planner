@@ -113,6 +113,43 @@ RISK_PRESENTATION = {
 }
 
 
+def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Presentation DTO for product users; raw planner codes remain internal."""
+    groups: dict[str, dict[str, Any]] = {}
+    order = {"dependency": 0, "specialists": 1, "engineer_hours": 2, "team_capacity": 3, "quarter": 4, "other": 5}
+    for reason in reasons:
+        code = str(reason.get("code") or "")
+        details = reason.get("details") or {}
+        if code in {"DEPENDENCY_NOT_COMPLETED", "UNKNOWN_DEPENDENCY_DATE", "MISSING_DEPENDENCY_REFERENCE", "DEPENDENCY_DELAY"}:
+            key, title = "dependency", "Задача заблокирована зависимостью"
+            values = [f"Сначала должна быть завершена {details.get('blocking_task_id')}."] if details.get("blocking_task_id") else ["Ожидается завершение связанной задачи."]
+        elif code in {"MISSING_SPECIALIST", "NO_AVAILABLE_ROLE_SPECIALIST", "INSUFFICIENT_SKILL_CAPACITY"}:
+            key, title = "specialists", "Не хватает специалистов"
+            values = [str(details.get("role"))] if details.get("role") else ["Нет специалиста с нужными компетенциями."]
+        elif code in {"INSUFFICIENT_ROLE_CAPACITY", "INSUFFICIENT_ENGINEER_CAPACITY"}:
+            key, title = "engineer_hours", "Не хватает доступного времени специалистов"
+            role = details.get("role")
+            deficit = _number(details.get("deficit_hours"))
+            values = [f"{role}: дефицит {deficit:g} ч." if role and deficit is not None else (f"{role}: недостаточно часов." if role else "Недостаточно часов специалистов.")]
+        elif code in {"INSUFFICIENT_TEAM_CAPACITY", "INSUFFICIENT_SP_CAPACITY"}:
+            key, title = "team_capacity", "Недостаточно ресурсов команды"
+            deficit = _number(details.get("deficit_sp"))
+            values = [f"Не хватает {deficit:g} SP." if deficit else "Не хватает доступной ёмкости команды."]
+        elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
+            key, title, values = "quarter", "Не помещается в текущий квартал", ["Для завершения требуется срок за пределами шести спринтов."]
+        elif code in {"ALLOCATION_ROLLED_BACK", "MULTI_SPRINT_REQUIRED"}:
+            # Diagnostic planner events add no new user cause when a resource
+            # block is already present.
+            continue
+        else:
+            key, title, values = "other", "Требуется уточнение данных", ["Планировщик не получил достаточно данных для размещения задачи."]
+        group = groups.setdefault(key, {"type": key, "title": title, "details": []})
+        for value in values:
+            if value not in group["details"]:
+                group["details"].append(value)
+    return [groups[key] for key in sorted(groups, key=lambda item: order[item])]
+
+
 BUS_FACTOR_PRESENTATION = {
     "critical": {"label": "Критично", "rank": 0},
     "warning": {"label": "Требует внимания", "rank": 1},
@@ -406,9 +443,11 @@ class PlanningAPIService:
         *,
         tables: dict[str, list[dict[str, Any]]] | None = None,
         plan_version: str | None = None,
+        planner_options: dict[str, Any] | None = None,
     ):
         self.processed_dir = processed_dir
         self._plan_version_override = plan_version
+        self._planner_options = dict(planner_options or {})
         if tables is None:
             self.tables = {
                 name: _read_table(processed_dir, name) for name in TABLE_FILES
@@ -432,7 +471,7 @@ class PlanningAPIService:
             team_history=self.tables["team_history"],
             task_skill_requirements=self.tables["task_skill_requirements"],
         )
-        self.plan = build_quarter_plan(self.context)
+        self.plan = build_quarter_plan(self.context, **self._planner_options)
         self._raw_tasks = {
             task_id: row
             for row in self.tables["tasks"]
@@ -449,10 +488,15 @@ class PlanningAPIService:
         tables: dict[str, list[dict[str, Any]]],
         *,
         plan_version: str = "in-memory",
+        planner_options: dict[str, Any] | None = None,
     ) -> "PlanningAPIService":
         """Build API DTOs from temporary normalized records without file writes."""
 
-        return cls(tables=tables, plan_version=plan_version)
+        return cls(
+            tables=tables,
+            plan_version=plan_version,
+            planner_options=planner_options,
+        )
 
     @cached_property
     def plan_version(self) -> str:
@@ -675,6 +719,7 @@ class PlanningAPIService:
                     "dependencies": self._task_dependencies(task_id),
                     "allocations": allocations,
                     "reasons": reasons,
+                    "reason_blocks": _human_reason_blocks(reasons),
                     "risks": [item.to_dict() for item in explanation.risks],
                     "recommendations": [item.to_dict() for item in explanation.recommendations],
                     "summary": explanation.summary,
