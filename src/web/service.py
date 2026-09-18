@@ -17,17 +17,7 @@ import pandas as pd
 
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
-from src.replanning import (
-    ActualResults,
-    PlanItem,
-    PlanState,
-    QuarterPlan,
-    RoleHoursAllocation,
-    SprintAllocation,
-    calculate_expected_quarter_kpi,
-    calculate_pi_predictability_fact,
-    calculate_sprint_say_do,
-)
+from src.star_map import StarMapService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -115,29 +105,11 @@ RISK_PRESENTATION = {
 class PlanningAPIService:
     """Load one processed snapshot and expose stable JSON DTOs."""
 
-    def __init__(
-        self,
-        processed_dir: Path = PROCESSED_DIR,
-        *,
-        tables: dict[str, list[dict[str, Any]]] | None = None,
-        plan_version: str | None = None,
-    ):
+    def __init__(self, processed_dir: Path = PROCESSED_DIR):
         self.processed_dir = processed_dir
-        self._plan_version_override = plan_version
-        if tables is None:
-            self.tables = {
-                name: _read_table(processed_dir, name) for name in TABLE_FILES
-            }
-        else:
-            missing = sorted(set(TABLE_FILES) - set(tables))
-            if missing:
-                raise ServiceDataError(
-                    f"Missing in-memory planning tables: {', '.join(missing)}"
-                )
-            self.tables = {
-                name: [dict(row) for row in rows] for name, rows in tables.items()
-            }
-        self.tables.setdefault("task_skill_requirements", [])
+        self.tables = {
+            name: _read_table(processed_dir, name) for name in TABLE_FILES
+        }
         self.context = FeasibilityContext.from_records(
             tasks=self.tables["tasks"],
             task_role_effort=self.tables["task_role_effort"],
@@ -145,7 +117,6 @@ class PlanningAPIService:
             engineers=self.tables["engineers"],
             engineer_skills=self.tables["engineer_skills"],
             team_history=self.tables["team_history"],
-            task_skill_requirements=self.tables["task_skill_requirements"],
         )
         self.plan = build_quarter_plan(self.context)
         self._raw_tasks = {
@@ -158,21 +129,8 @@ class PlanningAPIService:
             item.task_id: item for item in self.plan.task_explanations
         }
 
-    @classmethod
-    def from_tables(
-        cls,
-        tables: dict[str, list[dict[str, Any]]],
-        *,
-        plan_version: str = "in-memory",
-    ) -> "PlanningAPIService":
-        """Build API DTOs from temporary normalized records without file writes."""
-
-        return cls(tables=tables, plan_version=plan_version)
-
     @cached_property
     def plan_version(self) -> str:
-        if self._plan_version_override:
-            return self._plan_version_override
         manifest = self.processed_dir / "_dataset_manifest.json"
         try:
             payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -180,94 +138,6 @@ class PlanningAPIService:
         except (OSError, ValueError, TypeError):
             fingerprint = "unknown"
         return f"baseline-{fingerprint}"
-
-    @cached_property
-    def kpi_baseline_plan(self) -> QuarterPlan:
-        """Immutable Week-0 snapshot adapted from the initial planner result."""
-
-        items = []
-        for task in self.tasks:
-            if task["status"] != "PLANNED" or not task["planned_sprints"]:
-                continue
-            allocations = tuple(
-                SprintAllocation(
-                    sprint_number=int(sprint),
-                    role_hours=tuple(
-                        RoleHoursAllocation(role, float(hours))
-                        for role, hours in sorted(role_hours.items())
-                    ),
-                )
-                for sprint, role_hours in sorted(
-                    task["role_hours_by_sprint"].items(), key=lambda item: int(item[0])
-                )
-            )
-            items.append(
-                PlanItem(
-                    task_id=task["task_id"],
-                    initiative_id=task["initiative_id"],
-                    story_points=float(task["story_points"] or 0.0),
-                    completion_sprint=int(task["completion_sprint"]),
-                    state=PlanState.PLANNED,
-                    team_id=task["assigned_team_id"],
-                    allocations=allocations,
-                )
-            )
-        return QuarterPlan(
-            quarter_id=self.plan_version,
-            version=1,
-            as_of_sprint=0,
-            items=tuple(items),
-        )
-
-    @cached_property
-    def kpi_actual_results(self) -> ActualResults:
-        """No sprint fact is available until a factual upload is integrated."""
-
-        return ActualResults(
-            quarter_id=self.kpi_baseline_plan.quarter_id,
-            completed_through_sprint=0,
-            entries=(),
-        )
-
-    @cached_property
-    def kpis(self) -> dict[str, Any]:
-        baseline = self.kpi_baseline_plan
-        actuals = self.kpi_actual_results
-        expected = calculate_expected_quarter_kpi(
-            (item.initiative_id for item in baseline.items),
-            self.plan.completed_initiative_ids,
-        )
-        quarter = calculate_pi_predictability_fact(baseline, actuals)
-        sprints = [
-            calculate_sprint_say_do(baseline, baseline, actuals, sprint)
-            for sprint in range(1, 7)
-        ]
-        return _clean(
-            {
-                "expected_kpi": {
-                    "completed_initiatives": expected.numerator,
-                    "baseline_initiatives": expected.denominator,
-                    "incomplete_initiatives": expected.denominator - expected.numerator,
-                    "completion_percent": expected.percentage,
-                },
-                "quarter_kpi": {
-                    "completed_initiatives": quarter.numerator,
-                    "baseline_initiatives": quarter.denominator,
-                    "completion_percent": quarter.percentage,
-                    "has_actual": quarter.has_actual,
-                },
-                "sprint_kpis": [
-                    {
-                        "sprint": sprint,
-                        "baseline_sp": result.denominator,
-                        "actual_sp": result.numerator,
-                        "completion_percent": result.percentage,
-                        "has_actual": result.has_actual,
-                    }
-                    for sprint, result in enumerate(sprints, start=1)
-                ],
-            }
-        )
 
     def _task_role_requirements(self, task_id: str) -> dict[str, float]:
         values: dict[str, float] = defaultdict(float)
@@ -431,11 +301,6 @@ class PlanningAPIService:
             technology = _text(row.get("technology"))
             if engineer_id and technology:
                 skills_by_engineer[engineer_id].add(technology)
-        team_names = {
-            team_id: (_text(row.get("team_name")) or _text(row.get("name")) or team_id)
-            for row in self.tables["team_history"]
-            if (team_id := _text(row.get("team_id")))
-        }
         output = []
         all_allocations = [
             {"task_id": task["task_id"], **allocation}
@@ -464,7 +329,7 @@ class PlanningAPIService:
             output.append(
                 {
                     "team_id": team_id,
-                    "name": team_names.get(team_id, team_id),
+                    "name": team_id,
                     "member_ids": member_ids,
                     "roles": sorted({role for row in profiles if (role := _text(row.get("role")))}),
                     "technologies": sorted(
@@ -525,17 +390,9 @@ class PlanningAPIService:
                 continue
             target = profiles.setdefault(
                 engineer_id,
-                {
-                    "names": set(),
-                    "roles": set(),
-                    "grades": set(),
-                    "team_ids": set(),
-                    "skills": set(),
-                },
+                {"roles": set(), "grades": set(), "team_ids": set(), "skills": set()},
             )
             target["team_ids"].add(team_id)
-            if name := _text(row.get("name")):
-                target["names"].add(name)
             if role := _text(row.get("role")):
                 target["roles"].add(role)
             if grade := _text(row.get("grade")):
@@ -590,7 +447,7 @@ class PlanningAPIService:
             output.append(
                 {
                     "engineer_id": engineer_id,
-                    "name": sorted(profile["names"])[0] if profile["names"] else engineer_id,
+                    "name": engineer_id,
                     "roles": sorted(profile["roles"]),
                     "grade": ", ".join(sorted(profile["grades"])) or None,
                     "team_ids": sorted(profile["team_ids"]),
@@ -713,15 +570,12 @@ class PlanningAPIService:
 
     @cached_property
     def star_map(self) -> dict[str, Any]:
-        return {
-            "teams": self.teams,
-            "engineers": self.engineers,
-            "skills": sorted(
-                {skill for engineer in self.engineers for skill in engineer["skills"]}
-            ),
-            "bus_factor": None,
-            "bus_factor_status": "NOT_IMPLEMENTED",
-        }
+        return StarMapService(
+            engineers=self.tables["engineers"],
+            engineer_skills=self.tables["engineer_skills"],
+            tasks=self.tasks,
+            current_sprint=self.plan_payload["quarter"]["current_sprint"],
+        ).payload()
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:
@@ -734,12 +588,10 @@ class PlanningAPIService:
             "teams": self.teams,
             "engineers": self.engineers,
             "star_map": self.star_map,
-            "kpis": self.kpis,
             "features": {
-                "plan_constructor": "AVAILABLE_EPHEMERAL",
                 "replanning": "NOT_IMPLEMENTED",
                 "bus_factor": "NOT_IMPLEMENTED",
-                "initial_excel_upload": "AVAILABLE_EPHEMERAL",
+                "initial_excel_upload": "NOT_IMPLEMENTED",
             },
         }
 
