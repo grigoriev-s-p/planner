@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260919-3">
 </head>
 <body>
   <div class="shell">
@@ -45,7 +45,7 @@
                 <div class="constructor-pick-list" id="constructorTeamCatalog"></div>
               </article>
               <article class="panel constructor-section">
-                <div class="panel-heading"><h2>Выберите задачи</h2><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить</button></div>
+                <div class="panel-heading"><h2>Выберите задачи</h2><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить задачу</button></div>
                 <input class="constructor-search" id="constructorTaskSearch" type="search" placeholder="Поиск по ID или названию">
                 <div class="constructor-pick-list tall" id="constructorTaskCatalog"></div>
               </article>
@@ -83,7 +83,7 @@
       <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
         <div class="page-intro tasks-list-hero"><div><h1 id="tasksListTitle">Задачи</h1><p>Все задачи текущего набора: приоритет, команда, инициатива и положение в квартальном плане.</p></div><div class="page-intro-icon" aria-hidden="true">✓</div></div>
         <article class="panel tasks-list-panel">
-          <div class="panel-heading"><div><h2>Список задач</h2><p class="hint">Нажмите на ID или строку, чтобы открыть карточку задачи.</p></div><span class="tag" id="tasksListCount">0</span></div>
+          <div class="panel-heading"><div><h2>Список задач</h2><p class="hint">Нажмите на ID или строку, чтобы открыть карточку задачи.</p></div><div class="tasks-list-controls"><button class="btn btn-blue" id="addTaskFromTasks" type="button">+ Добавить задачу</button><span class="tag" id="tasksListCount">0</span></div></div>
           <div id="tasksListState" aria-live="polite"></div>
           <div class="table-scroll" id="tasksTableWrap"><table class="data-table tasks-table"><thead><tr>
             <th><button class="sort-button" type="button" data-task-sort="task_id">ID <span aria-hidden="true"></span></button></th>
@@ -148,8 +148,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js"></script>
-  <script src="/constructor.js"></script>
-  <script src="/app.js"></script>
+  <script src="/api.js?v=20260919-3"></script>
+  <script src="/constructor.js?v=20260919-3"></script>
+  <script src="/app.js?v=20260919-3"></script>
 </body>
 </html>

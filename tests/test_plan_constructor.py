@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +11,7 @@ from src.web.api import app, plan_drafts
 from src.web.constructor import (
     ConstructorScenario,
     ScenarioValidationError,
+    build_constructor_catalog,
     build_constructor_plan,
     validate_constructor_scenario,
 )
@@ -136,6 +138,68 @@ class ConstructorDomainTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ScenarioValidationError, "Capacity Rate"):
             validate_constructor_scenario(ConstructorScenario(**payload))
+
+    def test_catalog_engineer_cannot_be_moved_to_another_team(self) -> None:
+        payload = scenario_payload()
+        payload["teams"].append({"team_id": "Team-B", "expected_velocity_sp": 20})
+        payload["engineers"][0]["assignments"][0]["team_id"] = "Team-B"
+        catalog_tables = {
+            "engineers": [
+                {
+                    "engineer_id": "ENG-1",
+                    "team_id": "Team-A",
+                    "role": "Backend",
+                    "capacity_rate": 1,
+                }
+            ],
+            "tasks": [],
+        }
+
+        with self.assertRaisesRegex(ScenarioValidationError, "другой командой"):
+            validate_constructor_scenario(
+                ConstructorScenario(**payload), catalog_tables=catalog_tables
+            )
+
+    def test_catalog_marks_only_unassigned_engineer_as_free(self) -> None:
+        service = SimpleNamespace(
+            tables={
+                "engineers": [
+                    {
+                        "engineer_id": "ENG-FREE",
+                        "team_id": None,
+                        "role": "Backend",
+                        "grade": "Middle",
+                        "capacity_rate": 1,
+                    },
+                    {
+                        "engineer_id": "ENG-BUSY",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "grade": "Senior",
+                        "capacity_rate": 1,
+                    },
+                ],
+                "engineer_skills": [],
+                "task_skill_requirements": [],
+                "task_role_effort": [],
+                "task_dependencies": [],
+                "tasks": [],
+            },
+            tasks=[],
+            teams=[],
+        )
+
+        engineers = {
+            item["engineer_id"]: item
+            for item in build_constructor_catalog(service)["engineers"]
+        }
+
+        self.assertTrue(engineers["ENG-FREE"]["is_free"])
+        self.assertEqual(engineers["ENG-FREE"]["assignments"], [])
+        self.assertEqual(
+            engineers["ENG-FREE"]["free_assignment"]["role"], "Backend"
+        )
+        self.assertFalse(engineers["ENG-BUSY"]["is_free"])
 
 
 @unittest.skipUnless((PROCESSED_DIR / "tasks.csv").is_file(), "processed dataset is absent")

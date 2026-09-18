@@ -768,6 +768,11 @@ function closeEmployee() {
 }
 
 function bindEvents() {
+  $('#addTaskFromTasks')?.addEventListener('click', () => window.planConstructor.openTaskForm());
+  window.addEventListener('postcode:constructor-task-added', (event) => {
+    show('planning');
+    showToast(`Задача ${event.detail?.taskId || ''} добавлена в черновик сценария и выбрана.`);
+  });
   $('#starTeamSelect').addEventListener('change', (event) => { state.teamId = event.target.value; state.competency = null; renderStarTeams(); });
   $('#skillTeam').addEventListener('change', (event) => { state.skillTeam = event.target.value; renderStarSkills(); });
   $('#skillRole').addEventListener('change', (event) => { state.skillRole = event.target.value; renderStarSkills(); });

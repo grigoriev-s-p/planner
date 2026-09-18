@@ -262,10 +262,28 @@ window.planConstructor = (() => {
 
   function automaticEngineers() {
     const selectedTeams = new Set(draft.teams.map((team) => team.team_id));
-    return catalog.engineers.map((engineer) => ({
+    const engineers = catalog.engineers.map((engineer) => ({
       ...clone(engineer),
       assignments: engineer.assignments.filter((assignment) => selectedTeams.has(assignment.team_id)),
     })).filter((engineer) => engineer.assignments.length > 0);
+    const usedIds = new Set(engineers.map((engineer) => engineer.engineer_id));
+    draft.teams.forEach((team) => (team.engineer_ids || []).forEach((engineerId) => {
+      if (usedIds.has(engineerId)) return;
+      const source = findCatalog('engineers', engineerId);
+      const availability = source?.free_assignment;
+      if (!source || source.assignments.length || !availability?.role) return;
+      engineers.push({
+        ...clone(source),
+        assignments: [{
+          team_id: team.team_id,
+          role: availability.role,
+          grade: availability.grade || null,
+          capacity_rate: Number(availability.capacity_rate || 1),
+        }],
+      });
+      usedIds.add(engineerId);
+    }));
+    return engineers;
   }
 
   function errorsForDraft() {
@@ -273,7 +291,10 @@ window.planConstructor = (() => {
     const taskIds = new Set(draft.tasks.map((item) => item.task_id));
     if (!draft.teams.length) errors.push('Выберите или добавьте хотя бы одну команду.');
     if (!draft.tasks.length) errors.push('Выберите или добавьте хотя бы одну задачу.');
-    if (draft.teams.length && !automaticEngineers().length) errors.push('Для выбранных команд в исходном датасете не найден доступный ресурс.');
+    const engineerTeams = new Set(automaticEngineers().flatMap((engineer) => engineer.assignments.map((assignment) => assignment.team_id)));
+    draft.teams.forEach((team) => {
+      if (!engineerTeams.has(team.team_id)) errors.push(`Для команды ${team.name || team.team_id} не выбран ни один доступный инженер.`);
+    });
     draft.tasks.forEach((task) => (task.depends_on || []).forEach((dependency) => {
       if (!taskIds.has(dependency)) errors.push(`Добавьте блокирующую задачу ${dependency} для ${task.task_id} или уберите зависимость.`);
     }));
@@ -311,6 +332,28 @@ window.planConstructor = (() => {
     return `<datalist id="constructorRoleOptions">${catalog.options.roles.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist><datalist id="constructorInitiativeOptions">${initiatives.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>`;
   }
 
+  function freeEngineerCandidates(currentTeamId = null) {
+    const reservedByOtherTeams = new Set(draft.teams
+      .filter((team) => team.team_id !== currentTeamId)
+      .flatMap((team) => team.engineer_ids || []));
+    return catalog.engineers.filter((engineer) => (
+      engineer.assignments.length === 0
+      && engineer.free_assignment?.role
+      && !reservedByOtherTeams.has(engineer.engineer_id)
+    ));
+  }
+
+  function freeEngineerPicker(team) {
+    const selected = new Set(team.engineer_ids || []);
+    const engineers = freeEngineerCandidates(team.team_id);
+    const options = engineers.map((engineer) => {
+      const assignment = engineer.free_assignment;
+      const details = [assignment.role, assignment.grade, `${number(Number(assignment.capacity_rate || 1) * 100)}%`].filter(Boolean).join(' · ');
+      return `<label class="constructor-option"><input type="checkbox" name="team_engineer_id" value="${esc(engineer.engineer_id)}" ${selected.has(engineer.engineer_id) ? 'checked' : ''}><span><b>${esc(engineer.name || engineer.engineer_id)}</b><small>${esc(details)}</small></span></label>`;
+    }).join('');
+    return `<fieldset class="constructor-free-engineers"><legend>Свободные инженеры</legend><p class="muted">Можно выбрать только специалистов, которые не закреплены за другой командой.</p><div class="constructor-pick-list">${options || '<div class="empty-state">Свободных инженеров сейчас нет.</div>'}</div></fieldset>`;
+  }
+
   function updateDependencyView() {
     const form = $c('#constructorEntityForm');
     if (!form || form.dataset.formType !== 'tasks') return;
@@ -324,8 +367,8 @@ window.planConstructor = (() => {
     const item = id ? clone(findDraft(type, id)) : null;
     const content = $c('#constructorDialogContent');
     if (type === 'teams') {
-      const team = item || {team_id: '', name: '', expected_velocity_sp: 20, focus_factor: 0.8};
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label><label>Focus Factor<input name="focus_factor" value="0.8" readonly><small>Зафиксирован правилами кейса.</small></label><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      const team = item || {team_id: '', name: '', expected_velocity_sp: 20, engineer_ids: []};
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label>${freeEngineerPicker(team)}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], depends_on: []};
@@ -352,7 +395,7 @@ window.planConstructor = (() => {
     }
     let entity;
     if (type === 'teams') {
-      entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: Number(values.get('expected_velocity_sp')), focus_factor: 0.8, source: existing?.source || 'draft'};
+      entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: Number(values.get('expected_velocity_sp')), engineer_ids: values.getAll('team_engineer_id').map(String), source: existing?.source || 'draft'};
     }
     if (type === 'tasks') {
       const storyPoints = Number(String(values.get('story_points')).replace(',', '.'));
@@ -376,6 +419,9 @@ window.planConstructor = (() => {
     saveDraft();
     $c('#constructorDialog').close();
     render();
+    if (type === 'tasks' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-task-added', {detail: {taskId: id}}));
+    }
   }
 
   async function buildPlan() {
@@ -387,7 +433,8 @@ window.planConstructor = (() => {
     button.textContent = 'Строим план…';
     try {
       const tasks = draft.tasks.map((task) => ({...task, team_id: null}));
-      const planResult = await api.buildConstructorPlan({teams: draft.teams, engineers: automaticEngineers(), tasks});
+      const teams = draft.teams.map(({engineer_ids: _engineerIds, focus_factor: _legacyFocusFactor, ...team}) => team);
+      const planResult = await api.buildConstructorPlan({teams, engineers: automaticEngineers(), tasks});
       showErrors([]);
       previewPlan = planResult;
       renderPreview();
@@ -509,5 +556,9 @@ window.planConstructor = (() => {
     render();
   }
 
-  return Object.freeze({initialize, updateCatalog, render});
+  function openTaskForm() {
+    openForm('tasks');
+  }
+
+  return Object.freeze({initialize, updateCatalog, render, openTaskForm});
 })();

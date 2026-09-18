@@ -178,6 +178,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         api_source = (frontend / "api.js").read_text(encoding="utf-8")
         app_source = (frontend / "app.js").read_text(encoding="utf-8")
         constructor_source = (frontend / "constructor.js").read_text(encoding="utf-8")
+        index_source = (frontend / "index.html").read_text(encoding="utf-8")
         self.assertEqual(api_source.count("fetch("), 1)
         self.assertNotIn("fetch(", app_source)
         self.assertNotIn("fetch(", constructor_source)
@@ -198,6 +199,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn('team_id: null', constructor_source)
         self.assertIn('list="constructorInitiativeOptions"', constructor_source)
         self.assertIn('name="dependency_id"', constructor_source)
+        self.assertIn('name="team_engineer_id"', constructor_source)
+        self.assertIn('Свободные инженеры', constructor_source)
+        self.assertNotIn('Focus Factor', constructor_source)
+        self.assertIn('+ Добавить задачу', index_source)
         self.assertIn("/api/plan-constructor/plan", api_source)
         self.assertIn("/api/plan-constructor/plan/upload", api_source)
         for old_demo_name in (
@@ -264,6 +269,9 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('data-page="tasks">Задачи</button>', navigation)
         self.assertIn('data-page="planning">Планирование</button>', navigation)
         self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
+        self.assertIn('id="addTaskFromTasks"', self.html)
+        self.assertIn("window.planConstructor.openTaskForm()", self.app)
+        self.assertIn("postcode:constructor-task-added", self.app)
 
     def test_constructor_approves_preview_before_replacing_current_plan(self) -> None:
         self.assertIn("planning: window.planConstructor.render", self.app)
@@ -358,8 +366,8 @@ class FrontendRefinementTests(unittest.TestCase):
         response = client.get("/tasks/AI-302")
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="page-task-detail"', response.text)
-        self.assertIn('href="/styles.css"', response.text)
-        self.assertIn('src="/app.js"', response.text)
+        self.assertIn('href="/styles.css?v=', response.text)
+        self.assertIn('src="/app.js?v=', response.text)
 
     def test_development_notice_remains_only_on_unfinished_replanning_page(self) -> None:
         self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 1)
