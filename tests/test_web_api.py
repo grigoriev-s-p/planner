@@ -105,12 +105,24 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             len({engineer["engineer_id"] for engineer in engineers.json()}),
             len(engineers.json()),
         )
-        self.assertIsNone(star_map.json()["bus_factor"])
-        self.assertEqual(star_map.json()["bus_factor_status"], "NOT_IMPLEMENTED")
+        bus_factor = star_map.json()
+        self.assertEqual(bus_factor["status"], "AVAILABLE")
+        self.assertEqual(bus_factor["method"], "existing_bus_factor_service")
+        self.assertTrue(bus_factor["teams"])
+        first_competency = next(
+            competency
+            for team in bus_factor["teams"]
+            for competency in team["competencies"]
+        )
+        engineer_ids = [
+            engineer["engineer_id"] for engineer in first_competency["engineers"]
+        ]
+        self.assertEqual(first_competency["bus_factor"], len(engineer_ids))
+        self.assertEqual(len(engineer_ids), len(set(engineer_ids)))
 
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
-        self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
+        self.assertEqual(self.dashboard["features"]["bus_factor"], "AVAILABLE")
         self.assertEqual(
             self.dashboard["features"]["initial_excel_upload"],
             "AVAILABLE_PERSISTENT_CATALOG",
@@ -254,14 +266,23 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
-    def test_development_notice_is_reused_on_three_pages(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 3)
+    def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)
         for target in (
             "risksDevelopmentNotice",
             "recalcDevelopmentNotice",
-            "starDevelopmentNotice",
         ):
             self.assertIn(f'id="{target}"', self.html)
+
+    def test_star_map_uses_backend_bus_factor_for_selected_team(self) -> None:
+        self.assertIn('id="competencyMap"', self.html)
+        self.assertIn('id="busRiskList"', self.html)
+        self.assertIn('id="competencyDetail"', self.html)
+        self.assertIn("const busTeam = starTeamBy(state.teamId)", self.app)
+        self.assertIn("team.competencies.map", self.app)
+        self.assertIn("selected.engineers.map", self.app)
+        self.assertIn("busProfile?.team_criticality", self.app)
+        self.assertNotIn("Backend пока не рассчитывает Bus Factor", self.html + self.app)
 
     def test_kpi_block_follows_board_and_precedes_initiatives(self) -> None:
         board_position = self.html.index('id="sprintBoard"')

@@ -20,7 +20,12 @@ from .constructor import (
     build_constructor_plan,
     build_constructor_plan_from_workbook,
 )
-from .service import PlanningAPIService, ServiceDataError, get_planning_service
+from .service import (
+    PlanningAPIService,
+    ServiceDataError,
+    build_bus_factor_payload,
+    get_planning_service,
+)
 from .catalog import (
     ARCHIVE_REASON_LABELS,
     ArchiveConflictError,
@@ -118,6 +123,11 @@ def _current_dashboard() -> dict:
 def _dashboard_with_lifecycle() -> dict:
     payload = _current_dashboard()
     repository = get_catalog_repository()
+    # Current Bus Factor follows the active catalog even when an approved plan
+    # remains historically unchanged after an archive action. This calls only
+    # the existing analytics service and never launches the quarter planner.
+    payload["star_map"] = build_bus_factor_payload(repository.active_planning_tables())
+    payload.setdefault("features", {})["bus_factor"] = "AVAILABLE"
     for collection, entity_type, id_field in (
         ("tasks", "task", "task_id"),
         ("teams", "team", "team_id"),
@@ -243,7 +253,7 @@ def engineer(engineer_id: str) -> dict:
 
 @app.get("/api/star-map")
 def star_map() -> dict:
-    return _current_dashboard()["star_map"]
+    return build_bus_factor_payload(get_catalog_repository().active_planning_tables())
 
 
 @app.get("/api/plan-constructor/catalog")
