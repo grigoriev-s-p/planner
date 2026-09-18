@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 
 RAW_DIRECTION_DESCRIPTION = "blocking_task_id -> blocked_task_id"
+
+
+class DependencyCompletionSource(str, Enum):
+    """Source of the blocker completion used by the dependency rule."""
+
+    PLANNED = "PLANNED"
+    ACTUAL = "ACTUAL"
+    PRE_QUARTER_DONE = "PRE_QUARTER_DONE"
+
+
+@dataclass(frozen=True) 
+class DependencyTiming:
+    completion_sprint: int
+    earliest_start_sprint: int
+    completion_source: DependencyCompletionSource
 
 
 def incoming_dependencies(
@@ -28,12 +45,62 @@ def dependency_is_satisfied(
     blocking_task_id: str,
     sprint_number: int,
     completed_tasks: Mapping[str, int],
+    actual_completed_tasks: Mapping[str, int] | None = None,
 ) -> tuple[bool, int | None, int | None]:
-    """A task completed in Sprint N unlocks its dependent task in Sprint N+1."""
+    """Return whether the dependency permits a start in ``sprint_number``."""
 
-    completed_sprint = completed_tasks.get(blocking_task_id)
-    if completed_sprint is None:
+    timing = dependency_timing(
+        blocking_task_id,
+        completed_tasks,
+        actual_completed_tasks=actual_completed_tasks,
+    )
+    if timing is None:
         return False, None, None
-    completed_sprint = int(completed_sprint)
-    earliest_start = completed_sprint + 1
-    return sprint_number >= earliest_start, completed_sprint, earliest_start
+    return (
+        sprint_number >= timing.earliest_start_sprint,
+        timing.completion_sprint,
+        timing.earliest_start_sprint,
+    )
+
+
+def dependency_timing(
+    blocking_task_id: str,
+    planned_completed_tasks: Mapping[str, int],
+    *,
+    actual_completed_tasks: Mapping[str, int] | None = None,
+) -> DependencyTiming | None:
+    """Calculate the single authoritative hard-dependency timing.
+
+    A planned completion keeps one full reserve sprint between the blocker and
+    the dependent task. An observed completion unlocks the immediately
+    following sprint. Sprint 0 represents work completed before the quarter and
+    therefore permits a Sprint 1 start.
+    """
+
+    actual_completed_tasks = actual_completed_tasks or {}
+    if blocking_task_id in actual_completed_tasks:
+        completion_sprint = int(actual_completed_tasks[blocking_task_id])
+        source = (
+            DependencyCompletionSource.PRE_QUARTER_DONE
+            if completion_sprint == 0
+            else DependencyCompletionSource.ACTUAL
+        )
+    elif blocking_task_id in planned_completed_tasks:
+        completion_sprint = int(planned_completed_tasks[blocking_task_id])
+        source = (
+            DependencyCompletionSource.PRE_QUARTER_DONE
+            if completion_sprint == 0
+            else DependencyCompletionSource.PLANNED
+        )
+    else:
+        return None
+
+    if completion_sprint < 0:
+        raise ValueError("dependency completion sprint cannot be negative")
+    if source == DependencyCompletionSource.PRE_QUARTER_DONE:
+        earliest_start = 1
+    elif source == DependencyCompletionSource.ACTUAL:
+        earliest_start = completion_sprint + 1
+    else:
+        earliest_start = completion_sprint + 2
+    return DependencyTiming(completion_sprint, earliest_start, source)

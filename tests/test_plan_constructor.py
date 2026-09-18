@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from src.web.api import app
+from src.web.api import app, plan_drafts
 from src.web.constructor import (
     ConstructorScenario,
     ScenarioValidationError,
@@ -143,6 +143,11 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.client = TestClient(app)
+        plan_drafts.reset()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        plan_drafts.reset()
 
     def test_catalog_exposes_editable_copies_of_dataset_entities(self) -> None:
         response = self.client.get("/api/plan-constructor/catalog")
@@ -176,6 +181,39 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(after, before)
 
+    def test_build_keeps_current_plan_until_the_reviewed_draft_is_approved(self) -> None:
+        current_before = self.client.get("/api/dashboard")
+        self.assertEqual(current_before.status_code, 200)
+
+        draft_response = self.client.post(
+            "/api/plan-constructor/plan", json=scenario_payload()
+        )
+        self.assertEqual(draft_response.status_code, 200, draft_response.text)
+        draft = draft_response.json()
+        self.assertFalse(draft["draft"]["approved"])
+
+        current_after_build = self.client.get("/api/dashboard")
+        self.assertEqual(current_after_build.status_code, 200)
+        self.assertEqual(current_after_build.json()["plan"], current_before.json()["plan"])
+
+        approval = self.client.post(
+            "/api/plan-constructor/drafts/approve",
+            json={"draft_id": draft["draft"]["id"]},
+        )
+        self.assertEqual(approval.status_code, 200, approval.text)
+        self.assertTrue(approval.json()["draft"]["approved"])
+
+        current_after_approval = self.client.get("/api/dashboard")
+        self.assertEqual(current_after_approval.status_code, 200)
+        self.assertEqual(
+            current_after_approval.json()["plan"]["quarter"]["plan_version"],
+            "constructor-draft",
+        )
+        self.assertEqual(
+            [task["task_id"] for task in current_after_approval.json()["tasks"]],
+            ["TASK-1"],
+        )
+
     @unittest.skipUnless(RAW_WORKBOOK.is_file(), "raw workbook is absent")
     def test_uploaded_workbook_builds_plan_without_modifying_project_data(self) -> None:
         protected_files = [RAW_WORKBOOK, *sorted(PROCESSED_DIR.glob("*"))]
@@ -184,6 +222,8 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
             for path in protected_files
             if path.is_file()
         }
+        current_before = self.client.get("/api/dashboard")
+        self.assertEqual(current_before.status_code, 200)
 
         response = self.client.post(
             "/api/plan-constructor/plan/upload",
@@ -195,11 +235,15 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertEqual(payload["uploaded_dataset"]["name"], RAW_WORKBOOK.name)
-        self.assertFalse(payload["uploaded_dataset"]["server_persisted"])
+        self.assertTrue(payload["uploaded_dataset"]["server_persisted"])
+        self.assertIn("catalog_merge", payload["uploaded_dataset"])
         self.assertEqual(len(payload["plan"]["sprints"]), 6)
         self.assertTrue(payload["teams"])
         self.assertTrue(payload["engineers"])
         self.assertTrue(payload["tasks"])
+        current_after_build = self.client.get("/api/dashboard")
+        self.assertEqual(current_after_build.status_code, 200)
+        self.assertEqual(current_after_build.json()["plan"], current_before.json()["plan"])
         after = {
             path: hashlib.sha256(path.read_bytes()).hexdigest()
             for path in protected_files

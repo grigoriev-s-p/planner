@@ -223,10 +223,18 @@ def _message(code: ReasonCode, task_id: str, details: dict[str, Any]) -> str:
             f"{details['allocated_hours']:g} ч."
         )
     if code == ReasonCode.DEPENDENCY_DELAY:
+        if details.get("completion_source") == "ACTUAL":
+            return (
+                f"{details['blocking_task_id']} завершена по факту в Sprint "
+                f"{details['blocking_completion_sprint']}. Зависимая задача может быть "
+                f"запланирована с Sprint {details['earliest_allowed_sprint']}."
+            )
         return (
-            f"Блокирующая задача {details['blocking_task_id']} завершена в спринте "
-            f"{details['blocking_completion_sprint']}; старт возможен не раньше "
-            f"спринта {details['earliest_allowed_sprint']}."
+            f"Задача зависит от {details['blocking_task_id']}. По квартальному плану "
+            f"{details['blocking_task_id']} завершается в Sprint "
+            f"{details['blocking_completion_sprint']}, поэтому после резервного спринта "
+            f"задача может начаться не раньше Sprint "
+            f"{details['earliest_allowed_sprint']}."
         )
     if code == ReasonCode.MULTI_SPRINT:
         return (
@@ -251,6 +259,7 @@ def build_task_explanation(
     result: "TaskPlanResult",
     *,
     blocker_completion_sprints: dict[str, int | None] | None = None,
+    blocker_completion_sources: dict[str, str] | None = None,
 ) -> TaskPlanningExplanation:
     """Build an explanation only from facts present in a completed result."""
 
@@ -301,12 +310,13 @@ def build_task_explanation(
                                       _message(ReasonCode.CROSS_TEAM_HELP, result.task_id, details), details))
     for blocker in result.dependencies:
         completed = (blocker_completion_sprints or {}).get(blocker)
-        # A Done blocker is accepted before the quarter and does not delay the
-        # dependent task. For a planned blocker, the one-sprint gap is an
-        # explicit scheduling fact that clients may show directly.
-        if completed is not None and completed > 0 and result.start_sprint is not None:
+        source = (blocker_completion_sources or {}).get(blocker, "PLANNED")
+        # A Done blocker accepted before the quarter does not delay the task.
+        if completed is not None and completed > 0:
+            earliest = completed + (1 if source == "ACTUAL" else 2)
             details = {"blocking_task_id": blocker, "blocking_completion_sprint": completed,
-                       "earliest_allowed_sprint": completed + 1}
+                       "earliest_allowed_sprint": earliest,
+                       "completion_source": source}
             reasons.append(DecisionReason(ReasonCode.DEPENDENCY_DELAY, ExplanationSeverity.WARNING,
                                           _REASON_META[ReasonCode.DEPENDENCY_DELAY][1],
                                           _message(ReasonCode.DEPENDENCY_DELAY, result.task_id, details), details))

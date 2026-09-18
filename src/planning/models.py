@@ -15,6 +15,7 @@ class SprintState:
     engineer_hours_used: dict[str, float] = field(default_factory=dict)
     engineer_team_hours_used: dict[str, dict[str, float]] = field(default_factory=dict)
     completed_tasks: dict[str, int] = field(default_factory=dict)
+    actual_completed_tasks: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not 1 <= self.sprint_number <= 6:
@@ -33,12 +34,16 @@ class SprintState:
                         "engineer_team_hours_used"
                         f"[{engineer_id!r}][{team_id!r}] cannot be negative."
                     )
-        for task_id, sprint in self.completed_tasks.items():
-            if int(sprint) < 0:
-                raise ValueError(
-                    f"completed_tasks[{task_id!r}] cannot be negative; use 0 for work "
-                    "completed before the planning quarter."
-                )
+        for field_name, values in (
+            ("completed_tasks", self.completed_tasks),
+            ("actual_completed_tasks", self.actual_completed_tasks),
+        ):
+            for task_id, sprint in values.items():
+                if int(sprint) < 0:
+                    raise ValueError(
+                        f"{field_name}[{task_id!r}] cannot be negative; use 0 for work "
+                        "completed before the planning quarter."
+                    )
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,7 @@ class DependencyCheck:
     dependency_type: str | None
     completed_sprint: int | None
     earliest_start_sprint: int | None
+    completion_source: str | None
     result: str
 
 

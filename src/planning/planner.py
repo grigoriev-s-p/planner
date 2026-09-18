@@ -9,6 +9,7 @@ from typing import Any
 
 from .allocation import allocate_available_hours
 from .capacity import calculate_team_capacity
+from .dependency_rules import dependency_timing
 from .eligibility import EligibilityContext, EligibilityResult, EligibilityService
 from .feasibility import FeasibilityContext, FeasibilityService
 from .models import FeasibilityReason
@@ -29,6 +30,7 @@ from .scoring import (
     ScoringConfig,
     TaskScore,
     calculate_task_score,
+    date_ordinal,
     score_sort_key,
 )
 from .sprint_state import SprintLedger
@@ -123,6 +125,44 @@ def _boolean(value: Any) -> bool:
     return value is True or str(value).strip().casefold() in {"true", "1", "yes"}
 
 
+def _select_priority_task_id(
+    candidate_ids: Iterable[str],
+    tasks: Mapping[str, Mapping[str, Any]],
+    scores: Mapping[str, TaskScore],
+) -> str:
+    """Select by absolute rung, optional start date, then secondary scoring.
+
+    A start date is comparable only when every candidate at the winning rung
+    has one. Otherwise the existing score and stable ID tie-break decide, so a
+    missing date is never converted into an artificial date.
+    """
+
+    candidates = tuple(sorted(candidate_ids))
+    if not candidates:
+        raise ValueError("At least one planning candidate is required.")
+    highest_rung = max(
+        _number(tasks[task_id].get("rung")) or 0.0 for task_id in candidates
+    )
+    highest_rung_ids = tuple(
+        task_id
+        for task_id in candidates
+        if (_number(tasks[task_id].get("rung")) or 0.0) == highest_rung
+    )
+    planned_starts = {
+        task_id: date_ordinal(tasks[task_id].get("planned_start"))
+        for task_id in highest_rung_ids
+    }
+    use_planned_start = all(value is not None for value in planned_starts.values())
+    return min(
+        highest_rung_ids,
+        key=lambda task_id: score_sort_key(
+            tasks[task_id],
+            scores[task_id],
+            use_planned_start=use_planned_start,
+        ),
+    )
+
+
 def sort_tasks_for_planning(
     tasks: Iterable[Mapping[str, Any]],
     dependencies: Iterable[Mapping[str, Any]],
@@ -157,12 +197,7 @@ def sort_tasks_for_planning(
             task_id: calculate_task_score(candidates[task_id], scoring_context, config)
             for task_id in ready
         }
-        task_id = min(
-            ready,
-            key=lambda candidate_id: score_sort_key(
-                candidates[candidate_id], scored[candidate_id]
-            ),
-        )
+        task_id = _select_priority_task_id(ready, candidates, scored)
         ready.remove(task_id)
         ordered.append(candidates[task_id])
         scoring_context = scoring_context.with_committed(task_id)
@@ -416,8 +451,9 @@ class BaselineQuarterPlanner:
         earliest = 1
         reasons: list[FeasibilityReason] = []
         for blocker in blockers:
-            if blocker in completed_tasks:
-                earliest = max(earliest, completed_tasks[blocker] + 1)
+            timing = dependency_timing(blocker, completed_tasks)
+            if timing is not None:
+                earliest = max(earliest, timing.earliest_start_sprint)
                 continue
             blocker_result = results.get(blocker)
             blocker_task = self.tasks.get(blocker)
@@ -1153,63 +1189,13 @@ class BaselineQuarterPlanner:
             # Cycles are invalid input, but selecting deterministically lets the
             # existing dependency checks reject them without hanging the planner.
             selectable_ids = ready_ids or list(pending)
-            selectable_initiatives = {
-                initiative_id
-                for task_id in selectable_ids
-                if (
-                    initiative_id := _text(
-                        pending[task_id].get("initiative_id")
-                    )
-                )
-                in self._initiative_work
-            }
-            completable_initiatives = {
-                initiative_id
-                for initiative_id in selectable_initiatives
-                if self._can_complete_initiative(
-                    initiative_id,
-                    pending,
-                    ledgers,
-                    completed_tasks,
-                    results,
-                )
-            }
-            if completable_initiatives:
-                selectable_ids = [
-                    task_id
-                    for task_id in selectable_ids
-                    if _text(pending[task_id].get("initiative_id"))
-                    in completable_initiatives
-                ]
-            primary_initiative = self._primary_initiative_id
-            if not any(
-                _text(task.get("initiative_id")) == primary_initiative
-                for task in pending.values()
-            ):
-                primary_initiative = self._primary_initiative_choice(
-                    pending, ledgers, completed_tasks, results
-                )
-                self._primary_initiative_id = primary_initiative
-            if primary_initiative:
-                primary_tasks = [
-                    task_id
-                    for task_id in selectable_ids
-                    if _text(pending[task_id].get("initiative_id")) == primary_initiative
-                ]
-                if primary_tasks:
-                    selectable_ids = primary_tasks
             scored = {
                 task_id: calculate_task_score(
                     pending[task_id], self.scoring_context, self.scoring_config
                 )
                 for task_id in selectable_ids
             }
-            task_id = min(
-                selectable_ids,
-                key=lambda candidate_id: score_sort_key(
-                    pending[candidate_id], scored[candidate_id]
-                ),
-            )
+            task_id = _select_priority_task_id(selectable_ids, pending, scored)
             task = pending.pop(task_id)
             task_score = scored[task_id]
             self.priority_order[task_id] = len(self.priority_order) + 1

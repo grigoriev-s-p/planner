@@ -156,19 +156,17 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual(plan.sprints[0].engineer_hours_used["E-S"], 80)
         self.assertTrue(all(s.engineer_hours_used.get("E-S", 0) <= 80 for s in plan.sprints))
 
-    def test_blocker_is_planned_before_blocked_task(self) -> None:
+    def test_planned_blocker_finishing_sprint_one_requires_sprint_two_gap(self) -> None:
         plan = build_quarter_plan(
             context(
                 [task("BLOCKER"), task("BLOCKED")],
                 dependencies=[{"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}],
             )
         )
-        self.assertLess(
-            result_by_id(plan, "BLOCKER").completion_sprint,
-            result_by_id(plan, "BLOCKED").start_sprint,
-        )
+        self.assertEqual(result_by_id(plan, "BLOCKER").completion_sprint, 1)
+        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 3)
 
-    def test_dependency_starts_after_blocker_completion(self) -> None:
+    def test_multi_sprint_blocker_uses_completion_then_full_gap_sprint(self) -> None:
         plan = build_quarter_plan(
             context(
                 [task("BLOCKER"), task("BLOCKED")],
@@ -177,7 +175,23 @@ class QuarterPlannerTests(unittest.TestCase):
             )
         )
         self.assertEqual(result_by_id(plan, "BLOCKER").completion_sprint, 2)
-        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 4)
+
+    def test_dependency_chain_applies_gap_at_every_edge(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("A"), task("B"), task("C")],
+                effort=[effort("A", 10), effort("B", 10), effort("C", 10)],
+                dependencies=[
+                    {"blocking_task_id": "A", "blocked_task_id": "B"},
+                    {"blocking_task_id": "B", "blocked_task_id": "C"},
+                ],
+            )
+        )
+        self.assertEqual(result_by_id(plan, "A").completion_sprint, 1)
+        self.assertEqual(result_by_id(plan, "B").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "B").completion_sprint, 3)
+        self.assertEqual(result_by_id(plan, "C").start_sprint, 5)
 
     def test_done_blocker_allows_dependent_in_first_sprint(self) -> None:
         plan = build_quarter_plan(
@@ -441,18 +455,15 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual(plan.sprints[0].team_sp_used["Team-B"], 2)
         self.assertTrue(delayed.team_reassigned)
 
-    def test_initiative_completion_is_primary_objective(self) -> None:
-        initiative_a = [
-            task(f"A-{index}", story_points=points, rung=10, initiative_id="INIT-A")
-            for index, points in enumerate((7, 7, 6), start=1)
-        ]
-        initiative_b = [
-            task(f"B-{index}", story_points=points, rung=100, initiative_id="INIT-B")
-            for index, points in enumerate((7, 7, 6, 6, 6, 6, 6, 6), start=1)
+    def test_initiative_count_cannot_override_absolute_task_rung(self) -> None:
+        tasks = [
+            task("HIGH", story_points=30, rung=10, initiative_id="INIT-HIGH"),
+            task("LOW-A", story_points=24, rung=5, initiative_id="INIT-LOW-A"),
+            task("LOW-B", story_points=24, rung=5, initiative_id="INIT-LOW-B"),
         ]
         plan = build_quarter_plan(
             context(
-                [*initiative_a, *initiative_b],
+                tasks,
                 engineers=[
                     {
                         "engineer_id": "E-1",
@@ -465,11 +476,16 @@ class QuarterPlannerTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("INIT-A", plan.completed_initiative_ids)
-        self.assertNotIn("INIT-B", plan.completed_initiative_ids)
-        self.assertTrue(
-            all(result_by_id(plan, task_row["task_id"]).status == PlanStatus.PLANNED for task_row in initiative_a)
+        self.assertEqual(result_by_id(plan, "HIGH").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "HIGH").priority_order, 1)
+        self.assertNotEqual(
+            {
+                result_by_id(plan, "LOW-A").status,
+                result_by_id(plan, "LOW-B").status,
+            },
+            {PlanStatus.PLANNED},
         )
+        self.assertIn("INIT-HIGH", plan.completed_initiative_ids)
 
     def test_rung_breaks_tie_between_equally_completable_initiatives(self) -> None:
         plan = build_quarter_plan(
@@ -668,7 +684,152 @@ class QuarterPlannerTests(unittest.TestCase):
             ],
             [],
         )
-        self.assertEqual([row["task_id"] for row in ordered], ["LATE", "ACTIVE", "EARLY"])
+        self.assertEqual([row["task_id"] for row in ordered], ["LATE", "EARLY", "ACTIVE"])
+
+    def test_absolute_rung_wins_when_quarter_capacity_fits_only_one_task(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("LOW", story_points=30, rung=5),
+                    task("HIGH", story_points=30, rung=10),
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "HIGH").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "HIGH").priority_order, 1)
+        self.assertEqual(result_by_id(plan, "LOW").status, PlanStatus.MOVED)
+
+    def test_infeasible_high_rung_does_not_block_feasible_lower_rung(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("HIGH", rung=10), task("LOW", rung=8)],
+                effort=[
+                    effort("HIGH", 40, "Missing role"),
+                    effort("LOW", 40, "Backend"),
+                ],
+            )
+        )
+
+        self.assertEqual(
+            result_by_id(plan, "HIGH").status,
+            PlanStatus.INELIGIBLE_DATA_CONSTRAINT,
+        )
+        self.assertEqual(result_by_id(plan, "LOW").status, PlanStatus.PLANNED)
+
+    def test_same_rung_earlier_start_date_wins_limited_capacity(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("LATE", story_points=30, rung=8, planned_start="2026-09-15"),
+                    task("EARLY", story_points=30, rung=8, planned_start="2026-09-01"),
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "EARLY").priority_order, 1)
+        self.assertEqual(result_by_id(plan, "EARLY").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "LATE").status, PlanStatus.MOVED)
+
+    def test_start_date_is_not_a_hard_resource_constraint(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("BLOCKER", rung=10),
+                    task("EARLY", rung=8, planned_start="2026-09-01"),
+                    task("LATE", rung=8, planned_start="2026-09-15"),
+                ],
+                effort=[
+                    effort("BLOCKER", 80),
+                    effort("EARLY", 80),
+                    effort("LATE", 80),
+                ],
+                dependencies=[
+                    {"blocking_task_id": "BLOCKER", "blocked_task_id": "EARLY"}
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "BLOCKER").start_sprint, 1)
+        self.assertEqual(result_by_id(plan, "EARLY").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "EARLY").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "LATE").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "LATE").start_sprint, 2)
+
+    def test_equal_rung_without_dates_is_deterministic_for_reordered_input(self) -> None:
+        rows = [task("B", story_points=30, rung=8), task("A", story_points=30, rung=8)]
+        plans = [
+            build_quarter_plan(
+                context(
+                    ordered,
+                    engineers=[
+                        {
+                            "engineer_id": "E-1",
+                            "team_id": "Team-A",
+                            "role": "Backend",
+                            "capacity_rate": 1,
+                        }
+                    ],
+                    history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+                )
+            )
+            for ordered in (rows, list(reversed(rows)))
+        ]
+
+        for plan in plans:
+            self.assertEqual(result_by_id(plan, "A").priority_order, 1)
+            self.assertEqual(result_by_id(plan, "A").status, PlanStatus.PLANNED)
+            self.assertEqual(result_by_id(plan, "B").status, PlanStatus.MOVED)
+
+    def test_lower_rung_uses_later_sprint_after_higher_rung(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("LOW", rung=7), task("HIGH", rung=10)],
+                effort=[effort("LOW", 80), effort("HIGH", 80)],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        high = result_by_id(plan, "HIGH")
+        low = result_by_id(plan, "LOW")
+        self.assertEqual((high.priority_order, high.start_sprint), (1, 1))
+        self.assertEqual((low.priority_order, low.start_sprint), (2, 2))
+        self.assertEqual((high.status, low.status), (PlanStatus.PLANNED, PlanStatus.PLANNED))
 
     def test_priority_tie_breaker_is_task_id(self) -> None:
         common = {"planned_start": "2026-06-01", "planned_end": "2026-06-15"}
@@ -815,19 +976,19 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertLess(result.start_shift_days, 0)
 
     def test_outside_quarter_requires_forecast_beyond_sprint_six(self) -> None:
-        result = result_by_id(
-            build_quarter_plan(
-                context(
-                    [task("BLOCKER", planned_end="2026-07-01"), task("BLOCKED")],
-                    effort=[effort("BLOCKER", 480)],
-                    dependencies=[
-                        {"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}
-                    ],
-                ),
-                quarter_start_date="2026-06-15",
+        plan = build_quarter_plan(
+            context(
+                [task("BLOCKER", planned_end="2026-07-01"), task("BLOCKED")],
+                effort=[effort("BLOCKER", 400)],
+                dependencies=[
+                    {"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}
+                ],
             ),
-            "BLOCKED",
+            quarter_start_date="2026-06-15",
         )
+        blocker = result_by_id(plan, "BLOCKER")
+        result = result_by_id(plan, "BLOCKED")
+        self.assertEqual(blocker.completion_sprint, 5)
         self.assertTrue(result.outside_quarter)
         self.assertIsNone(result.forecast_end_date)
         self.assertIn(ReasonCode.OUTSIDE_QUARTER, {r.code for r in result.final_reasons})
@@ -835,6 +996,16 @@ class QuarterPlannerTests(unittest.TestCase):
             reason for reason in result.final_reasons if reason.code == ReasonCode.OUTSIDE_QUARTER
         )
         self.assertEqual(outside_reason.details["forecast_completion_sprint_minimum"], 7)
+        explanation = next(
+            item for item in plan.task_explanations if item.task_id == "BLOCKED"
+        )
+        delay = next(
+            reason
+            for reason in explanation.reasons
+            if reason.code == ReasonCode.DEPENDENCY_DELAY
+        )
+        self.assertEqual(delay.details["earliest_allowed_sprint"], 7)
+        self.assertIn("после резервного спринта", delay.message)
 
     def test_missing_quarter_start_does_not_invent_forecast_dates(self) -> None:
         result = result_by_id(build_quarter_plan(context([task("T-1")])), "T-1")

@@ -1,8 +1,10 @@
 # Scoring v1
 
-Scoring v1 — объяснимая формула бизнес-приоритета. Она выбирает
-порядок проверки задач, а feasibility checker независимо решает, можно ли
-разместить задачу с учётом Story Points, ролей, инженеров и зависимостей.
+Scoring v1 — объяснимая формула вторичных бизнес-предпочтений. Production
+planner сначала применяет hard constraints и абсолютный `rung`, затем мягкий
+`planned_start`, и только после этого использует компоненты score. Feasibility
+checker независимо решает, можно ли разместить задачу с учётом Story Points,
+ролей, инженеров и зависимостей.
 
 ```text
 base_score = rung_score + status_score
@@ -23,8 +25,11 @@ total_score = base_score + dynamic_score
 `rung` нормализуется среди планируемых задач. `ScoringConfig.rung_direction`
 принимает только подтверждённое значение `"higher_is_better"`; прежний режим
 `"lower_is_better"` отклоняется как противоречащий бизнес-правилу.
-Вес rung (40) — наибольший отдельный вес. Остальные компоненты дополняют его:
-их сумма может поднять задачу с меньшим rung выше по total score.
+Численный `rung_score` сохранён в объяснении, но production order сравнивает
+исходный `rung` отдельным первым ключом. Поэтому сумма остальных компонентов не
+может поднять задачу с меньшим `rung` выше. При равном `rung` более ранний
+`planned_start` используется как soft preference, если даты присутствуют у всех
+сравниваемых задач; иначе применяется следующий tie-break.
 
 При разных известных rung: `rung_score = 40 * (rung - min_rung) / (max_rung - min_rung)`.
 При одинаковых известных значениях вклад равен 40, при пропуске — 0.
@@ -37,6 +42,7 @@ total_score = rung_score                         # 0..40
             + 10 * min(downstream_count / 4, 1)
 ```
 
+`planned_start` не является hard constraint и не ограничивает спринт размещения.
 `planned_end` сохраняется только как baseline metadata: оно не является hard
 constraint, objective, score component или tie-break. Бонус завершения
 инициативы равен максимальному весу, делённому на

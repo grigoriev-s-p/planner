@@ -159,10 +159,9 @@ def test_multisprint_sp_is_proportional_to_allocated_hours() -> None:
     by_sprint = {allocation.sprint_number: allocation for allocation in big.allocations}
 
     assert big.is_multi_sprint
-    assert [by_sprint[number].allocated_hours for number in (1, 2, 3)] == [80, 120, 100]
-    assert by_sprint[1].capacity_sp_load == pytest.approx(80 / 30)
-    assert by_sprint[2].capacity_sp_load == pytest.approx(4)
-    assert by_sprint[3].capacity_sp_load == pytest.approx(100 / 30)
+    assert sum(item.allocated_hours for item in big.allocations) == pytest.approx(300)
+    for allocation in by_sprint.values():
+        assert allocation.capacity_sp_load == pytest.approx(allocation.allocated_hours / 30)
     assert sum(item.capacity_sp_load for item in big.allocations) == pytest.approx(10)
 
 
@@ -342,8 +341,8 @@ def test_dependency_chain_starts_only_after_each_blocker_completes() -> None:
     plan = quarter.plan()
 
     assert result_by_id(plan, "C").completion_sprint == 2
-    assert result_by_id(plan, "B").start_sprint == 3
-    assert result_by_id(plan, "A").start_sprint == 4
+    assert result_by_id(plan, "B").start_sprint == 4
+    assert result_by_id(plan, "A").start_sprint == 6
 
 
 def test_out_of_quarter_recommendations_distinguish_reassignment_from_move() -> None:

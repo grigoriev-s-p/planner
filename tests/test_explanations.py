@@ -4,6 +4,7 @@ import json
 import unittest
 
 from src.planning import FeasibilityContext, build_quarter_plan
+from src.planning.explanations import build_task_explanation
 
 
 def task(task_id: str, *, team: str = "Team-A", story_points: float = 2,
@@ -72,7 +73,23 @@ class StructuredExplainabilityTests(unittest.TestCase):
         item = explanation(plan, "B")
         delay = next(reason for reason in item.reasons if reason.code.value == "DEPENDENCY_DELAY")
         self.assertEqual(delay.details["blocking_task_id"], "A")
-        self.assertEqual(delay.details["earliest_allowed_sprint"], 3)
+        self.assertEqual(delay.details["earliest_allowed_sprint"], 4)
+        self.assertEqual(delay.details["completion_source"], "PLANNED")
+        self.assertIn("после резервного спринта", delay.message)
+
+    def test_actual_dependency_explanation_uses_next_sprint(self):
+        plan = build_quarter_plan(context([task("A"), task("B")], dependencies=[
+            {"blocking_task_id": "A", "blocked_task_id": "B"},
+        ]))
+        result = next(item for item in plan.task_results if item.task_id == "B")
+        item = build_task_explanation(
+            result,
+            blocker_completion_sprints={"A": 1},
+            blocker_completion_sources={"A": "ACTUAL"},
+        )
+        delay = next(reason for reason in item.reasons if reason.code.value == "DEPENDENCY_DELAY")
+        self.assertEqual(delay.details["earliest_allowed_sprint"], 2)
+        self.assertIn("завершена по факту", delay.message)
 
     def test_resource_deficits_and_overflow_use_specific_explanation_codes(self):
         plan = build_quarter_plan(context([task("TOO_MUCH", story_points=100)], effort=[
@@ -103,9 +120,16 @@ class StructuredExplainabilityTests(unittest.TestCase):
             {"blocking_task_id": f"T{index}", "blocked_task_id": f"T{index + 1}"}
             for index in range(1, 7)
         ]))
-        item = explanation(plan, "T7")
-        self.assertIn("QUARTER_OVERFLOW", {reason.code.value for reason in item.reasons})
-        self.assertIn("MOVE_NEXT_QUARTER", {recommendation.code.value for recommendation in item.recommendations})
+        overflowed = [
+            item
+            for item in plan.task_explanations
+            if "QUARTER_OVERFLOW" in {reason.code.value for reason in item.reasons}
+        ]
+        self.assertTrue(overflowed)
+        self.assertIn(
+            "MOVE_NEXT_QUARTER",
+            {recommendation.code.value for recommendation in overflowed[0].recommendations},
+        )
 
 
 if __name__ == "__main__":
