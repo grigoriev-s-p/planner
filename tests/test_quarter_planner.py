@@ -455,18 +455,15 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual(plan.sprints[0].team_sp_used["Team-B"], 2)
         self.assertTrue(delayed.team_reassigned)
 
-    def test_initiative_completion_is_primary_objective(self) -> None:
-        initiative_a = [
-            task(f"A-{index}", story_points=points, rung=10, initiative_id="INIT-A")
-            for index, points in enumerate((7, 7, 6), start=1)
-        ]
-        initiative_b = [
-            task(f"B-{index}", story_points=points, rung=100, initiative_id="INIT-B")
-            for index, points in enumerate((7, 7, 6, 6, 6, 6, 6, 6), start=1)
+    def test_initiative_count_cannot_override_absolute_task_rung(self) -> None:
+        tasks = [
+            task("HIGH", story_points=30, rung=10, initiative_id="INIT-HIGH"),
+            task("LOW-A", story_points=24, rung=5, initiative_id="INIT-LOW-A"),
+            task("LOW-B", story_points=24, rung=5, initiative_id="INIT-LOW-B"),
         ]
         plan = build_quarter_plan(
             context(
-                [*initiative_a, *initiative_b],
+                tasks,
                 engineers=[
                     {
                         "engineer_id": "E-1",
@@ -479,11 +476,16 @@ class QuarterPlannerTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("INIT-A", plan.completed_initiative_ids)
-        self.assertNotIn("INIT-B", plan.completed_initiative_ids)
-        self.assertTrue(
-            all(result_by_id(plan, task_row["task_id"]).status == PlanStatus.PLANNED for task_row in initiative_a)
+        self.assertEqual(result_by_id(plan, "HIGH").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "HIGH").priority_order, 1)
+        self.assertNotEqual(
+            {
+                result_by_id(plan, "LOW-A").status,
+                result_by_id(plan, "LOW-B").status,
+            },
+            {PlanStatus.PLANNED},
         )
+        self.assertIn("INIT-HIGH", plan.completed_initiative_ids)
 
     def test_rung_breaks_tie_between_equally_completable_initiatives(self) -> None:
         plan = build_quarter_plan(
@@ -682,7 +684,152 @@ class QuarterPlannerTests(unittest.TestCase):
             ],
             [],
         )
-        self.assertEqual([row["task_id"] for row in ordered], ["LATE", "ACTIVE", "EARLY"])
+        self.assertEqual([row["task_id"] for row in ordered], ["LATE", "EARLY", "ACTIVE"])
+
+    def test_absolute_rung_wins_when_quarter_capacity_fits_only_one_task(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("LOW", story_points=30, rung=5),
+                    task("HIGH", story_points=30, rung=10),
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "HIGH").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "HIGH").priority_order, 1)
+        self.assertEqual(result_by_id(plan, "LOW").status, PlanStatus.MOVED)
+
+    def test_infeasible_high_rung_does_not_block_feasible_lower_rung(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("HIGH", rung=10), task("LOW", rung=8)],
+                effort=[
+                    effort("HIGH", 40, "Missing role"),
+                    effort("LOW", 40, "Backend"),
+                ],
+            )
+        )
+
+        self.assertEqual(
+            result_by_id(plan, "HIGH").status,
+            PlanStatus.INELIGIBLE_DATA_CONSTRAINT,
+        )
+        self.assertEqual(result_by_id(plan, "LOW").status, PlanStatus.PLANNED)
+
+    def test_same_rung_earlier_start_date_wins_limited_capacity(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("LATE", story_points=30, rung=8, planned_start="2026-09-15"),
+                    task("EARLY", story_points=30, rung=8, planned_start="2026-09-01"),
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "EARLY").priority_order, 1)
+        self.assertEqual(result_by_id(plan, "EARLY").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "LATE").status, PlanStatus.MOVED)
+
+    def test_start_date_is_not_a_hard_resource_constraint(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [
+                    task("BLOCKER", rung=10),
+                    task("EARLY", rung=8, planned_start="2026-09-01"),
+                    task("LATE", rung=8, planned_start="2026-09-15"),
+                ],
+                effort=[
+                    effort("BLOCKER", 80),
+                    effort("EARLY", 80),
+                    effort("LATE", 80),
+                ],
+                dependencies=[
+                    {"blocking_task_id": "BLOCKER", "blocked_task_id": "EARLY"}
+                ],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        self.assertEqual(result_by_id(plan, "BLOCKER").start_sprint, 1)
+        self.assertEqual(result_by_id(plan, "EARLY").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "EARLY").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "LATE").status, PlanStatus.PLANNED)
+        self.assertEqual(result_by_id(plan, "LATE").start_sprint, 2)
+
+    def test_equal_rung_without_dates_is_deterministic_for_reordered_input(self) -> None:
+        rows = [task("B", story_points=30, rung=8), task("A", story_points=30, rung=8)]
+        plans = [
+            build_quarter_plan(
+                context(
+                    ordered,
+                    engineers=[
+                        {
+                            "engineer_id": "E-1",
+                            "team_id": "Team-A",
+                            "role": "Backend",
+                            "capacity_rate": 1,
+                        }
+                    ],
+                    history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+                )
+            )
+            for ordered in (rows, list(reversed(rows)))
+        ]
+
+        for plan in plans:
+            self.assertEqual(result_by_id(plan, "A").priority_order, 1)
+            self.assertEqual(result_by_id(plan, "A").status, PlanStatus.PLANNED)
+            self.assertEqual(result_by_id(plan, "B").status, PlanStatus.MOVED)
+
+    def test_lower_rung_uses_later_sprint_after_higher_rung(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("LOW", rung=7), task("HIGH", rung=10)],
+                effort=[effort("LOW", 80), effort("HIGH", 80)],
+                engineers=[
+                    {
+                        "engineer_id": "E-1",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "capacity_rate": 1,
+                    }
+                ],
+                history=[{"team_id": "Team-A", "velocity_achieved": 10}],
+            )
+        )
+
+        high = result_by_id(plan, "HIGH")
+        low = result_by_id(plan, "LOW")
+        self.assertEqual((high.priority_order, high.start_sprint), (1, 1))
+        self.assertEqual((low.priority_order, low.start_sprint), (2, 2))
+        self.assertEqual((high.status, low.status), (PlanStatus.PLANNED, PlanStatus.PLANNED))
 
     def test_priority_tie_breaker_is_task_id(self) -> None:
         common = {"planned_start": "2026-06-01", "planned_end": "2026-06-15"}

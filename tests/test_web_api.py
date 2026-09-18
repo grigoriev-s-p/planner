@@ -25,10 +25,23 @@ class ProductAPIIntegrationTests(unittest.TestCase):
     def test_frontend_and_assets_are_served(self) -> None:
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
-        for page_id in ("home", "planning", "tasks", "risks", "recalc", "star"):
+        for page_id in (
+            "home", "planning", "current-plan", "tasks", "risks", "recalc", "star"
+        ):
             self.assertIn(f'id="page-{page_id}"', page.text)
-        for asset in ("/styles.css", "/api.js", "/app.js"):
+        for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
             self.assertEqual(self.client.get(asset).status_code, 200)
+        self.assertNotIn("СЦЕНАРИЙ / 6 СПРИНТОВ", page.text)
+        self.assertNotIn("Исходный датасет только для чтения", page.text)
+        self.assertNotIn("Черновик готов", page.text)
+        self.assertNotIn('id="addConstructorEngineer"', page.text)
+        self.assertNotIn('id="constructorTaskTeam"', page.text)
+        self.assertIn('id="constructorTaskSearch"', page.text)
+        self.assertIn('id="constructorDatasetInput"', page.text)
+        self.assertIn('id="uploadConstructorDataset"', page.text)
+        self.assertIn('data-constructor-mode="manual"', page.text)
+        self.assertIn('data-constructor-mode="upload"', page.text)
+        self.assertNotIn('id="constructorAutoResult"', page.text)
 
     def test_plan_contract_is_json_serializable_and_preserves_source_ids(self) -> None:
         response = self.client.get("/api/plan")
@@ -98,6 +111,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
         self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
+        self.assertEqual(
+            self.dashboard["features"]["initial_excel_upload"],
+            "AVAILABLE_PERSISTENT_CATALOG",
+        )
 
     def test_kpi_endpoint_exposes_structured_unavailable_fact_without_internal_ids(self) -> None:
         response = self.client.get("/api/kpis")
@@ -131,9 +148,29 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         frontend = PROCESSED_DIR.parents[1] / "frontend"
         api_source = (frontend / "api.js").read_text(encoding="utf-8")
         app_source = (frontend / "app.js").read_text(encoding="utf-8")
+        constructor_source = (frontend / "constructor.js").read_text(encoding="utf-8")
         self.assertEqual(api_source.count("fetch("), 1)
         self.assertNotIn("fetch(", app_source)
+        self.assertNotIn("fetch(", constructor_source)
         self.assertIn("escapeHtml", app_source)
+        self.assertIn("localStorage", constructor_source)
+        self.assertIn("buildConstructorPlan", constructor_source)
+        self.assertIn("buildConstructorPlanFromDataset", constructor_source)
+        self.assertIn("previewPlan = planResult", constructor_source)
+        self.assertIn("approveConstructorPlan", constructor_source)
+        self.assertIn("invalidatePreview", constructor_source)
+        self.assertIn("Помощь между командами", constructor_source)
+        self.assertIn("Переносы и исключения", constructor_source)
+        self.assertIn("hydrate(plannerResult)", app_source)
+        self.assertIn("show('current-plan')", app_source)
+        self.assertIn("automaticEngineers", constructor_source)
+        self.assertIn("catalogWithDraft('tasks')", constructor_source)
+        self.assertIn("Number(right.expected_velocity_sp || 0)", constructor_source)
+        self.assertIn('team_id: null', constructor_source)
+        self.assertIn('list="constructorInitiativeOptions"', constructor_source)
+        self.assertIn('name="dependency_id"', constructor_source)
+        self.assertIn("/api/plan-constructor/plan", api_source)
+        self.assertIn("/api/plan-constructor/plan/upload", api_source)
         for old_demo_name in (
             "sampleTasks",
             "riskRecords",
@@ -155,8 +192,26 @@ class FrontendRefinementTests(unittest.TestCase):
     def test_top_navigation_has_no_tasks_entry(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('data-page="tasks"', navigation)
-        for page in ("home", "planning", "risks", "recalc", "star"):
+        self.assertNotIn('data-page="constructor"', navigation)
+        for page in ("home", "planning", "current-plan", "risks", "recalc", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
+        self.assertIn('data-page="planning">Планирование</button>', navigation)
+        self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
+
+    def test_constructor_approves_preview_before_replacing_current_plan(self) -> None:
+        self.assertIn("planning: window.planConstructor.render", self.app)
+        self.assertIn("'current-plan': renderPlanning", self.app)
+        self.assertIn("hydrate(plannerResult);", self.app)
+        self.assertIn("show('current-plan');", self.app)
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("previewPlan = planResult", constructor_source)
+        self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
+        self.assertIn("onPlanApproved(approvedPlan);", constructor_source)
+
+    def test_home_plan_links_open_current_plan(self) -> None:
+        home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
+        self.assertIn('data-page="current-plan"', home)
+        self.assertNotIn('data-page="planning"', home)
 
     def test_technical_banner_and_header_version_are_absent(self) -> None:
         self.assertNotIn("dataModeRibbon", self.html + self.app)
@@ -196,6 +251,7 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('id="taskHeroId"', self.html)
         self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
         self.assertIn("taskReturnPage", self.app)
+        self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
     def test_development_notice_is_reused_on_three_pages(self) -> None:
@@ -226,11 +282,36 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertNotIn("Факт ещё не загружен", render_kpis)
         self.assertNotIn("Sprint", render_kpis)
         self.assertNotIn("baseline_id", self.html + render_kpis)
-        planning_html = self.html.split('id="page-planning"', 1)[1].split(
+        planning_html = self.html.split('id="page-current-plan"', 1)[1].split(
             'id="page-tasks"', 1
         )[0]
         self.assertNotIn("ПРОГНОЗ", planning_html)
         self.assertNotIn("Прогноз", planning_html)
+
+    def test_archive_modal_requires_structured_reason_and_other_text(self) -> None:
+        api = (self.frontend / "api.js").read_text(encoding="utf-8")
+        self.assertIn('id="archiveDialog"', self.html)
+        self.assertIn('id="archiveReason" required', self.html)
+        self.assertIn('id="archiveReasonText"', self.html)
+        self.assertIn('id="confirmArchive" type="submit" disabled', self.html)
+        self.assertIn("reasonCode === 'OTHER'", self.app)
+        self.assertIn("!$('#archiveReasonText').value.trim()", self.app)
+        self.assertIn("reason_code: reasonCode", self.app)
+        self.assertIn("archiveEntity:", api)
+        self.assertIn("/archive`,", api)
+
+    def test_entity_cards_offer_archive_and_show_lifecycle(self) -> None:
+        for entity_type in ("task", "engineer", "team"):
+            self.assertIn(f'data-archive-entity="{entity_type}"', self.app)
+        self.assertIn("archiveState(task)", self.app)
+        self.assertIn("archiveState(engineer)", self.app)
+        self.assertIn("archiveState(team)", self.app)
+        self.assertIn("текущий план останется без изменений", self.app.lower())
+
+    def test_historical_done_dependency_is_rendered_as_satisfied(self) -> None:
+        self.assertIn("item.state === 'HISTORICAL_DONE'", self.app)
+        self.assertIn("dependency-satisfied", self.app)
+        self.assertIn("item.status_message", self.app)
 
 
 if __name__ == "__main__":
