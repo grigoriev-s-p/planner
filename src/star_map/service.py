@@ -153,6 +153,42 @@ class StarMapService:
             profile["grade"] = ", ".join(sorted(profile["grades"])) or None
         return profiles
 
+    def _quarter_activity(self, team_id: str, member_ids: list[str]) -> dict[str, Any]:
+        local_members = set(member_ids)
+        hours_by_engineer: dict[str, float] = defaultdict(float)
+        task_ids = set()
+        for allocation in self.allocations:
+            if allocation.assigned_task_team_id != team_id or allocation.engineer_id not in local_members:
+                continue
+            hours_by_engineer[allocation.engineer_id] += allocation.allocated_hours
+            task_ids.add(allocation.task_id)
+        active_engineers = sorted(engineer_id for engineer_id, hours in hours_by_engineer.items() if hours > 0)
+        skills: dict[str, dict[str, Any]] = {}
+        for engineer_id in active_engineers:
+            for technology in self.skills_by_engineer.get(engineer_id, set()):
+                target = skills.setdefault(
+                    technology,
+                    {"technology": technology, "engineer_ids": [], "allocated_hours": 0.0},
+                )
+                target["engineer_ids"].append(engineer_id)
+                target["allocated_hours"] += hours_by_engineer[engineer_id]
+        relevance = [
+            {
+                "technology": item["technology"],
+                "engineer_ids": sorted(set(item["engineer_ids"])),
+                "engineer_count": len(set(item["engineer_ids"])),
+                "allocated_hours": round(float(item["allocated_hours"]), 2),
+            }
+            for item in skills.values()
+        ]
+        relevance.sort(key=lambda item: (-item["allocated_hours"], -item["engineer_count"], item["technology"].casefold()))
+        return {
+            "engineer_ids": active_engineers,
+            "task_ids": sorted(task_ids),
+            "allocated_hours": round(sum(hours_by_engineer.values()), 2),
+            "skills": relevance,
+        }
+
     def _teams(self) -> list[dict[str, Any]]:
         team_ids = sorted({bucket.team_id for bucket in self.buckets})
         output = []
@@ -171,6 +207,7 @@ class StarMapService:
             coverage = skill_coverage(member_ids, self.skills_by_engineer)
             roles = role_coverage(team_id, self.buckets, self.allocations, self.current_sprint)
             links = cross_team_links(team_id, self.allocations, self.current_sprint)
+            quarter = self._quarter_activity(team_id, member_ids)
             output.append(
                 {
                     "team_id": team_id,
@@ -200,6 +237,12 @@ class StarMapService:
                         }
                         for item in roles
                     ],
+                    "quarter_activity": {
+                        "engineer_ids": quarter["engineer_ids"],
+                        "task_ids": quarter["task_ids"],
+                        "allocated_hours": quarter["allocated_hours"],
+                    },
+                    "quarter_skill_relevance": quarter["skills"],
                     "cross_team_links": links,
                     "cross_team_outgoing_hours": round(
                         sum(item["hours"] for item in links if item["direction"] == "outgoing"),
@@ -215,7 +258,9 @@ class StarMapService:
 
     def _engineers(self) -> list[dict[str, Any]]:
         current_allocations: dict[str, list[EngineerAllocation]] = defaultdict(list)
+        quarter_allocations: dict[str, list[EngineerAllocation]] = defaultdict(list)
         for allocation in self.allocations:
+            quarter_allocations[allocation.engineer_id].append(allocation)
             if allocation.sprint == self.current_sprint:
                 current_allocations[allocation.engineer_id].append(allocation)
         output = []
@@ -249,11 +294,22 @@ class StarMapService:
                         }
                         for item in current_allocations.get(engineer_id, [])
                     ],
+                    "quarter_allocations": [
+                        {
+                            "task_id": item.task_id,
+                            "role": item.role,
+                            "source_team_id": item.source_team_id,
+                            "assigned_task_team_id": item.assigned_task_team_id,
+                            "sprint": item.sprint,
+                            "allocated_hours": item.allocated_hours,
+                            "cross_team": item.cross_team,
+                        }
+                        for item in quarter_allocations.get(engineer_id, [])
+                    ],
                     "reserve_candidates": reserves,
                 }
             )
         return output
-
 
     def _cross_team_flows(self) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, str], dict[str, Any]] = {}

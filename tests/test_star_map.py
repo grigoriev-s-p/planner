@@ -93,6 +93,16 @@ class StarMapServiceTests(unittest.TestCase):
         self.assertEqual(engineer["reserve_candidates"][0]["engineer_id"], "E2")
         self.assertNotIn("E3", {item["engineer_id"] for item in engineer["reserve_candidates"]})
 
+
+    def test_quarter_skill_relevance_uses_local_engineers_allocated_to_team_tasks(self) -> None:
+        team_b = next(item for item in self.payload["teams"] if item["team_id"] == "B")
+        relevance = {item["technology"]: item for item in team_b["quarter_skill_relevance"]}
+        self.assertEqual(team_b["quarter_activity"]["engineer_ids"], ["E2"])
+        self.assertIn("Python", relevance)
+        self.assertIn("Docker", relevance)
+        self.assertNotIn("Postman", relevance)
+        self.assertEqual(relevance["Python"]["allocated_hours"], 20.0)
+
     def test_bus_factor_contract_remains_unimplemented(self) -> None:
         self.assertIsNone(self.payload["bus_factor"])
         self.assertEqual(self.payload["bus_factor_status"], "NOT_IMPLEMENTED")

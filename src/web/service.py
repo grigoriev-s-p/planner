@@ -15,6 +15,8 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from src.bus_factor import BusFactorService
+from src.star_map import StarMapService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
 from src.replanning import (
@@ -738,16 +740,274 @@ class PlanningAPIService:
         }
 
     @cached_property
-    def star_map(self) -> dict[str, Any]:
+    def star_map_base(self) -> dict[str, Any]:
+        return StarMapService(
+            engineers=self.tables["engineers"],
+            engineer_skills=self.tables["engineer_skills"],
+            tasks=self.tasks,
+            current_sprint=int(self.plan_payload["quarter"]["current_sprint"]),
+        ).payload()
+
+    @cached_property
+    def bus_factor_service(self) -> BusFactorService:
+        task_skill_rows = self.tables.get("task_skill_requirements") or []
+        return BusFactorService(
+            engineers=pd.DataFrame(self.tables["engineers"]),
+            engineer_skills=pd.DataFrame(self.tables["engineer_skills"]),
+            tasks=pd.DataFrame(self.tables["tasks"]),
+            task_role_effort=pd.DataFrame(self.tables["task_role_effort"]),
+            task_skill_requirements=pd.DataFrame(task_skill_rows) if task_skill_rows else None,
+        )
+
+    @staticmethod
+    def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        if frame is None or frame.empty:
+            return []
+        return [_clean(row) for row in frame.to_dict("records")]
+
+    def _bus_factor_helpers(
+        self,
+        team_id: str,
+        competency_type: str,
+        competency: str,
+        engineers_by_id: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        frame = self.bus_factor_service.get_potential_helpers(
+            target_team_id=team_id,
+            competency_type=competency_type,
+            competency=competency,
+        )
+        output = []
+        for row in self._frame_records(frame):
+            engineer = engineers_by_id.get(row.get("engineer_id"), {})
+            output.append(
+                {
+                    **row,
+                    "free_hours": engineer.get("free_hours"),
+                    "team_ids": engineer.get("team_ids", []),
+                }
+            )
+        return output[:5]
+
+    def _bus_factor_training(
+        self,
+        team_id: str,
+        skill: str,
+        engineers_by_id: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        frame = self.bus_factor_service.training_candidates(team_id, skill, top_n=3)
+        output = []
+        for row in self._frame_records(frame):
+            engineer = engineers_by_id.get(row.get("engineer_id"), {})
+            output.append(
+                {
+                    **row,
+                    "free_hours": engineer.get("free_hours"),
+                    "team_ids": engineer.get("team_ids", []),
+                }
+            )
+        return output
+
+    def _skill_bus_factor_entry(
+        self,
+        team_id: str,
+        technology: str,
+        bus: dict[str, Any],
+        local_coverage: dict[str, Any],
+        quarter_relevance: dict[str, Any] | None,
+        engineers_by_id: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        team_bus_factor = int(bus.get("team_bus_factor") or 0)
+        helpers = (
+            self._bus_factor_helpers(team_id, "skill", technology, engineers_by_id)
+            if team_bus_factor <= 2
+            else []
+        )
+        training = (
+            self._bus_factor_training(team_id, technology, engineers_by_id)
+            if 1 <= team_bus_factor <= 2
+            else []
+        )
+        relevance = quarter_relevance or {}
         return {
-            "teams": self.teams,
-            "engineers": self.engineers,
-            "skills": sorted(
-                {skill for engineer in self.engineers for skill in engineer["skills"]}
-            ),
-            "bus_factor": None,
-            "bus_factor_status": "NOT_IMPLEMENTED",
+            "competency_type": "skill",
+            "competency": technology,
+            "technology": technology,
+            "team_bus_factor": team_bus_factor,
+            "organization_bus_factor": int(bus.get("organization_bus_factor") or 0),
+            "coverage_status": bus.get("coverage_status"),
+            "engineer_ids": local_coverage.get("engineer_ids", []),
+            "engineer_count": int(local_coverage.get("engineer_count") or 0),
+            "coverage_pct": float(local_coverage.get("coverage_pct") or 0.0),
+            "quarter_relevant": quarter_relevance is not None,
+            "quarter_engineer_ids": relevance.get("engineer_ids", []),
+            "quarter_engineer_count": int(relevance.get("engineer_count") or 0),
+            "quarter_allocated_hours": float(relevance.get("allocated_hours") or 0.0),
+            "quarter_relevance": "allocation_proxy" if quarter_relevance is not None else "not_observed",
+            "quarter_task_count": None,
+            "quarter_required_hours": float(relevance.get("allocated_hours") or 0.0),
+            "helpers": helpers,
+            "training_candidates": training,
         }
+
+    def _role_bus_factor_entry(
+        self,
+        team_id: str,
+        bus: dict[str, Any],
+        engineers_by_id: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        role_name = str(bus.get("competency") or "")
+        team_bus_factor = int(bus.get("team_bus_factor") or 0)
+        helpers = (
+            self._bus_factor_helpers(team_id, "role", role_name, engineers_by_id)
+            if team_bus_factor <= 2
+            else []
+        )
+        return {
+            "competency_type": "role",
+            "competency": role_name,
+            "role": role_name,
+            "team_bus_factor": team_bus_factor,
+            "organization_bus_factor": int(bus.get("organization_bus_factor") or 0),
+            "quarter_relevance": bus.get("quarter_relevance"),
+            "quarter_task_count": bus.get("quarter_task_count"),
+            "quarter_required_hours": bus.get("quarter_required_hours"),
+            "coverage_status": bus.get("coverage_status"),
+            "helpers": helpers,
+            "training_candidates": [],
+        }
+
+    @staticmethod
+    def _bus_factor_mode(
+        technologies: list[dict[str, Any]],
+        roles: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        entries = [*roles, *technologies]
+        return {
+            "technologies": technologies,
+            "roles": roles,
+            "entries": entries,
+            "zone_counts": {
+                "critical": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) <= 1),
+                "limited": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) == 2),
+                "stable": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) >= 3),
+                "total": len(entries),
+            },
+        }
+
+    @cached_property
+    def star_map(self) -> dict[str, Any]:
+        payload = _clean(self.star_map_base)
+        engineers_by_id = {item["engineer_id"]: item for item in payload["engineers"]}
+        for team in payload["teams"]:
+            team_id = team["team_id"]
+            coverage = self._frame_records(self.bus_factor_service.coverage(team_id))
+            skills = {
+                item["competency"]: item
+                for item in coverage
+                if item.get("competency_type") == "skill"
+            }
+            roles = {
+                item["competency"]: item
+                for item in coverage
+                if item.get("competency_type") == "role"
+            }
+            team_skill_coverage = {
+                item["technology"]: item for item in team.get("skill_coverage", [])
+            }
+            quarter_relevance = {
+                item["technology"]: item for item in team.get("quarter_skill_relevance", [])
+            }
+
+            all_technologies = []
+            for technology, local_coverage in team_skill_coverage.items():
+                bus = skills.get(technology)
+                if bus is None:
+                    continue
+                all_technologies.append(
+                    self._skill_bus_factor_entry(
+                        team_id,
+                        technology,
+                        bus,
+                        local_coverage,
+                        quarter_relevance.get(technology),
+                        engineers_by_id,
+                    )
+                )
+            all_technologies.sort(
+                key=lambda item: (
+                    -int(item.get("engineer_count") or 0),
+                    item["technology"].casefold(),
+                )
+            )
+            quarter_technologies = [
+                item for item in all_technologies if item.get("quarter_relevant")
+            ]
+            quarter_technologies.sort(
+                key=lambda item: (
+                    -float(item.get("quarter_allocated_hours") or 0.0),
+                    -int(item.get("quarter_engineer_count") or 0),
+                    item["technology"].casefold(),
+                )
+            )
+
+            role_entries = {
+                role_name: self._role_bus_factor_entry(
+                    team_id, bus, engineers_by_id
+                )
+                for role_name, bus in roles.items()
+            }
+            all_roles = [
+                item
+                for item in role_entries.values()
+                if int(item.get("team_bus_factor") or 0) > 0
+            ]
+            all_roles.sort(key=lambda item: item["competency"].casefold())
+            quarter_roles = [
+                item
+                for item in role_entries.values()
+                if item.get("quarter_relevance") == "required"
+            ]
+            quarter_roles.sort(
+                key=lambda item: (
+                    -float(item.get("quarter_required_hours") or 0.0),
+                    item["competency"].casefold(),
+                )
+            )
+
+            all_mode = self._bus_factor_mode(all_technologies, all_roles)
+            quarter_mode = self._bus_factor_mode(quarter_technologies, quarter_roles)
+            team["competency_modes"] = {
+                "all": all_mode,
+                "quarter": quarter_mode,
+            }
+            team["graph_competencies"] = quarter_technologies
+            team["bus_factor"] = {
+                "risks": quarter_mode["entries"],
+                "critical_count": quarter_mode["zone_counts"]["critical"],
+                "limited_count": quarter_mode["zone_counts"]["limited"],
+                "sufficient_count": quarter_mode["zone_counts"]["stable"],
+                "modes": {
+                    "all": {
+                        "entries": all_mode["entries"],
+                        "roles": all_roles,
+                        "zone_counts": all_mode["zone_counts"],
+                    },
+                    "quarter": {
+                        "entries": quarter_mode["entries"],
+                        "roles": quarter_roles,
+                        "zone_counts": quarter_mode["zone_counts"],
+                    },
+                },
+            }
+
+        payload["bus_factor"] = {
+            "available": True,
+            "quarter_skill_relevance": "allocation_proxy",
+            "skill_relevance_note": "В режиме текущего квартала технологии определяются по навыкам инженеров команды, фактически задействованных в задачах квартала; прямой связи task→skill в текущем датасете нет.",
+        }
+        payload["bus_factor_status"] = "AVAILABLE"
+        return payload
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:
@@ -764,7 +1024,7 @@ class PlanningAPIService:
             "features": {
                 "plan_constructor": "AVAILABLE_EPHEMERAL",
                 "replanning": "NOT_IMPLEMENTED",
-                "bus_factor": "NOT_IMPLEMENTED",
+                "bus_factor": "AVAILABLE",
                 "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
             },
         }

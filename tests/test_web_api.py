@@ -105,12 +105,47 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             len({engineer["engineer_id"] for engineer in engineers.json()}),
             len(engineers.json()),
         )
-        self.assertIsNone(star_map.json()["bus_factor"])
-        self.assertEqual(star_map.json()["bus_factor_status"], "NOT_IMPLEMENTED")
+        payload = star_map.json()
+        self.assertTrue(payload["bus_factor"]["available"])
+        self.assertEqual(payload["bus_factor_status"], "AVAILABLE")
+        self.assertTrue(any(team["graph_competencies"] for team in payload["teams"]))
+        self.assertTrue(all("bus_factor" in team for team in payload["teams"]))
+
+    def test_star_map_exposes_general_and_quarter_modes(self) -> None:
+        payload = self.client.get("/api/star-map").json()
+        self.assertTrue(payload["teams"])
+        for team in payload["teams"]:
+            modes = team["competency_modes"]
+            self.assertIn("all", modes)
+            self.assertIn("quarter", modes)
+            self.assertGreaterEqual(
+                len(modes["all"]["technologies"]),
+                len(modes["quarter"]["technologies"]),
+            )
+            self.assertTrue(all(item["team_bus_factor"] > 0 for item in modes["all"]["roles"]))
+            for mode_name in ("all", "quarter"):
+                counts = modes[mode_name]["zone_counts"]
+                self.assertEqual(
+                    counts["total"],
+                    counts["critical"] + counts["limited"] + counts["stable"],
+                )
+
+    def test_star_map_frontend_has_quarter_toggle_and_static_graph(self) -> None:
+        frontend = Path(__file__).resolve().parents[1] / "frontend"
+        html = (frontend / "index.html").read_text(encoding="utf-8")
+        app = (frontend / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="starQuarterOnly"', html)
+        self.assertIn("function starGraph", app)
+        self.assertNotIn("startStarGraphForce", app)
+        self.assertIn('id="selectedCompetencyPanel"', html)
+        self.assertIn("Открыть карточку", app)
+        star_html = html.split('id="page-star"', 1)[1].split('</section>', 1)[0]
+        self.assertNotIn("ЗВЁЗДНАЯ КАРТА КОМАНДЫ", star_html)
+        self.assertNotIn("РИСКИ И BUS FACTOR", star_html)
 
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
-        self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
+        self.assertEqual(self.dashboard["features"]["bus_factor"], "AVAILABLE")
         self.assertEqual(
             self.dashboard["features"]["initial_excel_upload"],
             "AVAILABLE_PERSISTENT_CATALOG",
@@ -254,14 +289,11 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
-    def test_development_notice_is_reused_on_three_pages(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 3)
-        for target in (
-            "risksDevelopmentNotice",
-            "recalcDevelopmentNotice",
-            "starDevelopmentNotice",
-        ):
+    def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)
+        for target in ("risksDevelopmentNotice", "recalcDevelopmentNotice"):
             self.assertIn(f'id="{target}"', self.html)
+        self.assertNotIn('id="starDevelopmentNotice"', self.html)
 
     def test_kpi_block_follows_board_and_precedes_initiatives(self) -> None:
         board_position = self.html.index('id="sprintBoard"')
@@ -304,8 +336,8 @@ class FrontendRefinementTests(unittest.TestCase):
         for entity_type in ("task", "engineer", "team"):
             self.assertIn(f'data-archive-entity="{entity_type}"', self.app)
         self.assertIn("archiveState(task)", self.app)
-        self.assertIn("archiveState(engineer)", self.app)
-        self.assertIn("archiveState(team)", self.app)
+        self.assertIn("archiveState(lifecycle)", self.app)
+        self.assertIn("archiveState(baseTeam)", self.app)
         self.assertIn("текущий план останется без изменений", self.app.lower())
 
     def test_historical_done_dependency_is_rendered_as_satisfied(self) -> None:
