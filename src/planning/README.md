@@ -60,8 +60,10 @@
 - **Scoring и feasibility.** Свободные SP, часы, роли и инженеры не входят в
   business score. Высокий score не обходит ресурсные и dependency constraints.
 - **Dependencies.** Временное направление:
-  `blocking_task_id -> blocked_task_id`. После завершения blocker в Sprint N
-  зависимая задача может начаться с Sprint N+1.
+  `blocking_task_id -> blocked_task_id`. Плановое завершение blocker в Sprint N
+  разрешает старт зависимой задачи с Sprint N+2 после полного резервного спринта.
+  Фактическое завершение в Sprint N разрешает старт с Sprint N+1, а `Done` до
+  квартала — со Sprint 1.
 - **Multi-sprint SP.** Полный `task_story_points` остаётся атрибутом задачи.
   Дробный `capacity_sp_load` каждого активного спринта равен
   `task_story_points * allocated_hours / total_required_hours`. Поэтому SP-load
