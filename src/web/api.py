@@ -50,6 +50,11 @@ def summary() -> dict:
     return _service().summary
 
 
+@app.get("/api/kpis")
+def kpis() -> dict:
+    return _service().kpis
+
+
 @app.get("/api/tasks")
 def tasks() -> list[dict]:
     return _service().tasks
@@ -109,4 +114,3 @@ if not FRONTEND_DIR.is_dir():
 
 # Registered last so /api/* routes always win over the SPA/static fallback.
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-

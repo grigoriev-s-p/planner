@@ -99,6 +99,34 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
         self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
 
+    def test_kpi_endpoint_exposes_structured_unavailable_fact_without_internal_ids(self) -> None:
+        response = self.client.get("/api/kpis")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload, self.dashboard["kpis"])
+        self.assertNotIn("baseline_id", json.dumps(payload))
+        self.assertNotIn("plan_version", json.dumps(payload))
+
+        expected = payload["expected_kpi"]
+        self.assertEqual(expected["completed_initiatives"], 2)
+        self.assertEqual(expected["baseline_initiatives"], 7)
+        self.assertEqual(expected["incomplete_initiatives"], 5)
+        self.assertAlmostEqual(expected["completion_percent"], 2 / 7 * 100)
+
+        quarter = payload["quarter_kpi"]
+        self.assertFalse(quarter["has_actual"])
+        self.assertIsNone(quarter["completed_initiatives"])
+        self.assertIsNone(quarter["completion_percent"])
+        self.assertGreater(quarter["baseline_initiatives"], 0)
+
+        sprints = payload["sprint_kpis"]
+        self.assertEqual([item["sprint"] for item in sprints], list(range(1, 7)))
+        self.assertTrue(any(item["baseline_sp"] > 0 for item in sprints))
+        for item in sprints:
+            self.assertFalse(item["has_actual"])
+            self.assertIsNone(item["actual_sp"])
+            self.assertIsNone(item["completion_percent"])
+
     def test_frontend_uses_central_api_client_without_demo_business_arrays(self) -> None:
         frontend = PROCESSED_DIR.parents[1] / "frontend"
         api_source = (frontend / "api.js").read_text(encoding="utf-8")
@@ -178,6 +206,31 @@ class FrontendRefinementTests(unittest.TestCase):
             "starDevelopmentNotice",
         ):
             self.assertIn(f'id="{target}"', self.html)
+
+    def test_kpi_block_follows_board_and_precedes_initiatives(self) -> None:
+        board_position = self.html.index('id="sprintBoard"')
+        kpi_position = self.html.index('id="planKpis"')
+        initiatives_position = self.html.index('class="initiative-grid"')
+        self.assertLess(board_position, kpi_position)
+        self.assertLess(kpi_position, initiatives_position)
+        self.assertIn("Ожидаемый KPI плана", self.html)
+
+    def test_frontend_only_formats_backend_kpi_values(self) -> None:
+        render_kpis = self.app.split("function renderKpis()", 1)[1].split(
+            "function renderPlanning()", 1
+        )[0]
+        self.assertIn("expected.completion_percent", render_kpis)
+        self.assertIn("expected.completed_initiatives", render_kpis)
+        self.assertIn("expected.baseline_initiatives", render_kpis)
+        self.assertNotIn("sprint_kpis", render_kpis)
+        self.assertNotIn("Факт ещё не загружен", render_kpis)
+        self.assertNotIn("Sprint", render_kpis)
+        self.assertNotIn("baseline_id", self.html + render_kpis)
+        planning_html = self.html.split('id="page-planning"', 1)[1].split(
+            'id="page-tasks"', 1
+        )[0]
+        self.assertNotIn("ПРОГНОЗ", planning_html)
+        self.assertNotIn("Прогноз", planning_html)
 
 
 if __name__ == "__main__":
