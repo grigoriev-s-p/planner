@@ -9,6 +9,8 @@ window.planConstructor = (() => {
   let api = null;
   let previewPlan = null;
   let onPlanApproved = null;
+  let onCatalogUpdated = null;
+  let pendingDatasetUpload = null;
   let bound = false;
 
   const $c = (selector, root = document) => root.querySelector(selector);
@@ -23,6 +25,8 @@ window.planConstructor = (() => {
   const csvValues = (value) => [...new Set(String(value || '').split(',').map((item) => item.trim()).filter(Boolean))];
   const optionList = (items, selected = '') => items.map((item) => `<option value="${esc(item)}" ${item === selected ? 'selected' : ''}>${esc(item)}</option>`).join('');
   const isCompletedTask = (task) => ['done', 'completed'].includes(String(task?.status || '').trim().toLowerCase());
+  const isHistoricalDoneTask = (task) => isCompletedTask(task)
+    || isCompletedTask(findCatalog('tasks', task?.task_id));
   const number = (value) => new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 1}).format(Number(value || 0));
 
   function invalidatePreview() {
@@ -89,8 +93,14 @@ window.planConstructor = (() => {
       const reasons = previewReasons(task);
       return `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><p>${esc(reasons.join(' ') || task.summary || 'Причина не указана.')}</p></article>`;
     }).join('') || '<p class="muted">Все задачи удалось разместить в квартальном плане.</p>';
+    const historicalDone = (previewPlan.tasks || []).filter((task) => task.status === 'DONE');
+    const historicalBlock = historicalDone.length ? `<section class="preview-section"><h3>Уже завершены до начала планирования</h3><div class="preview-exclusion-list">${historicalDone.map((task) => `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><small>✓ Завершена до начала планирования</small></article>`).join('')}</div></section>` : '';
     target.hidden = false;
+<<<<<<< Updated upstream
     target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>Проверьте распределение задач и ресурсов перед утверждением плана.</p></div></div><section class="preview-section"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section><section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section"><h3>Переносы и исключения</h3><div class="preview-exclusion-list">${exclusions}</div></section><div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
+=======
+    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>План построен без перераспределения задач и специалистов между командами.</p></div></div><section class="preview-kpi"><span>Текущий вариант</span><b>${number(currentSummary.planned_tasks)} задач · ${number(currentSummary.initiatives)} завершённых инициатив</b><small>KPI здесь не используется для выбора лучшего варианта.</small></section>${optimizationSummary()}<section class="preview-section" id="constructorSprintPlan"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section>${historicalBlock}<section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section"><h3>Переносы и исключения</h3><div class="preview-exclusion-list">${exclusions}</div></section>${recommendationPanel()}${acceptedChangesPanel()}<div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
+>>>>>>> Stashed changes
   }
 
   function loadDraft() {
@@ -130,6 +140,76 @@ window.planConstructor = (() => {
     $c('#constructorUploadMode').hidden = mode !== 'upload';
   }
 
+  function issueCountLabel(value, one, few, many) {
+    const numberValue = Number(value || 0);
+    const mod10 = numberValue % 10;
+    const mod100 = numberValue % 100;
+    const label = mod10 === 1 && mod100 !== 11 ? one : ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100) ? few : many);
+    return `${numberValue} ${label}`;
+  }
+
+  function closeDataPreflight() {
+    const dialog = $c('#dataPreflightDialog');
+    if (dialog?.open) dialog.close();
+  }
+
+  function renderDataPreflight(preflight) {
+    pendingDatasetUpload = preflight;
+    const audit = preflight.audit || {summary: {}, groups: []};
+    const critical = Number(audit.summary?.critical || 0);
+    const warning = Number(audit.summary?.warning || 0);
+    const info = Number(audit.summary?.info || 0);
+    $c('#dataPreflightSubtitle').textContent = critical
+      ? 'В данных есть ошибки, из-за которых план невозможно построить.'
+      : 'Перед построением плана нашли моменты, которые могут повлиять на результат.';
+    const counters = [];
+    if (critical) counters.push(`<span class="preflight-counter critical">${issueCountLabel(critical, 'критическая ошибка', 'критические ошибки', 'критических ошибок')}</span>`);
+    if (warning) counters.push(`<span class="preflight-counter warning">${issueCountLabel(warning, 'предупреждение', 'предупреждения', 'предупреждений')}</span>`);
+    if (info) counters.push(`<span class="preflight-counter info">${issueCountLabel(info, 'замечание', 'замечания', 'замечаний')}</span>`);
+    $c('#dataPreflightSummary').innerHTML = counters.join('');
+    $c('#dataPreflightGroups').innerHTML = (audit.groups || []).map((group, index) => `<details class="preflight-group" ${index === 0 && group.count <= 8 ? 'open' : ''}><summary><span>${esc(group.title)}</span><b>${esc(group.count)}</b></summary><div>${(group.items || []).map((item) => {
+      const location = [item.sheet ? `Раздел: ${item.sheet}` : '', item.row ? `Строка: ${item.row}` : ''].filter(Boolean);
+      return `<article class="preflight-issue ${esc(item.severity)}"><div class="preflight-issue-mark" aria-hidden="true">${item.severity === 'info' ? 'i' : '!'}</div><div><span class="preflight-severity">${item.severity === 'critical' ? 'Критично' : item.severity === 'warning' ? 'Предупреждение' : 'Информация'}</span>${item.entity_id ? `<b>${esc(item.entity_id)}</b>` : ''}<h3>${esc(item.title)}</h3><p>${esc(item.message)}</p>${(location.length || item.details?.length) ? `<details class="preflight-details"><summary>Подробнее</summary>${location.map((value) => `<span>${esc(value)}</span>`).join('')}${(item.details || []).map((value) => `<span>${esc(value)}</span>`).join('')}</details>` : ''}</div></article>`;
+    }).join('')}</div></details>`).join('');
+    $c('#dataPreflightActions').innerHTML = critical
+      ? '<button class="btn btn-outline" type="button" data-close-data-preflight>Закрыть</button><button class="btn btn-blue" type="button" data-replace-data-file>Загрузить исправленный файл</button>'
+      : '<button class="btn btn-outline" type="button" data-close-data-preflight>Вернуться к файлу</button><button class="btn btn-blue" type="button" data-continue-data-preflight>Продолжить с этими данными</button>';
+    const dialog = $c('#dataPreflightDialog');
+    document.body.classList.add('constructor-modal-open');
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function acceptUploadedPlan(planResult, filename) {
+    if (planResult.catalog) {
+      catalog = planResult.catalog;
+      onCatalogUpdated?.(catalog);
+    }
+    const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
+    setDatasetStatus(`${filename} · предварительный план готов · ${planned} задач вошли в квартал`, 'success');
+    previewPlan = planResult;
+    pendingDatasetUpload = null;
+    shownRecommendationGroups = 3;
+    shownRecommendations.clear();
+    render();
+    $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+
+  async function continueDatasetUpload() {
+    if (!pendingDatasetUpload?.upload_id) return;
+    const button = $c('[data-continue-data-preflight]');
+    if (button) { button.disabled = true; button.textContent = 'Строим план…'; }
+    setDatasetStatus('Проверка принята. Строим предварительный план…');
+    try {
+      const result = await api.continueConstructorDataset(pendingDatasetUpload.upload_id);
+      const filename = pendingDatasetUpload.file?.name || 'Excel';
+      closeDataPreflight();
+      acceptUploadedPlan(result, filename);
+    } catch (error) {
+      setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
+      if (button) { button.disabled = false; button.textContent = 'Продолжить с этими данными'; }
+    }
+  }
+
   async function uploadDataset(file) {
     const extension = file.name.split('.').pop()?.toLowerCase();
     if (!['xlsx', 'xlsm'].includes(extension)) {
@@ -145,11 +225,14 @@ window.planConstructor = (() => {
       return;
     }
     invalidatePreview();
+    pendingDatasetUpload = null;
+    closeDataPreflight();
     const button = $c('#uploadConstructorDataset');
     button.disabled = true;
-    button.textContent = 'Строим план…';
-    setDatasetStatus(`Проверяем ${file.name} и рассчитываем шесть спринтов…`);
+    button.textContent = 'Проверяем данные…';
+    setDatasetStatus(`Проверяем данные из ${file.name}…`);
     try {
+<<<<<<< Updated upstream
       const planResult = await api.buildConstructorPlanFromDataset(file);
       if (planResult.catalog) catalog = planResult.catalog;
       const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
@@ -157,6 +240,21 @@ window.planConstructor = (() => {
       previewPlan = planResult;
       render();
       $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+=======
+      const result = await api.preflightConstructorDataset(file);
+      const preflight = result.data_preflight;
+      if (preflight?.status === 'blocked' || preflight?.status === 'review_required') {
+        setDatasetStatus(
+          preflight.status === 'blocked'
+            ? `${file.name} · исправьте критические ошибки в данных`
+            : `${file.name} · требуется подтверждение найденных замечаний`,
+          preflight.status === 'blocked' ? 'error' : '',
+        );
+        renderDataPreflight(preflight);
+      } else {
+        acceptUploadedPlan(result, file.name);
+      }
+>>>>>>> Stashed changes
     } catch (error) {
       setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
     } finally {
@@ -209,7 +307,13 @@ window.planConstructor = (() => {
     const catalogIds = new Set(catalog[type].map((item) => item[key]));
     const draftById = new Map(draft[type].map((item) => [item[key], item]));
     const scenarioOnly = draft[type].filter((item) => !catalogIds.has(item[key]));
-    const sourceCatalog = catalog[type].map((item) => draftById.get(item[key]) || item);
+    const sourceCatalog = catalog[type].map((item) => {
+      const draftItem = draftById.get(item[key]);
+      if (type === 'tasks' && isCompletedTask(item) && draftItem) {
+        return {...item, ...draftItem, status: item.status};
+      }
+      return draftItem || item;
+    });
     return [...scenarioOnly, ...sourceCatalog];
   }
 
@@ -240,14 +344,14 @@ window.planConstructor = (() => {
     const taskQuery = searchValue('#constructorTaskSearch');
     const allTasks = catalogWithDraft('tasks');
     const tasks = allTasks.filter((task) => `${task.task_id} ${task.title} ${task.initiative_id || ''}`.toLowerCase().includes(taskQuery));
-    const selectableTasks = allTasks.filter((task) => !isCompletedTask(task));
-    $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isCompletedTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b>${completed ? '<small>Задача завершена</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
+    const selectableTasks = allTasks.filter((task) => !isHistoricalDoneTask(task));
+    $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isHistoricalDoneTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b>${completed ? '<small>✓ Завершена до начала планирования</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
     updateSelectAllIndeterminate();
   }
 
   function entityRows(title, type, items, describe) {
     const key = idField(type);
-    return `<div class="constructor-draft-group"><h3>${esc(title)} <span>${items.length}</span></h3>${items.length ? items.map((item) => `<div class="constructor-draft-row"><span><b>${esc(item[key])}${type === 'tasks' ? ` · ${esc(item.title)}` : ''}</b>${describe(item) ? `<small>${esc(describe(item))}</small>` : ''}</span><span><button type="button" data-constructor-edit="${type}" data-id="${esc(item[key])}" aria-label="Редактировать">✎</button><button type="button" data-constructor-remove="${type}" data-id="${esc(item[key])}" aria-label="Удалить">×</button></span></div>`).join('') : '<p class="muted">Ничего не выбрано.</p>'}</div>`;
+    return `<div class="constructor-draft-group"><h3>${esc(title)} <span>${items.length}</span></h3>${items.length ? items.map((item) => { const historical = type === 'tasks' && isHistoricalDoneTask(item); return `<div class="constructor-draft-row"><span><b>${esc(item[key])}${type === 'tasks' ? ` · ${esc(item.title)}` : ''}</b>${historical ? '<small>Завершена до начала планирования</small>' : ''}${describe(item) ? `<small>${esc(describe(item))}</small>` : ''}</span><span>${historical ? '' : `<button type="button" data-constructor-edit="${type}" data-id="${esc(item[key])}" aria-label="Редактировать">✎</button>`}<button type="button" data-constructor-remove="${type}" data-id="${esc(item[key])}" aria-label="Удалить">×</button></span></div>`; }).join('') : '<p class="muted">Ничего не выбрано.</p>'}</div>`;
   }
 
   function renderDraft() {
@@ -274,9 +378,17 @@ window.planConstructor = (() => {
     if (!draft.teams.length) errors.push('Выберите или добавьте хотя бы одну команду.');
     if (!draft.tasks.length) errors.push('Выберите или добавьте хотя бы одну задачу.');
     if (draft.teams.length && !automaticEngineers().length) errors.push('Для выбранных команд в исходном датасете не найден доступный ресурс.');
-    draft.tasks.forEach((task) => (task.depends_on || []).forEach((dependency) => {
-      if (!taskIds.has(dependency)) errors.push(`Добавьте блокирующую задачу ${dependency} для ${task.task_id} или уберите зависимость.`);
-    }));
+    draft.tasks.forEach((task) => {
+      if (isHistoricalDoneTask(task)) return;
+      (task.depends_on || []).forEach((dependency) => {
+        if (taskIds.has(dependency) || isHistoricalDoneTask(findDraft('tasks', dependency) || findCatalog('tasks', dependency))) return;
+        if (findCatalog('tasks', dependency)) {
+          errors.push(`Активная блокирующая задача ${dependency} не включена в сценарий планирования.`);
+        }
+        // Unknown or archived historical blockers are validated by the server,
+        // which has access to the complete dependency catalog.
+      });
+    });
     return [...new Set(errors)];
   }
 
@@ -366,7 +478,7 @@ window.planConstructor = (() => {
       dependsOn.forEach((dependencyId) => {
         if (findDraft('tasks', dependencyId)) return;
         const source = findCatalog('tasks', dependencyId);
-        if (source) draft.tasks.push({...clone(source), team_id: null});
+        if (source && !isHistoricalDoneTask(source)) draft.tasks.push({...clone(source), team_id: null});
       });
     }
     if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
@@ -421,11 +533,12 @@ window.planConstructor = (() => {
       draft = emptyDraft(); invalidatePreview(); saveDraft(); showErrors([]); render();
     });
     $c('#constructorDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
+    $c('#dataPreflightDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
     document.addEventListener('change', (event) => {
       const selectAll = event.target.closest('[data-constructor-select-all]');
       if (selectAll) {
         const type = selectAll.dataset.constructorSelectAll;
-        toggleAllCatalog(type, type === 'teams' ? catalog.teams : catalogWithDraft('tasks').filter((task) => !isCompletedTask(task)), selectAll.checked);
+        toggleAllCatalog(type, type === 'teams' ? catalog.teams : catalogWithDraft('tasks').filter((task) => !isHistoricalDoneTask(task)), selectAll.checked);
         return;
       }
       const pick = event.target.closest('[data-constructor-pick]');
@@ -438,6 +551,13 @@ window.planConstructor = (() => {
       $$c('[data-dependency-option]').forEach((option) => { option.hidden = !option.dataset.search.includes(query); });
     });
     document.addEventListener('click', (event) => {
+      if (event.target.closest('[data-close-data-preflight]')) { closeDataPreflight(); return; }
+      if (event.target.closest('[data-replace-data-file]')) {
+        closeDataPreflight();
+        $c('#constructorDatasetInput').click();
+        return;
+      }
+      if (event.target.closest('[data-continue-data-preflight]')) { continueDatasetUpload(); return; }
       if (event.target.closest('#approveConstructorPlan')) { approvePlan(); return; }
       const edit = event.target.closest('[data-constructor-edit]');
       if (edit) { openForm(edit.dataset.constructorEdit, edit.dataset.id); return; }
@@ -476,10 +596,11 @@ window.planConstructor = (() => {
     renderPreview();
   }
 
-  function initialize(sourceCatalog, apiClient, handlePlanApproved) {
+  function initialize(sourceCatalog, apiClient, handlePlanApproved, handleCatalogUpdated) {
     catalog = sourceCatalog;
     api = apiClient;
     onPlanApproved = typeof handlePlanApproved === 'function' ? handlePlanApproved : () => {};
+    onCatalogUpdated = typeof handleCatalogUpdated === 'function' ? handleCatalogUpdated : () => {};
     loadDraft();
     bindEvents();
     render();

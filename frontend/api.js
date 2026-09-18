@@ -44,10 +44,13 @@ window.postcodeApi = (() => {
         body: JSON.stringify(reason),
       });
     },
-    buildConstructorPlanFromDataset: (file) => request(`/api/plan-constructor/plan/upload?filename=${encodeURIComponent(file.name)}`, {
+    preflightConstructorDataset: (file) => request(`/api/plan-constructor/plan/upload?filename=${encodeURIComponent(file.name)}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/octet-stream'},
       body: file,
+    }),
+    continueConstructorDataset: (uploadId) => request(`/api/plan-constructor/plan/upload/${encodeURIComponent(uploadId)}/continue`, {
+      method: 'POST',
     }),
     buildConstructorPlan: (scenario) => request('/api/plan-constructor/plan', {
       method: 'POST',

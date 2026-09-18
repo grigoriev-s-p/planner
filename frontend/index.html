@@ -95,6 +95,17 @@
         <div id="starDistribution" class="star-view"><article class="panel"><div class="eyebrow">НЕСКОЛЬКО КОМАНД / ОДИН ИНЖЕНЕР</div><h2>Распределение сотрудников</h2><p class="hint">Общая занятость по всем командам сопоставляется с ресурсом 80 × capacity_rate часов за спринт.</p><div id="distributionTable" class="table-scroll"></div></article></div>
       </section>
     </main>
+    <dialog class="data-preflight-dialog" id="dataPreflightDialog" aria-labelledby="dataPreflightTitle">
+      <div class="data-preflight-shell">
+        <header class="data-preflight-header">
+          <div><div class="eyebrow">ПЕРЕД ПОСТРОЕНИЕМ ПЛАНА</div><h2 id="dataPreflightTitle">Проверка данных</h2><p id="dataPreflightSubtitle"></p></div>
+          <button class="drawer-close" type="button" data-close-data-preflight aria-label="Закрыть">×</button>
+        </header>
+        <div class="data-preflight-summary" id="dataPreflightSummary"></div>
+        <div class="data-preflight-groups" id="dataPreflightGroups"></div>
+        <footer class="data-preflight-actions" id="dataPreflightActions"></footer>
+      </div>
+    </dialog>
     <dialog class="constructor-dialog" id="constructorDialog"><form method="dialog"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form><div id="constructorDialogContent"></div></dialog>
     <dialog class="archive-dialog" id="archiveDialog" aria-labelledby="archiveDialogTitle">
       <form id="archiveForm">

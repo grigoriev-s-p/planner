@@ -8,8 +8,13 @@ const state = {
 };
 
 const data = {
+<<<<<<< Updated upstream
   plan: null, summary: {}, tasks: [], initiatives: [], risks: [], teams: [],
   engineers: [], kpis: null, features: {}, archiveReasons: {}, ready: false,
+=======
+  plan: null, summary: {}, tasks: [], historicalTasks: [], initiatives: [], risks: [], teams: [],
+  engineers: [], starMap: {teams: [], engineers: []}, kpis: null, features: {}, archiveReasons: {}, ready: false,
+>>>>>>> Stashed changes
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -22,7 +27,28 @@ const number = (value) => value == null || Number.isNaN(Number(value)) ? '—' :
 const percent = (value) => value == null || Number.isNaN(Number(value)) ? '—' : `${Number(value).toLocaleString('ru-RU', {maximumFractionDigits: 1})}%`;
 const teamBy = (id) => data.teams.find((team) => team.team_id === id) || {team_id: id, name: id || 'Команда не указана', sp_by_sprint: {}};
 const engineerBy = (id) => data.engineers.find((engineer) => engineer.engineer_id === id);
+<<<<<<< Updated upstream
 const taskBy = (id) => data.tasks.find((task) => task.task_id === id);
+=======
+const starTeamBy = (id) => data.starMap?.teams?.find((team) => team.team_id === id);
+const starEngineerBy = (id) => data.starMap?.engineers?.find((engineer) => engineer.engineer_id === id);
+const taskBy = (id) => data.tasks.find((task) => task.task_id === id)
+  || data.historicalTasks.find((task) => task.task_id === id);
+const historicalTaskFromCatalog = (task) => ({
+  task_id: task.task_id, title: task.title, description: task.title,
+  initiative_id: task.initiative_id, status: 'DONE',
+  status_label: 'Завершена до начала планирования', source_status: task.status,
+  rung: task.rung,
+  priority_label: Number.isFinite(Number(task.rung)) ? `Rung ${task.rung}` : 'Rung не указан',
+  story_points: task.story_points, original_team_id: task.team_id, assigned_team_id: task.team_id,
+  team_reassigned: false, planned_sprints: [], completion_sprint: 0, multi_sprint: false,
+  sp_load_by_sprint: {}, hours_by_sprint: {}, role_hours_by_sprint: {},
+  role_requirements: Object.fromEntries((task.role_requirements || []).map((item) => [item.role, item.required_hours])),
+  dependencies: {incoming: [], outgoing: []}, allocations: [], ownership: null,
+  reasons: [], reason_blocks: [], risks: [], recommendations: [],
+  summary: 'Завершена до начала планирования.', outside_quarter: false, is_placeholder: false,
+});
+>>>>>>> Stashed changes
 const currentSprint = () => Number(data.plan?.quarter?.current_sprint || 1);
 const sprintBy = (sprint) => data.plan?.sprints?.find((item) => item.sprint_number === sprint);
 const taskSprints = (task) => task?.planned_sprints || [];
@@ -31,7 +57,7 @@ const portion = (task, sprint) => Number(task?.sp_load_by_sprint?.[String(sprint
 const sprintHours = (task, sprint) => task?.role_hours_by_sprint?.[String(sprint)] || null;
 const sprintLabel = (task) => {
   const sprints = taskSprints(task);
-  if (!sprints.length) return task.status === 'DONE' ? 'Завершена до квартала' : 'Не включена в квартальный план';
+  if (!sprints.length) return task.status === 'DONE' ? 'Завершена до начала планирования' : 'Не включена в квартальный план';
   return sprints.length === 1 ? `Sprint ${sprints[0]}` : `Sprint ${sprints[0]}–${sprints.at(-1)}`;
 };
 const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Выполнен'}[sprintBy(sprint)?.status] || 'Запланирован');
@@ -399,7 +425,7 @@ function renderTasks() {
   const teamSwitch = task.team_reassigned ? `<p class="hint">Исходная команда: <b>${escapeHtml(task.original_team_id)}</b>. Назначенная команда: <b>${escapeHtml(task.assigned_team_id)}</b>.</p>` : '';
   $('#taskTeamResource').innerHTML = `<div class="panel-heading"><div><div class="eyebrow">КОМАНДНЫЙ РЕСУРС · STORY POINTS</div><h2>${escapeHtml(team.name)} · ${selectedSprint ? `Sprint ${selectedSprint}` : 'вне квартального плана'}</h2></div>${task.multi_sprint && selectedSprint ? `<label class="filters">Выбранный спринт <select id="taskSprintSelect">${sprints.map((sprint) => `<option value="${sprint}" ${sprint === selectedSprint ? 'selected' : ''}>Sprint ${sprint}</option>`).join('')}</select></label>` : ''}</div>${resource ? `<div class="metrics"><div class="metric"><span>Доступно</span><b>${number(resource.capacity)} SP</b></div><div class="metric"><span>Всего использовано</span><b>${number(resource.used)} SP</b></div><div class="metric"><span>Доля задачи</span><b>${number(shownSp)} SP</b></div></div>${meter(resource.used, resource.capacity)}` : empty('Ресурс спринта не указан для этой задачи.')}${teamSwitch}`;
   const riskMatches = data.risks.filter((risk) => risk.task_id === task.task_id);
-  $('#taskDescription').innerHTML = `<div class="eyebrow">ОПИСАНИЕ</div><h2>${escapeHtml(task.title)}</h2><p style="margin-top:15px">${escapeHtml(task.description || 'Описание отсутствует.')}</p><div class="detail-grid"><div><span>Задача</span><b>${escapeHtml(task.task_id)}</b></div><div><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div><div><span>SP</span><b>${number(task.story_points)}</b></div><div><span>Rung</span><b>${number(task.rung)}</b></div><div><span>Статус</span><b>${escapeHtml(task.status_label)}</b></div><div><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div></div>${riskMatches.length ? `<h3 class="needs-title">Связанные риски</h3>${riskMatches.map((risk) => `<p>${escapeHtml(risk.title)}: ${escapeHtml(risk.cause)}</p>`).join('')}` : ''}${archiveState(task)}${task.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="task" data-archive-id="${attr(task.task_id)}" data-current-plan-reference="${inQuarter(task)}">Удалить</button></div>`}`;
+  $('#taskDescription').innerHTML = `<div class="eyebrow">ОПИСАНИЕ</div><h2>${escapeHtml(task.title)}</h2><p style="margin-top:15px">${escapeHtml(task.description || 'Описание отсутствует.')}</p><div class="detail-grid"><div><span>Задача</span><b>${escapeHtml(task.task_id)}</b></div><div><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div><div><span>SP</span><b>${number(task.story_points)}</b></div><div><span>Rung</span><b>${number(task.rung)}</b></div><div><span>Статус</span><b>${escapeHtml(task.status_label)}</b></div><div><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div></div>${riskMatches.length ? `<h3 class="needs-title">Связанные риски</h3>${riskMatches.map((risk) => `<p>${escapeHtml(risk.title)}: ${escapeHtml(risk.cause)}</p>`).join('')}` : ''}${archiveState(task)}${task.archived || task.status === 'DONE' ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="task" data-archive-id="${attr(task.task_id)}" data-current-plan-reference="${inQuarter(task)}">Удалить</button></div>`}`;
   const allocations = task.allocations.filter((item) => selectedSprint == null || item.sprint === selectedSprint);
   const people = [...new Set(allocations.map((item) => item.engineer_id))];
   $('#taskPeople').innerHTML = `<div class="eyebrow">КОМАНДА И СПЕЦИАЛИСТЫ</div><h2>Исполнители</h2><button type="button" class="profile-link" data-open-team="${attr(task.assigned_team_id)}">Команда: ${escapeHtml(task.assigned_team_id)} ↗</button>${people.length ? people.map((engineerId) => { const engineer = engineerBy(engineerId); const engineerAllocations = allocations.filter((item) => item.engineer_id === engineerId); const external = engineerAllocations.some((item) => item.cross_team); const hours = engineerAllocations.reduce((sum, item) => sum + Number(item.allocated_hours), 0); return `<button type="button" class="person-link" data-open-employee="${attr(engineerId)}"><b>${escapeHtml(engineerId)}${external ? ` · привлечён из ${escapeHtml(engineerAllocations[0].source_team_id)}` : ''}</b><span>${escapeHtml(engineer?.roles?.join(', ') || engineerAllocations[0].role)} · ${number(hours)} ч ↗</span></button>`; }).join('') : empty('Исполнители не назначены.')}`;
@@ -571,11 +597,18 @@ async function initialize() {
       window.postcodeApi.getConstructorCatalog(),
       window.postcodeApi.getArchiveReasons(),
     ]);
+    data.historicalTasks = (constructorCatalog.tasks || [])
+      .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
+      .map(historicalTaskFromCatalog);
     hydrate(dashboard);
     data.archiveReasons = archiveReasons;
     window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
       hydrate(plannerResult);
       show('current-plan');
+    }, (updatedCatalog) => {
+      data.historicalTasks = (updatedCatalog.tasks || [])
+        .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
+        .map(historicalTaskFromCatalog);
     });
     renderPage(state.page);
   } catch (error) {

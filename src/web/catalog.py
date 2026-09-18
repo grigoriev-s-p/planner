@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from numbers import Real
 from typing import Any, Iterable, Iterator, Mapping
 
 
@@ -72,12 +74,14 @@ class CatalogMergeResult:
     added: dict[str, int]
     kept: dict[str, int]
     warnings: tuple[str, ...]
+    conflicts: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "added": dict(self.added),
             "kept": dict(self.kept),
             "warnings": list(self.warnings),
+            "conflicts": [dict(conflict) for conflict in self.conflicts],
         }
 
 
@@ -87,6 +91,24 @@ def _text(value: Any) -> str:
 
 def _json_payload(row: Mapping[str, Any]) -> str:
     return json.dumps(dict(row), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _comparison_payload(row: Mapping[str, Any]) -> str:
+    """Canonicalize harmless JSON numeric differences for conflict detection."""
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, Real):
+            number = float(value)
+            return None if math.isnan(number) else number
+        if isinstance(value, Mapping):
+            return {str(key): normalize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        return value
+
+    return json.dumps(normalize(dict(row)), ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _row_identity(table_name: str, row: Mapping[str, Any]) -> str:
@@ -327,15 +349,19 @@ class CatalogRepository:
         return grouped
 
     def merge_tables(
-        self, incoming: Mapping[str, Iterable[Mapping[str, Any]]]
+        self,
+        incoming: Mapping[str, Iterable[Mapping[str, Any]]],
+        *,
+        dry_run: bool = False,
     ) -> CatalogMergeResult:
-        """Atomically add new canonical entities and independent relations."""
+        """Atomically add entities, or inspect the exact merge without writing."""
 
         current = self.tables()
         materialized = {name: [dict(row) for row in rows] for name, rows in incoming.items()}
         added = {name: 0 for name in materialized}
         kept = {name: 0 for name in materialized}
         warnings: list[str] = []
+        conflicts: list[dict[str, Any]] = []
         archived = {
             entity_type: self.archived_ids(entity_type)
             for entity_type in ENTITY_TABLES
@@ -375,13 +401,20 @@ class CatalogRepository:
                     continue
                 if entity_id in existing_groups:
                     kept[table_name] += len(rows)
-                    old = sorted(_json_payload(row) for row in existing_groups[entity_id])
-                    new = sorted(_json_payload(row) for row in rows)
+                    old = sorted(_comparison_payload(row) for row in existing_groups[entity_id])
+                    new = sorted(_comparison_payload(row) for row in rows)
                     if old != new:
                         warnings.append(
                             f"{label} {entity_id} уже существует. "
                             "Данные из Excel не применены."
                         )
+                        conflicts.append({
+                            "table": table_name,
+                            "entity_type": entity_type,
+                            "entity_id": entity_id,
+                            "saved": [dict(row) for row in existing_groups[entity_id]],
+                            "excel": [dict(row) for row in rows],
+                        })
                     continue
                 rows_to_insert[table_name].extend(rows)
 
@@ -413,6 +446,14 @@ class CatalogRepository:
                     rows_to_insert[table_name].append(row)
                     existing_keys.add(key)
 
+        if dry_run:
+            return CatalogMergeResult(
+                {name: len(rows) for name, rows in rows_to_insert.items()},
+                kept,
+                tuple(dict.fromkeys(warnings)),
+                tuple(conflicts),
+            )
+
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -428,7 +469,9 @@ class CatalogRepository:
                         added[table_name] = added.get(table_name, 0) + 1
                     else:
                         kept[table_name] = kept.get(table_name, 0) + 1
-        return CatalogMergeResult(added, kept, tuple(dict.fromkeys(warnings)))
+        return CatalogMergeResult(
+            added, kept, tuple(dict.fromkeys(warnings)), tuple(conflicts)
+        )
 
     def archive(
         self,

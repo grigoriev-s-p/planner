@@ -38,6 +38,7 @@ from .story_points import (
     StoryPointDistribution,
     distribute_capacity_sp_load,
 )
+from .task_states import is_historical_done
 
 
 SPRINT_COUNT = 6
@@ -1129,7 +1130,7 @@ class BaselineQuarterPlanner:
                     task, status=PlanStatus.UNKNOWN, final_reasons=(reason,)
                 )
                 quarter_warnings.append(reason)
-            elif (_text(task.get("status")) or "").casefold() == COMPLETED_SOURCE_STATUS:
+            elif is_historical_done(task):
                 completed_tasks[task_id] = 0
                 results[task_id] = self._task_result(
                     task,

@@ -17,6 +17,11 @@ import pandas as pd
 
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
+<<<<<<< Updated upstream
+=======
+from src.planning.ownership import evaluate_ownership_rows
+from src.planning.task_states import is_historical_done
+>>>>>>> Stashed changes
 from src.replanning import (
     ActualResults,
     PlanItem,
@@ -98,7 +103,7 @@ def _read_table(directory: Path, table_name: str) -> list[dict[str, Any]]:
 
 
 STATUS_LABELS = {
-    "DONE": "Завершена",
+    "DONE": "Завершена до начала планирования",
     "PLANNED": "Запланирована",
     "MOVED": "Перенесена",
     "UNPLANNABLE": "Невыполнима",
@@ -290,7 +295,7 @@ class PlanningAPIService:
                 dependency_state = "MISSING"
                 satisfied = False
                 blocker_title = None
-            elif (_text(blocker.get("status")) or "").casefold() == "done":
+            elif is_historical_done(blocker):
                 dependency_state = "HISTORICAL_DONE"
                 satisfied = True
                 blocker_title = _text(blocker.get("summary"))
@@ -306,7 +311,7 @@ class PlanningAPIService:
                 "satisfied": satisfied,
                 "blocking_task_title": blocker_title,
                 "status_message": (
-                    "Задача завершена до начала квартала"
+                    "Задача завершена до начала планирования"
                     if dependency_state == "HISTORICAL_DONE"
                     else (
                         "Блокирующая задача неизвестна каталогу"
