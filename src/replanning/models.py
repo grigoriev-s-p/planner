@@ -194,11 +194,12 @@ class ActualResult:
     task_id: str
     initiative_id: str
     sprint_number: int
-    completed_story_points: float
+    completed_story_points: float | None
     task_completed: bool
     initiative_completed: bool = False
     closure_status: str | None = None
     mismatch_reason: str | None = None
+    completed_work_hours: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", self.task_id.strip())
@@ -207,13 +208,22 @@ class ActualResult:
             raise ValueError("actual result task_id and initiative_id must not be empty")
         if not 1 <= self.sprint_number <= QUARTER_SPRINTS:
             raise ValueError(f"sprint_number must be between 1 and {QUARTER_SPRINTS}")
-        if (
-            not isinstance(self.completed_story_points, Real)
-            or isinstance(self.completed_story_points, bool)
-            or not isfinite(self.completed_story_points)
-            or self.completed_story_points < 0
-        ):
-            raise ValueError("completed_story_points must be a finite non-negative number")
+        if self.completed_story_points is None and self.completed_work_hours is None:
+            raise ValueError(
+                "actual result must provide completed_story_points or completed_work_hours"
+            )
+        if self.completed_story_points is not None:
+            if (
+                not isinstance(self.completed_story_points, Real)
+                or isinstance(self.completed_story_points, bool)
+                or not isfinite(self.completed_story_points)
+                or self.completed_story_points < 0
+            ):
+                raise ValueError(
+                    "completed_story_points must be a finite non-negative number"
+                )
+        if self.completed_work_hours is not None:
+            _validate_hours(self.completed_work_hours, "completed_work_hours")
 
 
 @dataclass(frozen=True, slots=True)

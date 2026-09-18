@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 from .models import (
     QUARTER_SPRINTS,
     ActualResults,
     MeasureKind,
+    PlanItem,
     PlanState,
     QuarterPlan,
 )
@@ -17,14 +19,57 @@ from .models import (
 class KPIResult:
     code: str
     kind: MeasureKind
-    numerator: float
+    numerator: float | None
     denominator: float
     percentage: float | None
+    has_actual: bool
     explanation: str
+
+    def to_dict(self) -> dict[str, str | float | bool | None]:
+        return {
+            "code": self.code,
+            "kind": self.kind.value,
+            "numerator": self.numerator,
+            "denominator": self.denominator,
+            "percentage": self.percentage,
+            "has_actual": self.has_actual,
+            "explanation": self.explanation,
+        }
 
 
 def _percentage(numerator: float, denominator: float) -> float | None:
     return None if denominator == 0 else numerator / denominator * 100.0
+
+
+def calculate_expected_quarter_kpi(
+    baseline_initiative_ids: Iterable[str],
+    completed_initiative_ids: Iterable[str],
+) -> KPIResult:
+    """Return expected completion of Week-0 initiatives by the current plan.
+
+    The planner remains responsible for deciding whether every required task of
+    an initiative is completed inside the quarter. This function only anchors
+    that result to the immutable baseline initiative set.
+    """
+
+    baseline = {initiative_id for initiative_id in baseline_initiative_ids if initiative_id}
+    completed = {
+        initiative_id for initiative_id in completed_initiative_ids if initiative_id
+    }
+    numerator = float(len(baseline & completed))
+    denominator = float(len(baseline))
+    return KPIResult(
+        code="pi_predictability_expected",
+        kind=MeasureKind.FORECAST,
+        numerator=numerator,
+        denominator=denominator,
+        percentage=_percentage(numerator, denominator),
+        has_actual=False,
+        explanation=(
+            "Expected: baseline initiatives fully completed by the current plan "
+            "inside the quarter / initiatives in the Week-0 baseline."
+        ),
+    )
 
 
 def _require_same_quarter(*snapshots: QuarterPlan | ActualResults) -> None:
@@ -47,16 +92,72 @@ def _actually_completed_initiatives(
     completed_tasks = {
         entry.task_id for entry in actual_results.entries if entry.task_completed
     }
-    explicitly_completed = {
-        entry.initiative_id
-        for entry in actual_results.entries
-        if entry.initiative_completed
-    }
     return {
         initiative_id
         for initiative_id, task_ids in baseline_by_initiative.items()
-        if initiative_id in explicitly_completed or task_ids.issubset(completed_tasks)
+        if task_ids.issubset(completed_tasks)
     }
+
+
+def _allocation_hours(item: PlanItem) -> dict[int, float]:
+    hours_by_sprint: dict[int, float] = {}
+    for allocation in item.allocations:
+        role_hours = sum(entry.hours for entry in allocation.role_hours)
+        engineer_hours = sum(entry.hours for entry in allocation.engineer_hours)
+        hours_by_sprint[allocation.sprint_number] = (
+            role_hours if role_hours > 0 else engineer_hours
+        )
+    return hours_by_sprint
+
+
+def _planned_story_points_for_sprint(
+    original_plan: QuarterPlan,
+    sprint_number: int,
+) -> float:
+    total = 0.0
+    for item in original_plan.baseline_items():
+        hours_by_sprint = _allocation_hours(item)
+        total_hours = sum(hours_by_sprint.values())
+        if total_hours > 0:
+            total += item.story_points * hours_by_sprint.get(sprint_number, 0.0) / total_hours
+        elif item.completion_sprint == sprint_number:
+            total += item.story_points
+    return total
+
+
+def _actual_story_points_by_sprint(
+    original_plan: QuarterPlan,
+    actual_results: ActualResults,
+) -> dict[int, float]:
+    """Return factual SP per sprint without crediting a task more than once."""
+
+    baseline_by_task = original_plan.by_task_id()
+    remaining_sp = {
+        task_id: item.story_points for task_id, item in baseline_by_task.items()
+    }
+    totals = {sprint: 0.0 for sprint in range(1, QUARTER_SPRINTS + 1)}
+    for entry in sorted(
+        actual_results.entries,
+        key=lambda item: (item.sprint_number, item.task_id),
+    ):
+        baseline_item = baseline_by_task.get(entry.task_id)
+        if entry.completed_story_points is not None:
+            delivered_sp = float(entry.completed_story_points)
+        elif baseline_item is not None and entry.completed_work_hours is not None:
+            planned_hours = sum(_allocation_hours(baseline_item).values())
+            delivered_sp = (
+                baseline_item.story_points * entry.completed_work_hours / planned_hours
+                if planned_hours > 0
+                else 0.0
+            )
+        else:
+            delivered_sp = 0.0
+
+        if baseline_item is not None:
+            delivered_sp = min(delivered_sp, remaining_sp[entry.task_id])
+            remaining_sp[entry.task_id] -= delivered_sp
+        totals[entry.sprint_number] += delivered_sp
+    return totals
 
 
 def calculate_pi_predictability_fact(
@@ -68,14 +169,18 @@ def calculate_pi_predictability_fact(
     _require_same_quarter(original_plan, actual_results)
     baseline = _baseline_by_initiative(original_plan)
     completed = _actually_completed_initiatives(baseline, actual_results)
-    numerator = float(len(completed))
+    has_actual = actual_results.completed_through_sprint > 0
+    numerator = float(len(completed)) if has_actual else None
     denominator = float(len(baseline))
     return KPIResult(
         code="pi_predictability_fact",
         kind=MeasureKind.FACT,
         numerator=numerator,
         denominator=denominator,
-        percentage=_percentage(numerator, denominator),
+        percentage=(
+            _percentage(numerator, denominator) if numerator is not None else None
+        ),
+        has_actual=has_actual,
         explanation=(
             "Fact to date: completed baseline initiatives / initiatives in "
             "original_plan."
@@ -141,6 +246,7 @@ def calculate_pi_predictability(
         numerator=numerator,
         denominator=denominator,
         percentage=_percentage(numerator, denominator),
+        has_actual=actual_results.completed_through_sprint > 0,
         explanation=explanation,
     )
 
@@ -160,41 +266,37 @@ def calculate_sprint_say_do(
     if not 1 <= sprint_number <= QUARTER_SPRINTS:
         raise ValueError(f"sprint_number must be between 1 and {QUARTER_SPRINTS}")
     _require_same_quarter(original_plan, current_plan, actual_results)
-    denominator = sum(
-        item.story_points
-        for item in original_plan.baseline_items()
-        if item.completion_sprint == sprint_number
-    )
+    denominator = _planned_story_points_for_sprint(original_plan, sprint_number)
 
     if sprint_number <= actual_results.completed_through_sprint:
-        numerator = sum(
-            entry.completed_story_points
-            for entry in actual_results.for_sprint(sprint_number)
-        )
+        numerator = _actual_story_points_by_sprint(
+            original_plan, actual_results
+        )[sprint_number]
         kind = MeasureKind.FACT
+        has_actual = True
         explanation = (
             "Fact: story points delivered in the closed sprint / story points "
             "promised for that sprint in original_plan."
         )
     else:
-        numerator = sum(
-            item.story_points
-            for item in current_plan.items
-            if item.state
-            in {PlanState.PLANNED, PlanState.IN_PROGRESS, PlanState.COMPLETED}
-            and item.completion_sprint == sprint_number
-        )
+        numerator = None
         kind = MeasureKind.FORECAST
+        has_actual = False
         explanation = (
-            "Forecast: story points currently scheduled for the sprint / story "
-            "points promised for that sprint in original_plan."
+            "Actual results have not been loaded for this sprint; the immutable "
+            "original-plan denominator is retained without reporting 0%."
         )
 
     return KPIResult(
         code=f"sprint_{sprint_number}_say_do",
         kind=kind,
-        numerator=float(numerator),
+        numerator=float(numerator) if numerator is not None else None,
         denominator=float(denominator),
-        percentage=_percentage(float(numerator), float(denominator)),
+        percentage=(
+            _percentage(float(numerator), float(denominator))
+            if numerator is not None
+            else None
+        ),
+        has_actual=has_actual,
         explanation=explanation,
     )

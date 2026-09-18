@@ -27,6 +27,7 @@ from src.replanning import (  # noqa: E402
     RiskSignal,
     SprintAllocation,
     build_replanning_snapshot,
+    calculate_expected_quarter_kpi,
     calculate_pi_predictability,
     calculate_pi_predictability_fact,
     calculate_sprint_say_do,
@@ -161,7 +162,7 @@ class MetricsTests(unittest.TestCase):
         result = calculate_sprint_say_do(self.original, self.original, actual, 1)
         self.assertEqual(result.percentage, 160)
 
-    def test_future_say_do_is_forecast_against_baseline(self) -> None:
+    def test_future_say_do_is_unavailable_against_retained_baseline(self) -> None:
         current = plan(
             2,
             (
@@ -173,9 +174,10 @@ class MetricsTests(unittest.TestCase):
         )
         result = calculate_sprint_say_do(self.original, current, facts(1), 2)
         self.assertEqual(result.kind, MeasureKind.FORECAST)
-        self.assertEqual(result.numerator, 8)
+        self.assertIsNone(result.numerator)
         self.assertEqual(result.denominator, 11)
-        self.assertAlmostEqual(result.percentage or 0, 72.7272727)
+        self.assertIsNone(result.percentage)
+        self.assertFalse(result.has_actual)
 
     def test_zero_baseline_returns_none_not_division_error(self) -> None:
         result = calculate_sprint_say_do(self.original, self.original, facts(0), 6)
@@ -221,6 +223,148 @@ class MetricsTests(unittest.TestCase):
         result = calculate_pi_predictability_fact(self.original, actual)
         self.assertEqual(result.kind, MeasureKind.FACT)
         self.assertEqual(result.percentage, 50)
+
+    def test_quarter_fact_is_four_of_ten_baseline_initiatives(self) -> None:
+        original = plan(
+            1,
+            tuple(item(f"T-{index}", f"I-{index}", 1, 1) for index in range(10)),
+        )
+        actual = facts(
+            1,
+            *(
+                ActualResult(f"T-{index}", f"I-{index}", 1, 1, True, True)
+                for index in range(4)
+            ),
+        )
+        result = calculate_pi_predictability_fact(original, actual)
+        self.assertEqual(result.numerator, 4)
+        self.assertEqual(result.denominator, 10)
+        self.assertEqual(result.percentage, 40)
+
+    def test_current_plan_does_not_change_quarter_baseline_denominator(self) -> None:
+        original = plan(
+            1,
+            tuple(item(f"T-{index}", f"I-{index}", 1, 1) for index in range(10)),
+        )
+        current = plan(2, (item("T-NEW", "I-NEW", 1, 2),), as_of_sprint=1)
+        actual = facts(
+            6,
+            *(
+                ActualResult(f"T-{index}", f"I-{index}", 1, 1, True, True)
+                for index in range(4)
+            ),
+        )
+        result = calculate_pi_predictability(original, current, actual)
+        self.assertEqual(result.denominator, 10)
+        self.assertEqual(result.percentage, 40)
+
+    def test_sprint_fact_is_fifteen_of_twenty_story_points(self) -> None:
+        original = plan(1, (item("T-20", "I-1", 20, 1),))
+        actual = facts(1, ActualResult("T-20", "I-1", 1, 15, False))
+        result = calculate_sprint_say_do(original, original, actual, 1)
+        self.assertEqual(result.numerator, 15)
+        self.assertEqual(result.denominator, 20)
+        self.assertEqual(result.percentage, 75)
+
+    def test_multi_sprint_baseline_and_actual_sp_are_proportional_to_hours(self) -> None:
+        multi_sprint = item(
+            "T-MULTI",
+            "I-1",
+            10,
+            3,
+            allocations=(
+                SprintAllocation(1, (RoleHoursAllocation("Backend", 80),)),
+                SprintAllocation(2, (RoleHoursAllocation("Backend", 120),)),
+                SprintAllocation(3, (RoleHoursAllocation("Backend", 100),)),
+            ),
+        )
+        original = plan(1, (multi_sprint,))
+        actual = facts(
+            3,
+            ActualResult(
+                "T-MULTI", "I-1", 1, None, False, completed_work_hours=80
+            ),
+            ActualResult(
+                "T-MULTI", "I-1", 2, None, False, completed_work_hours=120
+            ),
+            ActualResult(
+                "T-MULTI", "I-1", 3, None, True, completed_work_hours=100
+            ),
+        )
+
+        results = [
+            calculate_sprint_say_do(original, original, actual, sprint)
+            for sprint in range(1, 4)
+        ]
+        expected = (10 * 80 / 300, 10 * 120 / 300, 10 * 100 / 300)
+        for result, expected_sp in zip(results, expected, strict=True):
+            self.assertAlmostEqual(result.denominator, expected_sp)
+            self.assertAlmostEqual(result.numerator or 0, expected_sp)
+            self.assertEqual(result.percentage, 100)
+
+    def test_initiative_flag_cannot_bypass_incomplete_baseline_task(self) -> None:
+        original = plan(
+            1,
+            (item("T-1", "I-1", 5, 1), item("T-2", "I-1", 5, 1)),
+        )
+        actual = facts(1, ActualResult("T-1", "I-1", 1, 5, True, True))
+        result = calculate_pi_predictability_fact(original, actual)
+        self.assertEqual(result.numerator, 0)
+        self.assertEqual(result.percentage, 0)
+
+    def test_closed_sprint_with_zero_baseline_sp_is_unavailable(self) -> None:
+        original = plan(1, (item("T-0", "I-1", 0, 1),))
+        actual = facts(1, ActualResult("T-0", "I-1", 1, 0, True))
+        result = calculate_sprint_say_do(original, original, actual, 1)
+        self.assertEqual(result.denominator, 0)
+        self.assertIsNone(result.percentage)
+
+    def test_empty_quarter_baseline_is_unavailable(self) -> None:
+        original = plan(1, ())
+        result = calculate_pi_predictability_fact(original, facts(1))
+        self.assertEqual(result.denominator, 0)
+        self.assertIsNone(result.percentage)
+
+    def test_expected_kpi_counts_five_of_seven_baseline_initiatives(self) -> None:
+        baseline = tuple(f"I-{index}" for index in range(7))
+        result = calculate_expected_quarter_kpi(baseline, baseline[:5])
+        self.assertEqual(result.numerator, 5)
+        self.assertEqual(result.denominator, 7)
+        self.assertAlmostEqual(result.percentage or 0, 71.4285714)
+
+    def test_expected_kpi_handles_all_none_and_empty_baseline(self) -> None:
+        baseline = tuple(f"I-{index}" for index in range(7))
+        all_completed = calculate_expected_quarter_kpi(baseline, baseline)
+        none_completed = calculate_expected_quarter_kpi(baseline, ())
+        empty = calculate_expected_quarter_kpi((), ())
+        self.assertEqual(all_completed.percentage, 100)
+        self.assertEqual(none_completed.percentage, 0)
+        self.assertIsNone(empty.percentage)
+
+    def test_expected_forecast_rejects_partially_planned_initiative(self) -> None:
+        original = plan(
+            1,
+            tuple(item(f"T-{index}", "I-1", 1, 1) for index in range(5)),
+        )
+        current = plan(2, original.items[:4])
+        result = calculate_pi_predictability(original, current, facts(0))
+        self.assertEqual(result.numerator, 0)
+        self.assertEqual(result.percentage, 0)
+
+    def test_expected_forecast_combines_done_and_planned_tasks(self) -> None:
+        original = plan(
+            1,
+            tuple(item(f"T-{index}", "I-1", 1, 1) for index in range(4)),
+        )
+        current = plan(2, original.items[2:], as_of_sprint=1)
+        actual = facts(
+            1,
+            ActualResult("T-0", "I-1", 1, 1, True),
+            ActualResult("T-1", "I-1", 1, 1, True),
+        )
+        result = calculate_pi_predictability(original, current, actual)
+        self.assertEqual(result.numerator, 1)
+        self.assertEqual(result.percentage, 100)
 
 
 class DiffTests(unittest.TestCase):

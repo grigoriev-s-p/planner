@@ -17,6 +17,17 @@ import pandas as pd
 
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
+from src.replanning import (
+    ActualResults,
+    PlanItem,
+    PlanState,
+    QuarterPlan,
+    RoleHoursAllocation,
+    SprintAllocation,
+    calculate_expected_quarter_kpi,
+    calculate_pi_predictability_fact,
+    calculate_sprint_say_do,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +148,94 @@ class PlanningAPIService:
         except (OSError, ValueError, TypeError):
             fingerprint = "unknown"
         return f"baseline-{fingerprint}"
+
+    @cached_property
+    def kpi_baseline_plan(self) -> QuarterPlan:
+        """Immutable Week-0 snapshot adapted from the initial planner result."""
+
+        items = []
+        for task in self.tasks:
+            if task["status"] != "PLANNED" or not task["planned_sprints"]:
+                continue
+            allocations = tuple(
+                SprintAllocation(
+                    sprint_number=int(sprint),
+                    role_hours=tuple(
+                        RoleHoursAllocation(role, float(hours))
+                        for role, hours in sorted(role_hours.items())
+                    ),
+                )
+                for sprint, role_hours in sorted(
+                    task["role_hours_by_sprint"].items(), key=lambda item: int(item[0])
+                )
+            )
+            items.append(
+                PlanItem(
+                    task_id=task["task_id"],
+                    initiative_id=task["initiative_id"],
+                    story_points=float(task["story_points"] or 0.0),
+                    completion_sprint=int(task["completion_sprint"]),
+                    state=PlanState.PLANNED,
+                    team_id=task["assigned_team_id"],
+                    allocations=allocations,
+                )
+            )
+        return QuarterPlan(
+            quarter_id=self.plan_version,
+            version=1,
+            as_of_sprint=0,
+            items=tuple(items),
+        )
+
+    @cached_property
+    def kpi_actual_results(self) -> ActualResults:
+        """No sprint fact is available until a factual upload is integrated."""
+
+        return ActualResults(
+            quarter_id=self.kpi_baseline_plan.quarter_id,
+            completed_through_sprint=0,
+            entries=(),
+        )
+
+    @cached_property
+    def kpis(self) -> dict[str, Any]:
+        baseline = self.kpi_baseline_plan
+        actuals = self.kpi_actual_results
+        expected = calculate_expected_quarter_kpi(
+            (item.initiative_id for item in baseline.items),
+            self.plan.completed_initiative_ids,
+        )
+        quarter = calculate_pi_predictability_fact(baseline, actuals)
+        sprints = [
+            calculate_sprint_say_do(baseline, baseline, actuals, sprint)
+            for sprint in range(1, 7)
+        ]
+        return _clean(
+            {
+                "expected_kpi": {
+                    "completed_initiatives": expected.numerator,
+                    "baseline_initiatives": expected.denominator,
+                    "incomplete_initiatives": expected.denominator - expected.numerator,
+                    "completion_percent": expected.percentage,
+                },
+                "quarter_kpi": {
+                    "completed_initiatives": quarter.numerator,
+                    "baseline_initiatives": quarter.denominator,
+                    "completion_percent": quarter.percentage,
+                    "has_actual": quarter.has_actual,
+                },
+                "sprint_kpis": [
+                    {
+                        "sprint": sprint,
+                        "baseline_sp": result.denominator,
+                        "actual_sp": result.numerator,
+                        "completion_percent": result.percentage,
+                        "has_actual": result.has_actual,
+                    }
+                    for sprint, result in enumerate(sprints, start=1)
+                ],
+            }
+        )
 
     def _task_role_requirements(self, task_id: str) -> dict[str, float]:
         values: dict[str, float] = defaultdict(float)
@@ -590,6 +689,7 @@ class PlanningAPIService:
             "teams": self.teams,
             "engineers": self.engineers,
             "star_map": self.star_map,
+            "kpis": self.kpis,
             "features": {
                 "replanning": "NOT_IMPLEMENTED",
                 "bus_factor": "NOT_IMPLEMENTED",

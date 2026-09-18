@@ -9,7 +9,7 @@ const state = {
 
 const data = {
   plan: null, summary: {}, tasks: [], initiatives: [], risks: [], teams: [],
-  engineers: [], features: {}, ready: false,
+  engineers: [], kpis: null, features: {}, ready: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -19,6 +19,7 @@ const escapeHtml = (value) => String(value ?? '—').replace(/[&<>"']/g, (char) 
 })[char]);
 const attr = escapeHtml;
 const number = (value) => value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toLocaleString('ru-RU', {maximumFractionDigits: 2});
+const percent = (value) => value == null || Number.isNaN(Number(value)) ? '—' : `${Number(value).toLocaleString('ru-RU', {maximumFractionDigits: 1})}%`;
 const teamBy = (id) => data.teams.find((team) => team.team_id === id) || {team_id: id, name: id || 'Команда не указана', sp_by_sprint: {}};
 const engineerBy = (id) => data.engineers.find((engineer) => engineer.engineer_id === id);
 const taskBy = (id) => data.tasks.find((task) => task.task_id === id);
@@ -231,6 +232,22 @@ function renderExcludedTasks() {
   $('#outsideTasks').innerHTML = [...groups.entries()].map(([label, tasks]) => `<section class="excluded-group"><div class="excluded-group-title"><span>${escapeHtml(label)}</span><b>${tasks.length}</b></div><div class="excluded-task-list">${tasks.map((task) => `<details class="excluded-task"><summary>${escapeHtml(task.task_id)}</summary><div class="excluded-task-content"><span>${escapeHtml(task.title)}</span><button type="button" class="text-button" data-open-task="${attr(task.task_id)}">Открыть задачу ↗</button></div></details>`).join('')}</div></section>`).join('');
 }
 
+function renderKpis() {
+  const target = $('#planKpis');
+  const expected = data.kpis?.expected_kpi;
+  if (!target || !expected) {
+    if (target) target.innerHTML = empty('KPI пока недоступны.');
+    return;
+  }
+
+  if (expected.completion_percent == null) {
+    target.innerHTML = `<article class="expected-kpi-card unavailable"><div><span>Ожидаемое выполнение квартального плана</span><strong>—</strong></div><p>Нет данных для расчёта.</p></article>`;
+    return;
+  }
+
+  target.innerHTML = `<article class="expected-kpi-card"><div><span>Ожидаемое выполнение квартального плана</span><strong>${percent(expected.completion_percent)}</strong></div><div class="expected-kpi-copy"><p>Будут завершены ${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив исходного плана</p><small>Не будут завершены: ${number(expected.incomplete_initiatives)}</small></div></article>`;
+}
+
 function renderPlanning() {
   $('#sprintBoard').innerHTML = Array.from({length: 6}, (_, index) => {
     const sprint = index + 1;
@@ -242,6 +259,7 @@ function renderPlanning() {
     return `<section class="sprint-column ${sprint === currentSprint() ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><b>Sprint ${sprint}</b><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
   }).join('');
   activateSprintScrollbars();
+  renderKpis();
   renderInitiatives();
   renderExcludedTasks();
 }
@@ -409,6 +427,7 @@ function hydrate(payload) {
   data.risks = payload.risks || [];
   data.teams = payload.teams || [];
   data.engineers = payload.engineers || [];
+  data.kpis = payload.kpis || null;
   data.features = payload.features || {};
   data.ready = true;
   state.loading = false;

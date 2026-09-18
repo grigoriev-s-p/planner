@@ -4,6 +4,7 @@ from .alerts import Alert, AlertCode, AlertLevel, AlertPolicy, RiskSignal
 from .diff import ChangeType, PlanDiff, PlanDiffEntry, compare_plans
 from .metrics import (
     KPIResult,
+    calculate_expected_quarter_kpi,
     calculate_pi_predictability,
     calculate_pi_predictability_fact,
     calculate_sprint_say_do,
@@ -47,6 +48,7 @@ __all__ = [
     "RiskSignal",
     "SprintAllocation",
     "build_replanning_snapshot",
+    "calculate_expected_quarter_kpi",
     "calculate_pi_predictability",
     "calculate_pi_predictability_fact",
     "calculate_sprint_say_do",

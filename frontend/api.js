@@ -19,6 +19,7 @@ window.postcodeApi = (() => {
   return Object.freeze({
     getDashboard: () => request('/api/dashboard'),
     getPlan: () => request('/api/plan'),
+    getKpis: () => request('/api/kpis'),
     getTasks: () => request('/api/tasks'),
     getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     getRisks: () => request('/api/risks'),
