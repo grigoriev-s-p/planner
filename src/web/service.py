@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from src.bus_factor import BusFactorService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
 from src.replanning import (
@@ -110,6 +111,290 @@ RISK_PRESENTATION = {
     "QUARTER_OVERFLOW": ("Сроки", "Выход за пределы квартала"),
     "RESOURCE_BOTTLENECK": ("Ресурсы", "Дефицит ресурса"),
 }
+
+
+BUS_FACTOR_PRESENTATION = {
+    "critical": {"label": "Критично", "rank": 0},
+    "warning": {"label": "Требует внимания", "rank": 1},
+    "healthy": {"label": "Достаточное покрытие", "rank": 2},
+}
+
+
+def _frame(
+    rows: Iterable[dict[str, Any]], columns: tuple[str, ...]
+) -> pd.DataFrame:
+    """Build an empty-safe DataFrame for the existing Bus Factor service."""
+
+    materialized = [dict(row) for row in rows]
+    if not materialized:
+        return pd.DataFrame(columns=list(columns))
+    frame = pd.DataFrame(materialized)
+    for column in columns:
+        if column not in frame:
+            frame[column] = None
+    return frame
+
+
+def _bus_factor_risk(team_bus_factor: int) -> str:
+    if team_bus_factor <= 1:
+        return "critical"
+    if team_bus_factor == 2:
+        return "warning"
+    return "healthy"
+
+
+def build_bus_factor_payload(
+    tables: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Adapt the existing calculator to the product-facing Star Map DTO.
+
+    The adapter deliberately does not infer skills or recalculate Bus Factor. It
+    only attaches catalog labels, holder identities and presentation metadata to
+    values returned by :class:`BusFactorService`.
+    """
+
+    engineers = _frame(
+        tables.get("engineers", []),
+        ("engineer_id", "team_id", "role", "grade", "capacity_rate"),
+    )
+    skills = _frame(
+        tables.get("engineer_skills", []), ("engineer_id", "technology")
+    )
+
+    if engineers.empty:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "message": "Недостаточно данных для расчёта Bus Factor.",
+            "method": "existing_bus_factor_service",
+            "teams": [],
+            "engineers": [],
+        }
+
+    service = BusFactorService(
+        engineers=engineers,
+        engineer_skills=skills,
+        tasks=_frame(
+            tables.get("tasks", []), ("task_id", "team_id", "status")
+        ),
+        task_role_effort=_frame(
+            tables.get("task_role_effort", []),
+            ("task_id", "role", "required_hours"),
+        ),
+        task_skill_requirements=_frame(
+            tables.get("task_skill_requirements", []),
+            ("task_id", "technology", "required_hours"),
+        ),
+    )
+
+    team_names = {
+        team_id: (_text(row.get("team_name")) or _text(row.get("name")) or team_id)
+        for row in tables.get("team_history", [])
+        if (team_id := _text(row.get("team_id")))
+    }
+    raw_profiles: dict[str, dict[str, Any]] = {}
+    memberships: dict[str, dict[str, float | None]] = defaultdict(dict)
+    for row in tables.get("engineers", []):
+        engineer_id = _text(row.get("engineer_id"))
+        team_id = _text(row.get("team_id"))
+        if not engineer_id or not team_id:
+            continue
+        profile = raw_profiles.setdefault(
+            engineer_id,
+            {"names": set(), "roles": set(), "grades": set(), "team_ids": set()},
+        )
+        profile["team_ids"].add(team_id)
+        if name := _text(row.get("name")):
+            profile["names"].add(name)
+        if role := _text(row.get("role")):
+            profile["roles"].add(role)
+        if grade := _text(row.get("grade")):
+            profile["grades"].add(grade)
+        rate = _number(row.get("capacity_rate"))
+        current = memberships[engineer_id].get(team_id)
+        memberships[engineer_id][team_id] = (
+            rate if current is None else max(current, rate or 0.0)
+        )
+
+    skill_sets: dict[str, set[str]] = defaultdict(set)
+    for row in service.engineer_skills.itertuples(index=False):
+        skill_sets[row.engineer_id].add(row.skill)
+
+    def engineer_dto(engineer_id: str) -> dict[str, Any]:
+        profile = raw_profiles.get(engineer_id, {})
+        names = sorted(profile.get("names", set()))
+        return {
+            "engineer_id": engineer_id,
+            "name": names[0] if names else engineer_id,
+            "roles": sorted(profile.get("roles", set())),
+            "grade": ", ".join(sorted(profile.get("grades", set()))) or None,
+            "team_ids": sorted(profile.get("team_ids", set())),
+            "memberships": [
+                {"team_id": team_id, "capacity_rate": rate}
+                for team_id, rate in sorted(memberships.get(engineer_id, {}).items())
+            ],
+            "skills": sorted(skill_sets.get(engineer_id, set())),
+        }
+
+    impacts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    team_payloads = []
+    for team_id in service.teams():
+        coverage = service.skill_coverage(team_id)
+        competencies = []
+        if not coverage.empty:
+            coverage = coverage.sort_values(["team_bus_factor", "competency"])
+        for item in coverage.itertuples(index=False):
+            team_bf = int(item.team_bus_factor)
+            # Without explicit task -> skill requirements, BF=0 means "not a
+            # team competency", not a staffing gap. The existing module uses
+            # the same rule for recommendations.
+            if team_bf == 0 and item.quarter_relevance != "required":
+                continue
+
+            risk_level = _bus_factor_risk(team_bf)
+            holders = service.competency_engineers(team_id, "skill", item.competency)
+            external_engineers = []
+            organization_holders = service.organization_competency_engineers(
+                "skill", item.competency
+            )
+            for engineer_id in sorted(set(organization_holders) - set(holders)):
+                external = engineer_dto(engineer_id)
+                external["source_team_ids"] = [
+                    source_team_id
+                    for source_team_id in external["team_ids"]
+                    if source_team_id != team_id
+                ]
+                if not external["source_team_ids"]:
+                    continue
+                external_engineers.append(external)
+
+            if team_bf == 0:
+                reason = (
+                    f"В {team_names.get(team_id, team_id)} нет инженеров, "
+                    "которые покрывают эту компетенцию."
+                )
+            elif team_bf == 1:
+                reason = (
+                    f"Только один инженер в {team_names.get(team_id, team_id)} "
+                    "покрывает эту компетенцию."
+                )
+            elif team_bf == 2:
+                reason = (
+                    f"Два инженера в {team_names.get(team_id, team_id)} "
+                    "покрывают эту компетенцию."
+                )
+            else:
+                reason = (
+                    f"Компетенцию покрывают {team_bf} инженера команды."
+                )
+
+            competency = {
+                "competency_type": "skill",
+                "skill": item.competency,
+                "bus_factor": team_bf,
+                "organization_bus_factor": int(item.organization_bus_factor),
+                "risk_level": risk_level,
+                "risk_label": BUS_FACTOR_PRESENTATION[risk_level]["label"],
+                "coverage_status": item.coverage_status,
+                "quarter_relevance": item.quarter_relevance,
+                "engineers": [engineer_dto(engineer_id) for engineer_id in holders],
+                "external_engineers": external_engineers,
+                "reason": reason,
+                "recommendation": (
+                    "Требуется дополнительное покрытие компетенции."
+                    if team_bf <= 2
+                    else None
+                ),
+            }
+            competencies.append(competency)
+            for engineer_id in holders:
+                impacts[engineer_id].append(
+                    {
+                        "team_id": team_id,
+                        "team_name": team_names.get(team_id, team_id),
+                        "skill": item.competency,
+                        "bus_factor": team_bf,
+                        "risk_level": risk_level,
+                        "risk_label": BUS_FACTOR_PRESENTATION[risk_level]["label"],
+                        "single_person_dependency": team_bf == 1,
+                    }
+                )
+
+        competencies.sort(
+            key=lambda item: (
+                BUS_FACTOR_PRESENTATION[item["risk_level"]]["rank"],
+                item["bus_factor"],
+                item["skill"].casefold(),
+            )
+        )
+        summary = {
+            "zero_coverage_count": sum(
+                item["bus_factor"] == 0 for item in competencies
+            ),
+            "single_owner_count": sum(
+                item["bus_factor"] == 1 for item in competencies
+            ),
+            "critical_count": sum(
+                item["risk_level"] == "critical" for item in competencies
+            ),
+            "warning_count": sum(
+                item["risk_level"] == "warning" for item in competencies
+            ),
+            "healthy_count": sum(
+                item["risk_level"] == "healthy" for item in competencies
+            ),
+        }
+        member_ids = service.team_engineers(team_id)
+        team_payloads.append(
+            {
+                "team_id": team_id,
+                "team_name": team_names.get(team_id, team_id),
+                "member_ids": member_ids,
+                "engineer_count": len(member_ids),
+                "competency_count": len(competencies),
+                "bus_factor_available": bool(competencies),
+                "status": "AVAILABLE" if competencies else "NO_COMPETENCY_DATA",
+                "message": (
+                    None
+                    if competencies
+                    else "Для этой команды пока нет данных о компетенциях."
+                ),
+                "competencies": competencies,
+                "summary": summary,
+            }
+        )
+
+    engineers_payload = []
+    for engineer_id in sorted(raw_profiles):
+        profile = engineer_dto(engineer_id)
+        profile["team_criticality"] = sorted(
+            impacts.get(engineer_id, []),
+            key=lambda item: (
+                BUS_FACTOR_PRESENTATION[item["risk_level"]]["rank"],
+                item["team_name"].casefold(),
+                item["skill"].casefold(),
+            ),
+        )
+        engineers_payload.append(profile)
+
+    has_competencies = any(team["competencies"] for team in team_payloads)
+    return _clean(
+        {
+            "status": "AVAILABLE" if has_competencies else "INSUFFICIENT_DATA",
+            "message": (
+                None
+                if has_competencies
+                else "Недостаточно данных для расчёта Bus Factor."
+            ),
+            "method": "existing_bus_factor_service",
+            "thresholds": {
+                "critical": "Bus Factor 0–1",
+                "warning": "Bus Factor 2",
+                "healthy": "Bus Factor больше 2",
+            },
+            "teams": team_payloads,
+            "engineers": engineers_payload,
+        }
+    )
 
 
 class PlanningAPIService:
@@ -438,6 +723,10 @@ class PlanningAPIService:
         return result
 
     @cached_property
+    def bus_factor_payload(self) -> dict[str, Any]:
+        return build_bus_factor_payload(self.tables)
+
+    @cached_property
     def teams(self) -> list[dict[str, Any]]:
         team_ids = sorted(
             {
@@ -463,12 +752,16 @@ class PlanningAPIService:
             if (team_id := _text(row.get("team_id")))
         }
         output = []
+        bus_factor_teams = {
+            item["team_id"]: item for item in self.bus_factor_payload["teams"]
+        }
         all_allocations = [
             {"task_id": task["task_id"], **allocation}
             for task in self.tasks
             for allocation in task["allocations"]
         ]
         for team_id in team_ids:
+            bus_factor = bus_factor_teams.get(team_id)
             profiles = [
                 row for row in self.tables["engineers"]
                 if _text(row.get("team_id")) == team_id
@@ -530,8 +823,10 @@ class PlanningAPIService:
                         )
                         for sprint in range(1, 7)
                     },
-                    "bus_factor": None,
-                    "bus_factor_status": "NOT_IMPLEMENTED",
+                    "bus_factor": bus_factor["summary"] if bus_factor else None,
+                    "bus_factor_status": (
+                        bus_factor["status"] if bus_factor else "INSUFFICIENT_DATA"
+                    ),
                 }
             )
         return _clean(output)
@@ -739,15 +1034,7 @@ class PlanningAPIService:
 
     @cached_property
     def star_map(self) -> dict[str, Any]:
-        return {
-            "teams": self.teams,
-            "engineers": self.engineers,
-            "skills": sorted(
-                {skill for engineer in self.engineers for skill in engineer["skills"]}
-            ),
-            "bus_factor": None,
-            "bus_factor_status": "NOT_IMPLEMENTED",
-        }
+        return self.bus_factor_payload
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:
@@ -764,7 +1051,7 @@ class PlanningAPIService:
             "features": {
                 "plan_constructor": "AVAILABLE_EPHEMERAL",
                 "replanning": "NOT_IMPLEMENTED",
-                "bus_factor": "NOT_IMPLEMENTED",
+                "bus_factor": "AVAILABLE",
                 "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
             },
         }

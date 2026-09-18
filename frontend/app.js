@@ -4,12 +4,13 @@ const state = {
   page: 'home', taskId: null, taskSprint: null,
   teamId: null, engineerId: null, starTab: 'teams', riskId: null,
   riskFilter: 'Все', skillTeam: 'all', skillRole: 'all', skillTech: 'all',
+  competency: null, criticalOnly: false,
   taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
 };
 
 const data = {
   plan: null, summary: {}, tasks: [], initiatives: [], risks: [], teams: [],
-  engineers: [], kpis: null, features: {}, archiveReasons: {}, ready: false,
+  engineers: [], starMap: {teams: [], engineers: []}, kpis: null, features: {}, archiveReasons: {}, ready: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -22,6 +23,8 @@ const number = (value) => value == null || Number.isNaN(Number(value)) ? '—' :
 const percent = (value) => value == null || Number.isNaN(Number(value)) ? '—' : `${Number(value).toLocaleString('ru-RU', {maximumFractionDigits: 1})}%`;
 const teamBy = (id) => data.teams.find((team) => team.team_id === id) || {team_id: id, name: id || 'Команда не указана', sp_by_sprint: {}};
 const engineerBy = (id) => data.engineers.find((engineer) => engineer.engineer_id === id);
+const starTeamBy = (id) => data.starMap?.teams?.find((team) => team.team_id === id);
+const starEngineerBy = (id) => data.starMap?.engineers?.find((engineer) => engineer.engineer_id === id);
 const taskBy = (id) => data.tasks.find((task) => task.task_id === id);
 const currentSprint = () => Number(data.plan?.quarter?.current_sprint || 1);
 const sprintBy = (sprint) => data.plan?.sprints?.find((item) => item.sprint_number === sprint);
@@ -198,11 +201,17 @@ async function submitArchive() {
     const idField = `${entityType}_id`;
     const entity = collection.find((item) => item[idField] === entityId);
     if (entity) Object.assign(entity, result.entity);
+    let refreshWarning = null;
+    try {
+      data.starMap = await window.postcodeApi.getStarMap();
+    } catch (_) {
+      refreshWarning = 'Обновите страницу, чтобы перечитать Bus Factor.';
+    }
     closeArchiveModal();
     if (entityType === 'task') renderTasks();
     if (entityType === 'engineer') openEmployee(entityId);
     if (entityType === 'team') renderStarTeams();
-    showToast([result.message, result.warning].filter(Boolean).join(' '));
+    showToast([result.message, result.warning, refreshWarning].filter(Boolean).join(' '));
     try {
       const catalog = await window.postcodeApi.getConstructorCatalog();
       window.planConstructor.updateCatalog(catalog);
@@ -253,6 +262,7 @@ function gotoTask(taskId) {
 function gotoTeam(teamId) {
   if (!teamBy(teamId).team_id) return;
   state.teamId = teamId;
+  state.competency = null;
   state.starTab = 'teams';
   show('star');
 }
@@ -445,7 +455,6 @@ function renderRecalc() {
 }
 
 function renderStar() {
-  renderDevelopmentNotice('#starDevelopmentNotice', 'Страница пока не завершена. Отображаемые данные и структура могут измениться.');
   $$('.subtab').forEach((button) => {
     const active = button.dataset.starTab === state.starTab;
     button.classList.toggle('active', active);
@@ -457,51 +466,111 @@ function renderStar() {
   if (state.starTab === 'distribution') renderDistribution();
 }
 
+function busRiskTag(competency) {
+  return `<span class="bf-risk-tag ${attr(competency.risk_level)}">${escapeHtml(competency.risk_label)}</span>`;
+}
+
+function renderCompetencyMap(team, selected) {
+  if (!team.bus_factor_available) {
+    $('#competencyMap').innerHTML = empty(team.message || 'Для этой команды пока нет данных о компетенциях.');
+    $('#competencyDetail').innerHTML = '';
+    $('#busRiskList').innerHTML = empty(team.message || 'Недостаточно данных для расчёта Bus Factor.');
+    return;
+  }
+  const nodes = team.competencies.map((competency) => `<button type="button" class="competency-node ${attr(competency.risk_level)} ${competency.skill === selected?.skill ? 'selected' : ''}" data-star-competency="${attr(competency.skill)}" aria-pressed="${competency.skill === selected?.skill}"><span>${escapeHtml(competency.skill)}</span><b>BF ${number(competency.bus_factor)}</b></button>`).join('');
+  $('#competencyMap').innerHTML = `<div class="map-team-core"><span>Команда</span><b>${escapeHtml(team.team_name)}</b><small>${team.engineer_count} инженеров · ${team.competency_count} компетенций</small></div><div class="competency-node-grid">${nodes}</div>`;
+  $('#busRiskList').innerHTML = team.competencies.map((competency, index) => `<button type="button" class="bus-risk-item ${competency.skill === selected?.skill ? 'selected' : ''}" data-star-competency="${attr(competency.skill)}"><span class="risk-position">${index + 1}</span><span class="risk-copy"><b>${escapeHtml(competency.skill)}</b><small>${escapeHtml(competency.reason)}</small></span><span class="risk-value">BF ${number(competency.bus_factor)}${busRiskTag(competency)}</span></button>`).join('');
+  if (!selected) {
+    $('#competencyDetail').innerHTML = empty('Выберите компетенцию на карте.');
+    return;
+  }
+  const holders = selected.engineers.length
+    ? selected.engineers.map((engineer) => `<button type="button" class="engineer-chip" data-open-employee="${attr(engineer.engineer_id)}"><span>${escapeHtml(engineer.name)}</span><small>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}</small></button>`).join('')
+    : empty('В команде нет инженеров с этой компетенцией.');
+  const external = selected.external_engineers?.length
+    ? `<div class="external-backup"><h3>Резерв в других командах</h3><p>Эти инженеры не считаются локальными участниками команды.</p><div class="engineer-chip-row">${selected.external_engineers.map((engineer) => `<button type="button" class="engineer-chip secondary" data-open-employee="${attr(engineer.engineer_id)}"><span>${escapeHtml(engineer.name)}</span><small>${escapeHtml(engineer.source_team_ids.join(', '))}</small></button>`).join('')}</div></div>`
+    : '';
+  $('#competencyDetail').innerHTML = `<div class="competency-detail-heading"><div><span class="eyebrow">ВЫБРАННАЯ КОМПЕТЕНЦИЯ</span><h2>${escapeHtml(selected.skill)}</h2></div><div class="bf-number"><span>Bus Factor</span><b>${number(selected.bus_factor)}</b>${busRiskTag(selected)}</div></div><p class="competency-reason">${escapeHtml(selected.reason)}</p>${selected.recommendation ? `<p class="competency-recommendation">${escapeHtml(selected.recommendation)}</p>` : ''}<h3>Кто покрывает компетенцию</h3><div class="engineer-chip-row">${holders}</div>${external}`;
+}
+
 function renderStarTeams() {
-  const team = teamBy(state.teamId);
-  const engineers = teamEngineers(team.team_id);
+  const availableTeams = data.starMap?.teams || [];
+  if (!availableTeams.length) {
+    $('#starTeamSelect').innerHTML = '';
+    $('#teamMetrics').innerHTML = '';
+    $('#teamLifecycleActions').innerHTML = '';
+    $('#competencyMap').innerHTML = empty(data.starMap?.message || 'Недостаточно данных для расчёта Bus Factor.');
+    $('#competencyDetail').innerHTML = '';
+    $('#busRiskList').innerHTML = empty('Критичных рисков Bus Factor не обнаружено.');
+    $('#teamMembers').innerHTML = empty('В команде нет инженеров.');
+    $('#teamWorkload').innerHTML = empty('Нет данных о доступности.');
+    $('#teamTasks').innerHTML = empty('Текущих задач нет.');
+    return;
+  }
+  if (!starTeamBy(state.teamId)) state.teamId = availableTeams[0].team_id;
+  const busTeam = starTeamBy(state.teamId);
+  const team = teamBy(busTeam.team_id);
+  const activeMemberIds = new Set(busTeam.member_ids || []);
+  const engineers = data.engineers.filter((engineer) => activeMemberIds.has(engineer.engineer_id));
   const sprint = currentSprint();
   const sourceUsed = Number(team.source_used_hours_by_sprint?.[String(sprint)] || 0);
   const memberCapacity = Number(team.member_capacity_hours || 0);
   const resource = teamSprintResource(team.team_id, sprint);
   const active = data.tasks.filter((task) => task.assigned_team_id === team.team_id && inQuarter(task));
-  $('#starTeamSelect').innerHTML = data.teams.map((item) => `<option value="${attr(item.team_id)}" ${item.team_id === team.team_id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('');
-  const metrics = [['Сотрудников', team.member_ids?.length || 0], ['Занято у участников', `${number(sourceUsed)} ч`], ['Свободно', `${number(Math.max(memberCapacity - sourceUsed, 0))} ч`], [`SP Sprint ${sprint}`, `${number(resource.used)} / ${number(resource.capacity)}`], ['Технологий', team.technologies?.length || 0], ['Bus Factor', 'Не рассчитан']];
-  $('#teamMetrics').innerHTML = metrics.map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
+  $('#starTeamSelect').innerHTML = availableTeams.map((item) => `<option value="${attr(item.team_id)}" ${item.team_id === busTeam.team_id ? 'selected' : ''}>${escapeHtml(item.team_name)}</option>`).join('');
+  const summary = busTeam.summary;
+  const metrics = busTeam.bus_factor_available
+    ? [['Инженеров', busTeam.engineer_count, 'neutral'], ['Компетенций', busTeam.competency_count, 'neutral'], ['BF = 1', summary.single_owner_count, 'critical'], ['Требуют внимания', summary.warning_count, 'warning'], ['Устойчивое покрытие', summary.healthy_count, 'healthy']]
+    : [['Инженеров', busTeam.engineer_count, 'neutral'], ['Компетенции', 'Нет данных', 'neutral']];
+  $('#teamMetrics').innerHTML = metrics.map(([label, value, tone]) => `<div class="bf-summary-item ${tone}"><span>${escapeHtml(label)}</span><b>${typeof value === 'number' ? number(value) : escapeHtml(value)}</b></div>`).join('');
   $('#teamLifecycleActions').innerHTML = `${archiveState(team)}${team.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="team" data-archive-id="${attr(team.team_id)}" data-current-plan-reference="${active.length > 0 || engineers.length > 0}">Удалить</button></div>`}`;
-  $('#teamMembers').innerHTML = engineers.length ? table(['Сотрудник', 'Роли', 'Grade', 'Ресурс', 'Занято', 'Свободно'], engineers.map((engineer) => `<tr><td><button type="button" class="table-button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button></td><td>${escapeHtml(engineer.roles.join(', '))}</td><td>${escapeHtml(engineer.grade)}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</td><td>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</td></tr>`)) : empty('В команде нет инженеров.');
-  $('#teamWorkload').innerHTML = `<div class="forecast-number" style="font-size:52px">${memberCapacity ? Math.round(sourceUsed / memberCapacity * 100) : 0}%</div>${meter(sourceUsed, memberCapacity)}<div class="resource-line"><span>Суммарный ресурс bucket</span><b>${number(memberCapacity)} ч</b></div><div class="resource-line"><span>Использовано из bucket команды</span><b>${number(sourceUsed)} ч</b></div><div class="resource-line"><span>Работа задач назначенной команды</span><b>${number(team.task_work_hours_by_sprint?.[String(sprint)])} ч</b></div><div class="resource-line"><span>SP команды</span><b>${number(resource.used)} / ${number(resource.capacity)} SP</b></div>`;
+  $('#teamMembers').innerHTML = engineers.length ? table(['Сотрудник', 'Роли', 'Grade', 'Доступно', 'Занято', 'Свободно'], engineers.map((engineer) => `<tr><td><button type="button" class="table-button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button></td><td>${escapeHtml(engineer.roles.join(', '))}</td><td>${escapeHtml(engineer.grade)}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</td><td>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</td></tr>`)) : empty('В команде нет инженеров.');
+  $('#teamWorkload').innerHTML = `<div class="forecast-number" style="font-size:52px">${memberCapacity ? Math.round(sourceUsed / memberCapacity * 100) : 0}%</div>${meter(sourceUsed, memberCapacity)}<div class="resource-line"><span>Доступно участникам</span><b>${number(memberCapacity)} ч</b></div><div class="resource-line"><span>Использовано участниками</span><b>${number(sourceUsed)} ч</b></div><div class="resource-line"><span>Работа задач выбранной команды</span><b>${number(team.task_work_hours_by_sprint?.[String(sprint)])} ч</b></div><div class="resource-line"><span>SP команды</span><b>${number(resource.used)} / ${number(resource.capacity)} SP</b></div>`;
   $('#teamTasks').innerHTML = active.length ? table(['Задача', 'Инициатива', 'Период', 'Статус'], active.map((task) => `<tr><td>${tButton(task)}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${escapeHtml(sprintLabel(task))}</td><td>${badge(task)}</td></tr>`)) : empty('Текущих задач нет.');
-  $('#busScope').textContent = team.name;
-  $('#busTable').innerHTML = empty('Bus Factor backend ещё не реализован. Технологии показаны без искусственной оценки кадрового риска.');
+  let selected = busTeam.competencies.find((item) => item.skill === state.competency);
+  if (!selected) selected = busTeam.competencies[0] || null;
+  state.competency = selected?.skill || null;
+  renderCompetencyMap(busTeam, selected);
 }
 
 function renderStarSkills() {
-  const allSkills = [...new Set(data.engineers.flatMap((engineer) => engineer.skills))].sort();
-  const allRoles = [...new Set(data.engineers.flatMap((engineer) => engineer.roles))].sort();
-  $('#skillTeam').innerHTML = `<option value="all">Все команды</option>${data.teams.map((team) => `<option value="${attr(team.team_id)}" ${state.skillTeam === team.team_id ? 'selected' : ''}>${escapeHtml(team.name)}</option>`).join('')}`;
+  const activeEngineers = data.starMap?.engineers || [];
+  const activeIds = new Set(activeEngineers.map((engineer) => engineer.engineer_id));
+  const allSkills = [...new Set(activeEngineers.flatMap((engineer) => engineer.skills))].sort();
+  const allRoles = [...new Set(activeEngineers.flatMap((engineer) => engineer.roles))].sort();
+  const bfTeams = data.starMap?.teams || [];
+  $('#skillTeam').innerHTML = `<option value="all">Все команды</option>${bfTeams.map((team) => `<option value="${attr(team.team_id)}" ${state.skillTeam === team.team_id ? 'selected' : ''}>${escapeHtml(team.team_name)}</option>`).join('')}`;
   $('#skillRole').innerHTML = `<option value="all">Все роли</option>${allRoles.map((role) => `<option value="${attr(role)}" ${state.skillRole === role ? 'selected' : ''}>${escapeHtml(role)}</option>`).join('')}`;
   $('#skillTech').innerHTML = `<option value="all">Все технологии</option>${allSkills.map((skill) => `<option value="${attr(skill)}" ${state.skillTech === skill ? 'selected' : ''}>${escapeHtml(skill)}</option>`).join('')}`;
-  $('#criticalOnly').checked = false;
-  $('#criticalOnly').disabled = true;
-  $('#heatScope').textContent = 'Bus Factor не рассчитан; фильтр критических технологий недоступен.';
-  const scope = state.skillTeam === 'all' ? data.engineers : teamEngineers(state.skillTeam);
-  const columns = allSkills.filter((skill) => state.skillTech === 'all' || skill === state.skillTech);
+  $('#criticalOnly').checked = state.criticalOnly;
+  const teamScope = state.skillTeam === 'all' ? null : starTeamBy(state.skillTeam);
+  const scopeIds = teamScope ? new Set(teamScope.member_ids) : activeIds;
+  const scope = activeEngineers.filter((engineer) => scopeIds.has(engineer.engineer_id));
+  const criticalSkills = new Set((teamScope ? teamScope.competencies : bfTeams.flatMap((team) => team.competencies)).filter((item) => item.bus_factor === 1).map((item) => item.skill));
+  const columns = allSkills.filter((skill) => (state.skillTech === 'all' || skill === state.skillTech) && (!state.criticalOnly || criticalSkills.has(skill)));
+  $('#heatScope').textContent = state.criticalOnly ? 'Показаны только single-person dependencies (BF = 1).' : 'Показано наличие компетенции; Bus Factor рассчитан backend-сервисом.';
   const subset = scope.filter((engineer) => state.skillRole === 'all' || engineer.roles.includes(state.skillRole));
   $('#heatmap').innerHTML = subset.length && columns.length ? table(['Инженер', ...columns], subset.map((engineer) => `<tr><td><button class="table-button" type="button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button><div class="muted">${escapeHtml(engineer.roles.join(', '))}</div></td>${columns.map((skill) => `<td>${engineer.skills.includes(skill) ? '<span class="heat-yes">Есть</span>' : '<span class="heat-no">—</span>'}</td>`).join('')}</tr>`), 'heatmap-table') : empty('Для выбранных фильтров сотрудников или технологий нет.');
 }
 
 function renderDistribution() {
   const sprint = currentSprint();
-  $('#distributionTable').innerHTML = data.engineers.length ? table(['Сотрудник', 'Команды / bucket', 'Роли', 'Ресурс', 'Занято', 'Свободно'], data.engineers.map((engineer) => `<tr><td><button class="table-button" type="button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button></td><td>${engineer.capacity_buckets.map((bucket) => `${escapeHtml(bucket.team_id)}: ${number(bucket.capacity_hours)} ч`).join('<br>')}</td><td>${escapeHtml(engineer.roles.join(', '))}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</td><td>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</td></tr>`)) : empty('Инженеры не найдены.');
+  const activeIds = new Set((data.starMap?.engineers || []).map((engineer) => engineer.engineer_id));
+  const activeEngineers = data.engineers.filter((engineer) => activeIds.has(engineer.engineer_id));
+  $('#distributionTable').innerHTML = activeEngineers.length ? table(['Сотрудник', 'Участие в командах', 'Роли', 'Доступно', 'Занято', 'Свободно'], activeEngineers.map((engineer) => `<tr><td><button class="table-button" type="button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button></td><td>${engineer.capacity_buckets.map((bucket) => `${escapeHtml(bucket.team_id)}: ${number(bucket.capacity_hours)} ч`).join('<br>')}</td><td>${escapeHtml(engineer.roles.join(', '))}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</td><td>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</td></tr>`)) : empty('Инженеры не найдены.');
 }
 
 function openEmployee(engineerId) {
   const engineer = engineerBy(engineerId);
   if (!engineer) return;
+  const busProfile = starEngineerBy(engineerId);
   const sprint = currentSprint();
   const allocations = engineer.allocations.filter((item) => item.sprint === sprint);
-  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', '))} · Grade: ${escapeHtml(engineer.grade)}</p><div class="metric-grid" style="margin:20px 0"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Ресурс bucket</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и capacity bucket</h3>${engineer.capacity_buckets.map((bucket) => `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · capacity_rate ${number(bucket.capacity_rate)} · ${number(bucket.capacity_hours)} ч ↗</button>`).join('')}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${engineer.skills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div><div class="drawer-section"><h3>Bus Factor</h3><p>Backend ещё не рассчитывает Bus Factor.</p></div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
+  const grade = engineer.grade ? ` · Grade: ${escapeHtml(engineer.grade)}` : '';
+  const criticality = busProfile?.team_criticality || [];
+  const displayedSkills = busProfile?.skills || engineer.skills;
+  const impact = criticality.length ? criticality.map((item) => `<button type="button" class="engineer-impact ${attr(item.risk_level)}" data-employee-team="${attr(item.team_id)}"><span><b>${escapeHtml(item.team_name)} · ${escapeHtml(item.skill)}</b><small>${item.single_person_dependency ? 'Единственный специалист команды' : escapeHtml(item.risk_label)}</small></span><strong>BF ${number(item.bus_factor)}</strong></button>`).join('') : empty(engineer.archived ? 'Архивный инженер не входит в текущий Bus Factor.' : 'Нет данных о вкладе в компетенции команд.');
+  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${engineer.capacity_buckets.map((bucket) => `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч ↗</button>`).join('')}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
   $('#employeeDrawer').classList.add('open');
   $('#employeeDrawer').setAttribute('aria-hidden', 'false');
 }
@@ -512,10 +581,11 @@ function closeEmployee() {
 }
 
 function bindEvents() {
-  $('#starTeamSelect').addEventListener('change', (event) => { state.teamId = event.target.value; renderStarTeams(); });
+  $('#starTeamSelect').addEventListener('change', (event) => { state.teamId = event.target.value; state.competency = null; renderStarTeams(); });
   $('#skillTeam').addEventListener('change', (event) => { state.skillTeam = event.target.value; renderStarSkills(); });
   $('#skillRole').addEventListener('change', (event) => { state.skillRole = event.target.value; renderStarSkills(); });
   $('#skillTech').addEventListener('change', (event) => { state.skillTech = event.target.value; renderStarSkills(); });
+  $('#criticalOnly').addEventListener('change', (event) => { state.criticalOnly = event.target.checked; renderStarSkills(); });
   $('#chooseFact').addEventListener('click', () => $('#factInput').click());
   $('#factInput').addEventListener('change', (event) => { const file = event.target.files?.[0]; $('#uploadFileStatus').textContent = file ? `Выбран файл: ${file.name}. Backend пересчёта не подключён, файл не обработан.` : 'Файл не выбран'; });
   $('#archiveForm').addEventListener('submit', (event) => { event.preventDefault(); submitArchive(); });
@@ -535,6 +605,7 @@ function bindEvents() {
     const risk = event.target.closest('[data-open-risk]'); if (risk) { state.riskId = risk.dataset.openRisk; state.riskFilter = 'Все'; show('risks'); return; }
     const filter = event.target.closest('[data-risk-filter]'); if (filter) { state.riskFilter = filter.dataset.riskFilter; renderRisks(); return; }
     const riskRow = event.target.closest('[data-risk-id]'); if (riskRow) { state.riskId = riskRow.dataset.riskId; renderRisks(); return; }
+    const competency = event.target.closest('[data-star-competency]'); if (competency) { state.competency = competency.dataset.starCompetency; renderStarTeams(); $('#competencyDetail')?.scrollIntoView({behavior: 'smooth', block: 'nearest'}); return; }
     const team = event.target.closest('[data-open-team]'); if (team) { gotoTeam(team.dataset.openTeam); return; }
     const employee = event.target.closest('[data-open-employee]'); if (employee) { gotoEmployee(employee.dataset.openEmployee); return; }
     const backToTeam = event.target.closest('[data-employee-team]'); if (backToTeam) { closeEmployee(); gotoTeam(backToTeam.dataset.employeeTeam); return; }
@@ -552,13 +623,15 @@ function hydrate(payload) {
   data.risks = payload.risks || [];
   data.teams = payload.teams || [];
   data.engineers = payload.engineers || [];
+  data.starMap = payload.star_map || {teams: [], engineers: []};
   data.kpis = payload.kpis || null;
   data.features = payload.features || {};
   data.ready = true;
   state.loading = false;
   state.error = null;
   state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
-  state.teamId = data.teams[0]?.team_id || null;
+  state.teamId = data.starMap.teams?.[0]?.team_id || data.teams[0]?.team_id || null;
+  state.competency = null;
   state.riskId = data.risks[0]?.risk_id || null;
 }
 

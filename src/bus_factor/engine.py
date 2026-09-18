@@ -538,6 +538,13 @@ class BusFactorService:
             ]
         )
 
+    def team_engineers(self, team_id: str) -> list[str]:
+        """Return unique engineers belonging to a team under the BF model."""
+
+        if team_id not in set(self.teams()):
+            raise KeyError(f"Неизвестная команда: {team_id}")
+        return sorted(self._team_engineers(team_id))
+
     def _organization_engineers_for_skill(self, skill: str) -> set[str]:
         skill = normalize_skill(skill)
         return set(
@@ -570,6 +577,37 @@ class BusFactorService:
         if competency_type == "skill":
             return len(self._organization_engineers_for_skill(competency))
         return len(self._organization_engineers_for_role(competency))
+
+    def competency_engineers(
+        self,
+        team_id: str,
+        competency_type: CompetencyType,
+        competency: str,
+    ) -> list[str]:
+        """Return the unique team members counted in a competency Bus Factor."""
+
+        if team_id not in set(self.teams()):
+            raise KeyError(f"Неизвестная команда: {team_id}")
+
+        if competency_type == "skill":
+            holders = self._organization_engineers_for_skill(competency)
+        else:
+            holders = self._organization_engineers_for_role(competency)
+
+        return sorted(self._team_engineers(team_id) & holders)
+
+    def organization_competency_engineers(
+        self,
+        competency_type: CompetencyType,
+        competency: str,
+    ) -> list[str]:
+        """Return unique competency holders across the organization."""
+
+        if competency_type == "skill":
+            holders = self._organization_engineers_for_skill(competency)
+        else:
+            holders = self._organization_engineers_for_role(competency)
+        return sorted(holders)
 
     def _quarter_demand(
         self,

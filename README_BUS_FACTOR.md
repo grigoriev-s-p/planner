@@ -121,6 +121,12 @@ from src.bus_factor import BusFactorService
 service = BusFactorService.from_processed_dir("data/processed")
 ```
 
+Product API использует тот же `BusFactorService` через адаптер
+`src.web.service.build_bus_factor_payload`. Endpoint `/api/star-map` возвращает
+готовые Team + competency DTO с уникальными инженерами, risk presentation и
+отдельно обозначенным cross-team резервом. Перед расчётом current view архивные
+сущности исключаются существующим `CatalogRepository.active_planning_tables()`.
+
 Coverage:
 
 ```python
