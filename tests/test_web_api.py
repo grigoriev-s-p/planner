@@ -80,6 +80,16 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("original_team_id", tasks[0])
         self.assertIn("assigned_team_id", tasks[0])
         self.assertTrue(any(task["team_reassigned"] for task in tasks))
+        planned = [task for task in tasks if task["status"] == "PLANNED"]
+        self.assertTrue(all(task["ownership"]["valid"] for task in planned))
+        for task in planned:
+            ownership = task["ownership"]
+            if ownership["external_hours"] > 0:
+                self.assertGreater(ownership["owner_hours"], ownership["external_hours"])
+                self.assertGreaterEqual(
+                    ownership["owner_engineer_count"],
+                    ownership["external_engineer_count"],
+                )
 
         task_id = tasks[0]["task_id"]
         response = self.client.get(f"/api/tasks/{task_id}")
@@ -109,12 +119,24 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             len({engineer["engineer_id"] for engineer in engineers.json()}),
             len(engineers.json()),
         )
-        self.assertIsNone(star_map.json()["bus_factor"])
-        self.assertEqual(star_map.json()["bus_factor_status"], "NOT_IMPLEMENTED")
+        bus_factor = star_map.json()
+        self.assertEqual(bus_factor["status"], "AVAILABLE")
+        self.assertEqual(bus_factor["method"], "existing_bus_factor_service")
+        self.assertTrue(bus_factor["teams"])
+        first_competency = next(
+            competency
+            for team in bus_factor["teams"]
+            for competency in team["competencies"]
+        )
+        engineer_ids = [
+            engineer["engineer_id"] for engineer in first_competency["engineers"]
+        ]
+        self.assertEqual(first_competency["bus_factor"], len(engineer_ids))
+        self.assertEqual(len(engineer_ids), len(set(engineer_ids)))
 
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
-        self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
+        self.assertEqual(self.dashboard["features"]["bus_factor"], "AVAILABLE")
         self.assertEqual(
             self.dashboard["features"]["initial_excel_upload"],
             "AVAILABLE_PERSISTENT_CATALOG",
@@ -213,6 +235,42 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
         self.assertIn("onPlanApproved(approvedPlan);", constructor_source)
 
+    def test_constructor_kpi_uses_backend_percent_without_second_multiplication(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("format(parsed)", constructor_source)
+        self.assertNotIn("Number(value) * 100", constructor_source)
+        self.assertNotIn("Math.round(expectedKpi * 100)", constructor_source)
+        self.assertIn("KPI недоступен", constructor_source)
+
+    def test_constructor_renders_changed_task_effect_without_reoptimizing(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("changed_tasks", constructor_source)
+        self.assertIn("scrollIntoView", constructor_source)
+        self.assertIn("task-card--just-added", constructor_source)
+        self.assertIn("prefers-reduced-motion", constructor_source)
+        self.assertIn("applyOptimisticDelta", constructor_source)
+        self.assertNotIn("refreshRecommendations(draftId", constructor_source)
+
+    def test_recommendation_ui_uses_work_volume_and_saved_best_state(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Лучший найденный вариант выбран", constructor_source)
+        self.assertIn("Перераспределение задач", constructor_source)
+        self.assertIn("Помощь между командами", constructor_source)
+        self.assertIn("После подключения", constructor_source)
+        self.assertIn("Кто выполняет работу", constructor_source)
+        self.assertIn("Основная команда", constructor_source)
+        self.assertIn("Внешняя помощь", constructor_source)
+        self.assertIn("Команда выполняет", constructor_source)
+        self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+
+    def test_task_detail_groups_owner_team_and_external_help(self) -> None:
+        self.assertIn("Основная команда —", self.app)
+        self.assertIn("Помощь других команд", self.app)
+        self.assertIn("task.ownership", self.app)
+        self.assertIn("Команда выполняет ${number(ownership.owner_share_percent)}%", self.app)
+        self.assertNotIn("'Cross-team'", self.app)
+        self.assertNotIn("'Доля bucket'", self.app)
+
     def test_home_plan_links_open_current_plan(self) -> None:
         home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
         self.assertIn('data-page="current-plan"', home)
@@ -259,14 +317,23 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
-    def test_development_notice_is_reused_on_three_pages(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 3)
+    def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)
         for target in (
             "risksDevelopmentNotice",
             "recalcDevelopmentNotice",
-            "starDevelopmentNotice",
         ):
             self.assertIn(f'id="{target}"', self.html)
+
+    def test_star_map_uses_backend_bus_factor_for_selected_team(self) -> None:
+        self.assertIn('id="competencyMap"', self.html)
+        self.assertIn('id="busRiskList"', self.html)
+        self.assertIn('id="competencyDetail"', self.html)
+        self.assertIn("const busTeam = starTeamBy(state.teamId)", self.app)
+        self.assertIn("team.competencies.map", self.app)
+        self.assertIn("selected.engineers.map", self.app)
+        self.assertIn("busProfile?.team_criticality", self.app)
+        self.assertNotIn("Backend пока не рассчитывает Bus Factor", self.html + self.app)
 
     def test_kpi_block_follows_board_and_precedes_initiatives(self) -> None:
         board_position = self.html.index('id="sprintBoard"')

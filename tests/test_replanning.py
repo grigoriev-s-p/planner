@@ -341,6 +341,17 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(none_completed.percentage, 0)
         self.assertIsNone(empty.percentage)
 
+    def test_expected_kpi_percent_contract_for_constructor_preview(self) -> None:
+        baseline = tuple(f"I-{index}" for index in range(10))
+        cases = ((5, 50.0), (10, 100.0), (0, 0.0))
+        for completed_count, expected_percent in cases:
+            with self.subTest(completed=completed_count):
+                result = calculate_expected_quarter_kpi(
+                    baseline, baseline[:completed_count]
+                )
+                self.assertEqual(result.percentage, expected_percent)
+        self.assertIsNone(calculate_expected_quarter_kpi((), ()).percentage)
+
     def test_expected_forecast_rejects_partially_planned_initiative(self) -> None:
         original = plan(
             1,

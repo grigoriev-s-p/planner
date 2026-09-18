@@ -255,6 +255,7 @@ class FeasibilityService:
         role_hours_override: Mapping[str, float] | None = None,
         story_points_override: float | None = None,
         team_id_override: str | None = None,
+        allow_cross_team: bool = True,
     ) -> FeasibilityResult:
         reasons: list[FeasibilityReason] = []
         task = self._tasks.get(task_id)
@@ -425,7 +426,12 @@ class FeasibilityService:
             # Organizers allow help across teams. Membership is a preference;
             # the canonical role, skills and personal hours remain constraints.
             role_profiles = sorted(
-                (profile for profile in self._profiles.values() if role in profile.roles),
+                (
+                    profile
+                    for profile in self._profiles.values()
+                    if role in profile.roles
+                    and (allow_cross_team or profile.team_id == team_id)
+                ),
                 key=lambda profile: (
                     profile.team_id != team_id,
                     -max(
