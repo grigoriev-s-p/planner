@@ -5,10 +5,9 @@ window.planConstructor = (() => {
   const emptyDraft = () => ({teams: [], tasks: []});
   let catalog = {teams: [], engineers: [], tasks: [], options: {roles: [], skills: [], grades: []}};
   let draft = emptyDraft();
-  let result = null;
-  let autoResult = null;
   let mode = 'manual';
   let api = null;
+  let onPlanBuilt = null;
   let bound = false;
 
   const $c = (selector, root = document) => root.querySelector(selector);
@@ -79,14 +78,11 @@ window.planConstructor = (() => {
     button.textContent = 'Строим план…';
     setDatasetStatus(`Проверяем ${file.name} и рассчитываем шесть спринтов…`);
     try {
-      autoResult = await api.buildConstructorPlanFromDataset(file);
-      renderAutoResult();
-      const planned = (autoResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
+      const planResult = await api.buildConstructorPlanFromDataset(file);
+      const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
       setDatasetStatus(`${file.name} · план готов · ${planned} задач вошли в квартал`, 'success');
-      $c('#constructorAutoResult').scrollIntoView({behavior: 'smooth', block: 'start'});
+      onPlanBuilt(planResult);
     } catch (error) {
-      autoResult = null;
-      $c('#constructorAutoResult').hidden = true;
       setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
     } finally {
       button.disabled = false;
@@ -106,7 +102,6 @@ window.planConstructor = (() => {
     } else {
       draft[type] = draft[type].filter((item) => item[idField(type)] !== id);
     }
-    result = null;
     saveDraft();
     render();
   }
@@ -152,7 +147,6 @@ window.planConstructor = (() => {
       entityRows('Команды', 'teams', draft.teams, (item) => `${item.expected_velocity_sp} SP`),
       entityRows('Задачи', 'tasks', draft.tasks, () => ''),
     ].join('');
-    $c('#constructorResult').hidden = !result;
   }
 
   function automaticEngineers() {
@@ -220,11 +214,11 @@ window.planConstructor = (() => {
     const content = $c('#constructorDialogContent');
     if (type === 'teams') {
       const team = item || {team_id: '', name: '', expected_velocity_sp: 20, focus_factor: 0.8};
-      content.innerHTML = `<div class="eyebrow">КОНСТРУКТОР / КОМАНДА</div><h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label><label>Focus Factor<input name="focus_factor" value="0.8" readonly><small>Зафиксирован правилами кейса.</small></label><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label><label>Focus Factor<input name="focus_factor" value="0.8" readonly><small>Зафиксирован правилами кейса.</small></label><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], depends_on: []};
-      content.innerHTML = `<div class="eyebrow">КОНСТРУКТОР / ЗАДАЧА</div><h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты и обязательные навыки</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты и обязательные навыки</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     document.body.classList.add('constructor-modal-open');
     dialog.showModal();
@@ -267,48 +261,9 @@ window.planConstructor = (() => {
     if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
     else draft[type].push(entity);
     if (type === 'tasks' && !editing) $c('#constructorTaskSearch').value = '';
-    result = null;
     saveDraft();
     $c('#constructorDialog').close();
     render();
-  }
-
-  function renderPlanResult(planResult, ids, firstMetricLabel) {
-    const container = $c(ids.container);
-    container.hidden = !planResult;
-    if (!planResult) return;
-    const tasks = planResult.tasks || [];
-    const planned = tasks.filter((task) => task.status === 'PLANNED');
-    const outside = tasks.filter((task) => !['PLANNED', 'DONE'].includes(task.status));
-    $c(ids.summary).innerHTML = [
-      [firstMetricLabel, tasks.length], ['Вошли в квартал', planned.length], ['Не вошли', outside.length], ['Закрываются инициативы', Number(planResult.summary?.completed_initiatives || 0)],
-    ].map(([label, value]) => `<div class="metric"><span>${esc(label)}</span><b>${esc(value)}</b></div>`).join('');
-    $c(ids.board).innerHTML = Array.from({length: 6}, (_, index) => {
-      const sprint = index + 1;
-      const sprintTasks = planned.filter((task) => (task.planned_sprints || []).includes(sprint));
-      const cards = sprintTasks.map((task) => {
-        const allocation = (task.allocations || []).filter((item) => item.sprint === sprint);
-        const hours = allocation.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0);
-        const continuation = task.planned_sprints[0] !== sprint;
-        return `<div class="sprint-card"><span class="card-top">${continuation ? '↳ ' : ''}${esc(task.task_id)}<span>${esc(Number(task.sp_load_by_sprint?.[String(sprint)] || 0))} SP</span></span><span class="card-title">${esc(task.title)}</span><span class="card-meta">${esc(task.assigned_team_id)} · ${esc(hours)} ч</span><span class="card-meta">${esc(allocation.map((item) => item.engineer_id).join(', ') || 'без назначений')}</span></div>`;
-      }).join('');
-      return `<div class="sprint-column"><div class="sprint-column-header"><b>Sprint ${sprint}</b><span>${sprintTasks.length} задач</span></div>${cards || '<div class="muted">Нет работ</div>'}</div>`;
-    }).join('');
-    $c(ids.outside).innerHTML = outside.length ? outside.map((task) => `<div class="constructor-outside-row"><span><b>${esc(task.task_id)} · ${esc(task.title)}</b><small>${esc(task.status_label)} · ${esc(task.summary || task.reasons?.[0]?.message || 'Причина не указана')}</small></span><span class="status moved">${esc(task.status)}</span></div>`).join('') : '<div class="empty-state">Все планируемые задачи вошли в квартал.</div>';
-  }
-
-  function renderResult() {
-    renderPlanResult(result, {
-      container: '#constructorResult', summary: '#constructorResultSummary',
-      board: '#constructorSprintBoard', outside: '#constructorOutsideTasks',
-    }, 'Задач в сценарии');
-  }
-
-  function renderAutoResult() {
-    renderPlanResult(autoResult, {
-      container: '#constructorAutoResult', summary: '#constructorAutoResultSummary',
-      board: '#constructorAutoSprintBoard', outside: '#constructorAutoOutsideTasks',
-    }, 'Задач в датасете');
   }
 
   async function buildPlan() {
@@ -320,10 +275,9 @@ window.planConstructor = (() => {
     button.textContent = 'Строим план…';
     try {
       const tasks = draft.tasks.map((task) => ({...task, team_id: null}));
-      result = await api.buildConstructorPlan({teams: draft.teams, engineers: automaticEngineers(), tasks});
+      const planResult = await api.buildConstructorPlan({teams: draft.teams, engineers: automaticEngineers(), tasks});
       showErrors([]);
-      render();
-      $c('#constructorResult').scrollIntoView({behavior: 'smooth', block: 'start'});
+      onPlanBuilt(planResult);
     } catch (error) {
       showErrors(String(error?.message || error).split('\n').filter(Boolean));
     } finally {
@@ -347,7 +301,7 @@ window.planConstructor = (() => {
     $c('#buildConstructorPlan').addEventListener('click', buildPlan);
     $c('#clearConstructorDraft').addEventListener('click', () => {
       if (!confirm('Очистить весь локальный черновик? Исходный датасет не изменится.')) return;
-      draft = emptyDraft(); result = null; saveDraft(); showErrors([]); render();
+      draft = emptyDraft(); saveDraft(); showErrors([]); render();
     });
     $c('#constructorDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
     document.addEventListener('change', (event) => {
@@ -391,17 +345,16 @@ window.planConstructor = (() => {
   }
 
   function render() {
-    if (!$c('#page-constructor')) return;
+    if (!$c('#page-planning')) return;
     setMode(mode);
     renderCatalogs();
     renderDraft();
-    renderResult();
-    renderAutoResult();
   }
 
-  function initialize(sourceCatalog, apiClient) {
+  function initialize(sourceCatalog, apiClient, handlePlanBuilt) {
     catalog = sourceCatalog;
     api = apiClient;
+    onPlanBuilt = typeof handlePlanBuilt === 'function' ? handlePlanBuilt : () => {};
     loadDraft();
     bindEvents();
     render();

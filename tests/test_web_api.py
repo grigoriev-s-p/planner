@@ -26,7 +26,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         for page_id in (
-            "home", "constructor", "planning", "tasks", "risks", "recalc", "star"
+            "home", "planning", "current-plan", "tasks", "risks", "recalc", "star"
         ):
             self.assertIn(f'id="page-{page_id}"', page.text)
         for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
@@ -41,7 +41,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn('id="uploadConstructorDataset"', page.text)
         self.assertIn('data-constructor-mode="manual"', page.text)
         self.assertIn('data-constructor-mode="upload"', page.text)
-        self.assertIn('id="constructorAutoResult"', page.text)
+        self.assertNotIn('id="constructorAutoResult"', page.text)
 
     def test_plan_contract_is_json_serializable_and_preserves_source_ids(self) -> None:
         response = self.client.get("/api/plan")
@@ -156,6 +156,9 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("localStorage", constructor_source)
         self.assertIn("buildConstructorPlan", constructor_source)
         self.assertIn("buildConstructorPlanFromDataset", constructor_source)
+        self.assertIn("onPlanBuilt(planResult)", constructor_source)
+        self.assertIn("hydrate(plannerResult)", app_source)
+        self.assertIn("show('current-plan')", app_source)
         self.assertIn("automaticEngineers", constructor_source)
         self.assertIn("catalogWithDraft('tasks')", constructor_source)
         self.assertIn("Number(right.expected_velocity_sp || 0)", constructor_source)
@@ -185,8 +188,23 @@ class FrontendRefinementTests(unittest.TestCase):
     def test_top_navigation_has_no_tasks_entry(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('data-page="tasks"', navigation)
-        for page in ("home", "planning", "risks", "recalc", "star"):
+        self.assertNotIn('data-page="constructor"', navigation)
+        for page in ("home", "planning", "current-plan", "risks", "recalc", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
+        self.assertIn('data-page="planning">Планирование</button>', navigation)
+        self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
+
+    def test_constructor_result_replaces_current_plan_and_navigates_to_it(self) -> None:
+        self.assertIn("planning: window.planConstructor.render", self.app)
+        self.assertIn("'current-plan': renderPlanning", self.app)
+        self.assertIn("hydrate(plannerResult);", self.app)
+        self.assertIn("show('current-plan');", self.app)
+        self.assertIn("onPlanBuilt(planResult);", (self.frontend / "constructor.js").read_text(encoding="utf-8"))
+
+    def test_home_plan_links_open_current_plan(self) -> None:
+        home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
+        self.assertIn('data-page="current-plan"', home)
+        self.assertNotIn('data-page="planning"', home)
 
     def test_technical_banner_and_header_version_are_absent(self) -> None:
         self.assertNotIn("dataModeRibbon", self.html + self.app)
@@ -226,6 +244,7 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('id="taskHeroId"', self.html)
         self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
         self.assertIn("taskReturnPage", self.app)
+        self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
     def test_development_notice_is_reused_on_three_pages(self) -> None:
@@ -256,7 +275,7 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertNotIn("Факт ещё не загружен", render_kpis)
         self.assertNotIn("Sprint", render_kpis)
         self.assertNotIn("baseline_id", self.html + render_kpis)
-        planning_html = self.html.split('id="page-planning"', 1)[1].split(
+        planning_html = self.html.split('id="page-current-plan"', 1)[1].split(
             'id="page-tasks"', 1
         )[0]
         self.assertNotIn("ПРОГНОЗ", planning_html)
