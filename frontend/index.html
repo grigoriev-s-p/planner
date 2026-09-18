@@ -108,7 +108,14 @@
         </div>
       </section>
 
-      <section class="page" id="page-risks" aria-labelledby="risksTitle"><div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Что произошло, почему и к чему это может привести — без дополнительных оценочных шкал.</p></div><div class="page-intro-icon">◇</div></div><div id="risksDevelopmentNotice"></div><div class="panel risk-filter"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button><button class="chip" data-risk-filter="Компетенции" type="button">Компетенции</button></div></div><div class="risk-layout"><article class="panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article><aside class="panel risk-detail" id="riskDetail" aria-live="polite"></aside></div></section>
+      <section class="page" id="page-risks" aria-labelledby="risksTitle">
+        <div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Критические выходы за квартал, каскадные сдвиги зависимостей и конкретные ресурсные дефициты с числовым evidence.</p></div><div class="page-intro-icon">◇</div></div>
+        <div class="panel risk-toolbar">
+          <div class="risk-toolbar-left"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button></div></div>
+          <label class="risk-search-label" for="riskSearch"><span>Поиск задачи / риска</span><input id="riskSearch" class="risk-search-input" type="search" placeholder="Например, AI-303, дефицит, PRODF-7125"></label>
+        </div>
+        <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
+      </section>
 
       <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ЗАВЕРШЕНИЕ СПРИНТА</div><h1 id="recalcTitle">Пересчёт плана</h1><p>Сценарий загрузки факта и пересмотра оставшейся части квартала.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcDevelopmentNotice"></div><div class="recalc-warning"><b>Функция ещё не подключена.</b> Backend пересчёта и обработка файла факта не реализованы. Выбор файла не означает, что его данные обработаны.</div><article class="panel upload-card"><div><div class="eyebrow">ФАКТ ЗАВЕРШЁННОГО СПРИНТА</div><h2>Загрузите фактические результаты</h2><p>После появления backend эта форма будет запускать пересчёт оставшейся части квартала с сохранением исходного плана недели 0.</p><div class="upload-filename" id="uploadFileStatus">Файл не выбран</div></div><div class="upload-actions"><input type="file" id="factInput" accept=".csv,.json,.xlsx,.xls" hidden><button class="btn btn-blue" type="button" id="chooseFact">Выбрать файл факта</button><button class="btn btn-outline" type="button" id="runDemo" disabled>Backend пересчёта не подключён</button></div></article><div id="recalcPlaceholder" class="panel empty-recalc"><span class="big-icon">↗</span><h2>Как будет работать пересчёт</h2><p>Факт завершённого спринта → новый актуальный план → изменения и причины решений. Исходный план недели 0 останется неизменным.</p></div><div id="recalcResult" hidden></div></section>
 
@@ -119,6 +126,12 @@
       </section>
     </main>
     <dialog class="constructor-dialog" id="constructorDialog"><form method="dialog"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form><div id="constructorDialogContent"></div></dialog>
+    <dialog class="risk-dialog" id="riskDialog" aria-labelledby="riskDialogTitle">
+      <div class="risk-dialog-shell">
+        <form method="dialog" class="risk-dialog-close-form"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form>
+        <div id="riskDialogContent"></div>
+      </div>
+    </dialog>
     <dialog class="archive-dialog" id="archiveDialog" aria-labelledby="archiveDialogTitle">
       <form id="archiveForm">
         <button class="drawer-close" type="button" data-close-archive aria-label="Закрыть">×</button>
