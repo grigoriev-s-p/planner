@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .capacity import calculate_engineer_capacity, calculate_team_capacity
-from .dependency_rules import dependency_is_satisfied, incoming_dependencies
+from .dependency_rules import (
+    dependency_is_satisfied,
+    dependency_timing,
+    incoming_dependencies,
+)
 from .models import (
     DependencyCheck,
     EngineerAvailability,
@@ -343,7 +347,15 @@ class FeasibilityService:
         for dependency in self.incoming_task_dependencies(task_id):
             blocker = _text(dependency.get("blocking_task_id")) or ""
             satisfied, completed_sprint, earliest_start = dependency_is_satisfied(
-                blocker, sprint_state.sprint_number, sprint_state.completed_tasks
+                blocker,
+                sprint_state.sprint_number,
+                sprint_state.completed_tasks,
+                sprint_state.actual_completed_tasks,
+            )
+            timing = dependency_timing(
+                blocker,
+                sprint_state.completed_tasks,
+                actual_completed_tasks=sprint_state.actual_completed_tasks,
             )
             dependency_checks.append(
                 DependencyCheck(
@@ -352,6 +364,9 @@ class FeasibilityService:
                     dependency_type=_text(dependency.get("dependency_type")),
                     completed_sprint=completed_sprint,
                     earliest_start_sprint=earliest_start,
+                    completion_source=(
+                        timing.completion_source.value if timing is not None else None
+                    ),
                     result="OK" if satisfied else "FAIL",
                 )
             )
@@ -367,6 +382,9 @@ class FeasibilityService:
                             "completed_sprint": completed_sprint,
                             "requested_sprint": sprint_state.sprint_number,
                             "earliest_start_sprint": earliest_start,
+                            "completion_source": (
+                                timing.completion_source.value if timing is not None else None
+                            ),
                         },
                     )
                 )

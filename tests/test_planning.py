@@ -198,7 +198,30 @@ class FeasibilityTests(unittest.TestCase):
         self.assertFalse(result.can_complete)
         self.assertEqual(reason_codes(result), [ReasonCode.UNKNOWN_TASK_DATA])
 
-    def test_completed_blocker_allows_dependent_in_next_sprint(self) -> None:
+    def test_planned_blocker_keeps_one_full_gap_sprint(self) -> None:
+        context = context_for(
+            dependencies=[
+                {
+                    "blocking_task_id": "BLOCK-1",
+                    "blocked_task_id": "T-1",
+                    "dependency_type": "depends on",
+                }
+            ]
+        )
+        blocked_in_gap = FeasibilityService(context).check(
+            "T-1", SprintState(2, completed_tasks={"BLOCK-1": 1})
+        )
+        self.assertFalse(blocked_in_gap.can_start)
+        self.assertEqual(blocked_in_gap.dependencies[0].earliest_start_sprint, 3)
+        self.assertEqual(blocked_in_gap.dependencies[0].completion_source, "PLANNED")
+
+        allowed = FeasibilityService(context).check(
+            "T-1", SprintState(3, completed_tasks={"BLOCK-1": 1})
+        )
+        self.assertTrue(allowed.can_start)
+        self.assertEqual(allowed.dependencies[0].result, "OK")
+
+    def test_actual_blocker_completion_unlocks_next_sprint(self) -> None:
         context = context_for(
             dependencies=[
                 {
@@ -209,10 +232,12 @@ class FeasibilityTests(unittest.TestCase):
             ]
         )
         result = FeasibilityService(context).check(
-            "T-1", SprintState(2, completed_tasks={"BLOCK-1": 1})
+            "T-1",
+            SprintState(2, actual_completed_tasks={"BLOCK-1": 1}),
         )
         self.assertTrue(result.can_start)
-        self.assertEqual(result.dependencies[0].result, "OK")
+        self.assertEqual(result.dependencies[0].earliest_start_sprint, 2)
+        self.assertEqual(result.dependencies[0].completion_source, "ACTUAL")
 
     def test_unfinished_blocker_prevents_start(self) -> None:
         context = context_for(
@@ -235,7 +260,7 @@ class FeasibilityTests(unittest.TestCase):
             "T-1", SprintState(2, completed_tasks={"BLOCK-1": 2})
         )
         self.assertFalse(result.can_start)
-        self.assertEqual(result.dependencies[0].earliest_start_sprint, 3)
+        self.assertEqual(result.dependencies[0].earliest_start_sprint, 4)
 
     def test_dependency_type_never_reverses_raw_columns(self) -> None:
         context = context_for(

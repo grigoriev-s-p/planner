@@ -9,6 +9,7 @@ from typing import Any
 
 from .allocation import allocate_available_hours
 from .capacity import calculate_team_capacity
+from .dependency_rules import dependency_timing
 from .eligibility import EligibilityContext, EligibilityResult, EligibilityService
 from .feasibility import FeasibilityContext, FeasibilityService
 from .models import FeasibilityReason
@@ -416,8 +417,9 @@ class BaselineQuarterPlanner:
         earliest = 1
         reasons: list[FeasibilityReason] = []
         for blocker in blockers:
-            if blocker in completed_tasks:
-                earliest = max(earliest, completed_tasks[blocker] + 1)
+            timing = dependency_timing(blocker, completed_tasks)
+            if timing is not None:
+                earliest = max(earliest, timing.earliest_start_sprint)
                 continue
             blocker_result = results.get(blocker)
             blocker_task = self.tasks.get(blocker)

@@ -469,8 +469,19 @@ class QuarterPlan:
             for item in self.task_results
             if item.completion_sprint is not None
         }
+        completion_sources = {
+            item.task_id: (
+                "PRE_QUARTER_DONE" if item.completion_sprint == 0 else "PLANNED"
+            )
+            for item in self.task_results
+            if item.completion_sprint is not None
+        }
         return tuple(
-            build_task_explanation(item, blocker_completion_sprints=completions)
+            build_task_explanation(
+                item,
+                blocker_completion_sprints=completions,
+                blocker_completion_sources=completion_sources,
+            )
             for item in self.task_results
         )
 

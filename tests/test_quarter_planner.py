@@ -156,19 +156,17 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual(plan.sprints[0].engineer_hours_used["E-S"], 80)
         self.assertTrue(all(s.engineer_hours_used.get("E-S", 0) <= 80 for s in plan.sprints))
 
-    def test_blocker_is_planned_before_blocked_task(self) -> None:
+    def test_planned_blocker_finishing_sprint_one_requires_sprint_two_gap(self) -> None:
         plan = build_quarter_plan(
             context(
                 [task("BLOCKER"), task("BLOCKED")],
                 dependencies=[{"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}],
             )
         )
-        self.assertLess(
-            result_by_id(plan, "BLOCKER").completion_sprint,
-            result_by_id(plan, "BLOCKED").start_sprint,
-        )
+        self.assertEqual(result_by_id(plan, "BLOCKER").completion_sprint, 1)
+        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 3)
 
-    def test_dependency_starts_after_blocker_completion(self) -> None:
+    def test_multi_sprint_blocker_uses_completion_then_full_gap_sprint(self) -> None:
         plan = build_quarter_plan(
             context(
                 [task("BLOCKER"), task("BLOCKED")],
@@ -177,7 +175,23 @@ class QuarterPlannerTests(unittest.TestCase):
             )
         )
         self.assertEqual(result_by_id(plan, "BLOCKER").completion_sprint, 2)
-        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "BLOCKED").start_sprint, 4)
+
+    def test_dependency_chain_applies_gap_at_every_edge(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("A"), task("B"), task("C")],
+                effort=[effort("A", 10), effort("B", 10), effort("C", 10)],
+                dependencies=[
+                    {"blocking_task_id": "A", "blocked_task_id": "B"},
+                    {"blocking_task_id": "B", "blocked_task_id": "C"},
+                ],
+            )
+        )
+        self.assertEqual(result_by_id(plan, "A").completion_sprint, 1)
+        self.assertEqual(result_by_id(plan, "B").start_sprint, 3)
+        self.assertEqual(result_by_id(plan, "B").completion_sprint, 3)
+        self.assertEqual(result_by_id(plan, "C").start_sprint, 5)
 
     def test_done_blocker_allows_dependent_in_first_sprint(self) -> None:
         plan = build_quarter_plan(
@@ -815,19 +829,19 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertLess(result.start_shift_days, 0)
 
     def test_outside_quarter_requires_forecast_beyond_sprint_six(self) -> None:
-        result = result_by_id(
-            build_quarter_plan(
-                context(
-                    [task("BLOCKER", planned_end="2026-07-01"), task("BLOCKED")],
-                    effort=[effort("BLOCKER", 480)],
-                    dependencies=[
-                        {"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}
-                    ],
-                ),
-                quarter_start_date="2026-06-15",
+        plan = build_quarter_plan(
+            context(
+                [task("BLOCKER", planned_end="2026-07-01"), task("BLOCKED")],
+                effort=[effort("BLOCKER", 400)],
+                dependencies=[
+                    {"blocking_task_id": "BLOCKER", "blocked_task_id": "BLOCKED"}
+                ],
             ),
-            "BLOCKED",
+            quarter_start_date="2026-06-15",
         )
+        blocker = result_by_id(plan, "BLOCKER")
+        result = result_by_id(plan, "BLOCKED")
+        self.assertEqual(blocker.completion_sprint, 5)
         self.assertTrue(result.outside_quarter)
         self.assertIsNone(result.forecast_end_date)
         self.assertIn(ReasonCode.OUTSIDE_QUARTER, {r.code for r in result.final_reasons})
@@ -835,6 +849,16 @@ class QuarterPlannerTests(unittest.TestCase):
             reason for reason in result.final_reasons if reason.code == ReasonCode.OUTSIDE_QUARTER
         )
         self.assertEqual(outside_reason.details["forecast_completion_sprint_minimum"], 7)
+        explanation = next(
+            item for item in plan.task_explanations if item.task_id == "BLOCKED"
+        )
+        delay = next(
+            reason
+            for reason in explanation.reasons
+            if reason.code == ReasonCode.DEPENDENCY_DELAY
+        )
+        self.assertEqual(delay.details["earliest_allowed_sprint"], 7)
+        self.assertIn("после резервного спринта", delay.message)
 
     def test_missing_quarter_start_does_not_invent_forecast_dates(self) -> None:
         result = result_by_id(build_quarter_plan(context([task("T-1")])), "T-1")
