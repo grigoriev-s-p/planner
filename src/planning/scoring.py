@@ -59,10 +59,12 @@ class ScoringConfig:
     in_progress_bonus: float = 25.0
     initiative_completion_weight: float = 20.0
     dependency_unlock_weight: float = 10.0
-    deadline_weight: float = 5.0
-    # Confirmed business rule: higher rung = higher priority. The override is
-    # retained for API compatibility; production/defaults use higher_is_better.
-    rung_direction: Literal["higher_is_better", "lower_is_better"] = "higher_is_better"
+    # Retained as a zero-valued compatibility field. Confirmed business rules
+    # treat planned_end as metadata, never as a score or ordering signal.
+    deadline_weight: float = 0.0
+    # Confirmed business rule: higher rung = higher priority. The field remains
+    # in the public config, but the superseded lower-is-better mode is rejected.
+    rung_direction: Literal["higher_is_better"] = "higher_is_better"
     dependency_unlock_saturation_count: int = 4
 
     def __post_init__(self) -> None:
@@ -75,8 +77,8 @@ class ScoringConfig:
         )
         if any(weight < 0 for weight in weights):
             raise ValueError("Scoring weights cannot be negative.")
-        if self.rung_direction not in {"higher_is_better", "lower_is_better"}:
-            raise ValueError("Unsupported rung_direction.")
+        if self.rung_direction != "higher_is_better":
+            raise ValueError("rung_direction must be 'higher_is_better'.")
         if self.dependency_unlock_saturation_count <= 0:
             raise ValueError("dependency_unlock_saturation_count must be positive.")
 
@@ -319,39 +321,15 @@ def calculate_task_score(
     rung = context.rung_values.get(task_id)
     rung_values = tuple(context.rung_values.values())
     rung_score = _normalized_score(rung, rung_values, config.rung_weight)
-    if (
-        rung is not None
-        and config.rung_direction == "lower_is_better"
-        and rung_values
-        and not math.isclose(min(rung_values), max(rung_values))
-    ):
-        rung_score = config.rung_weight - rung_score
-
-    deadline = context.planned_end_ordinals.get(task_id)
-    deadline_score = _normalized_score(
-        deadline,
-        context.planned_end_ordinals.values(),
-        config.deadline_weight,
-    )
-    deadline_values = tuple(context.planned_end_ordinals.values())
-    if (
-        deadline is not None
-        and deadline_values
-        and min(deadline_values) != max(deadline_values)
-    ):
-        deadline_score = config.deadline_weight - deadline_score
-
     components.update(
         rung_score=rung_score,
         status_score=config.in_progress_bonus if status == "inprogress" else 0.0,
-        deadline_score=deadline_score,
+        deadline_score=0.0,
         initiative_completion_score=_initiative_completion_score(task, context, config),
         dependency_unlock_score=_dependency_unlock_score(task_id, context, config),
     )
     components = {name: round(value, 6) for name, value in components.items()}
-    base_score = sum(
-        components[name] for name in ("rung_score", "status_score", "deadline_score")
-    )
+    base_score = sum(components[name] for name in ("rung_score", "status_score"))
     dynamic_score = sum(
         components[name]
         for name in ("initiative_completion_score", "dependency_unlock_score")
@@ -369,10 +347,8 @@ def score_sort_key(task: Mapping[str, Any], score: TaskScore) -> tuple[Any, ...]
     """Sort descending by score with the documented deterministic tie-break."""
 
     status = (_text(task.get("status")) or "").casefold()
-    deadline = _date_ordinal(task.get("planned_end"))
     return (
         -score.total_score,
         0 if status == "inprogress" else 1,
-        deadline if deadline is not None else math.inf,
         _text(task.get("task_id")) or "",
     )

@@ -29,7 +29,12 @@ from .plan_models import (
     SprintPlan,
     TaskPlanResult,
 )
-from .planner import BaselineQuarterPlanner, build_quarter_plan
+from .planner import (
+    BaselineQuarterPlanner,
+    build_quarter_plan,
+    compare_priority_profiles,
+    initiative_priority_profile,
+)
 from .scoring import (
     SCORING_VERSION,
     PlanningContext,
@@ -72,4 +77,6 @@ __all__ = [
     "calculate_task_score",
     "check_task_eligibility",
     "check_task_feasibility",
+    "compare_priority_profiles",
+    "initiative_priority_profile",
 ]

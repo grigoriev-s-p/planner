@@ -39,7 +39,6 @@ from .story_points import (
 
 
 SPRINT_COUNT = 6
-EXACT_INITIATIVE_SEARCH_LIMIT = 5
 PLANNABLE_SOURCE_STATUSES = {"todo", "inprogress"}
 COMPLETED_SOURCE_STATUS = "done"
 
@@ -55,6 +54,49 @@ class _TaskSimulation:
     start_sprint: int | None
     completion_sprint: int | None
     no_hours_warning: FeasibilityReason | None
+
+
+@dataclass(frozen=True)
+class _InitiativeWork:
+    priority_profile: tuple[float, ...]
+    total_sp: float
+    total_hours: float
+
+
+def initiative_priority_profile(
+    tasks: Iterable[Mapping[str, Any]],
+) -> tuple[float, ...]:
+    """Return descending task rung values without aggregating them.
+
+    Missing rung follows the existing task-scoring fallback and contributes
+    zero. The profile deliberately retains each position so initiative size is
+    never converted into a sum or average.
+    """
+
+    return tuple(
+        sorted(
+            (_number(task.get("rung")) or 0.0 for task in tasks),
+            reverse=True,
+        )
+    )
+
+
+def compare_priority_profiles(
+    left: Iterable[float],
+    right: Iterable[float],
+) -> int:
+    """Compare rung profiles lexicographically without rewarding a longer tail.
+
+    Returns 1 when ``left`` has higher priority, -1 when ``right`` has higher
+    priority, and 0 when the shared prefix is equal. Extra values after an
+    equal shared prefix do not affect the result.
+    """
+
+    for left_rung, right_rung in zip(left, right):
+        if math.isclose(left_rung, right_rung):
+            continue
+        return 1 if left_rung > right_rung else -1
+    return 0
 
 
 def _missing(value: Any) -> bool:
@@ -202,13 +244,13 @@ class BaselineQuarterPlanner:
         )
         self._initiative_work = self._build_initiative_work()
         self._primary_initiative_id: str | None = None
+        self._initiative_choice_queue: list[str] = []
 
-    def _build_initiative_work(self) -> dict[str, tuple[float, float, float, str]]:
+    def _build_initiative_work(self) -> dict[str, _InitiativeWork]:
         """Return deterministic initiative objective keys.
 
-        Smaller feasible initiatives are attempted first to maximize completed
-        initiative count. Rung is the secondary criterion and expected finish
-        (approximated by total required work) is tertiary.
+        Exact plan comparison uses completed count first, the rung profile as
+        secondary objective and completion time as tertiary objective.
         """
 
         members: dict[str, list[dict[str, Any]]] = {}
@@ -217,22 +259,65 @@ class BaselineQuarterPlanner:
             initiative_id = _text(task.get("initiative_id"))
             if initiative_id in self.scoring_context.reliable_initiative_ids:
                 members.setdefault(initiative_id, []).append(task)
-        keys: dict[str, tuple[float, float, float, str]] = {}
+        keys: dict[str, _InitiativeWork] = {}
         for initiative_id, tasks in members.items():
             total_sp = sum(max(_number(task.get("story_points")) or 0.0, 0.0) for task in tasks)
             total_hours = sum(
                 sum(self.feasibility.task_role_requirements(_text(task.get("task_id")) or "").values())
                 for task in tasks
             )
-            rung = max((_number(task.get("rung")) or 0.0 for task in tasks), default=0.0)
-            keys[initiative_id] = (total_sp, total_hours, -rung, initiative_id)
+            keys[initiative_id] = _InitiativeWork(
+                priority_profile=initiative_priority_profile(tasks),
+                total_sp=total_sp,
+                total_hours=total_hours,
+            )
         return keys
 
-    def _initiative_sort_key(self, task: Mapping[str, Any]) -> tuple[Any, ...]:
-        initiative_id = _text(task.get("initiative_id"))
-        if initiative_id in self._initiative_work:
-            return (0, *self._initiative_work[initiative_id])
-        return (1, math.inf, math.inf, 0.0, initiative_id or "")
+    def _compare_initiative_orders(
+        self,
+        left: tuple[str, ...],
+        right: tuple[str, ...],
+    ) -> int:
+        """Compare equally sized completed-initiative sequences by rung profile."""
+
+        for left_id, right_id in zip(left, right):
+            comparison = compare_priority_profiles(
+                self._initiative_work[left_id].priority_profile,
+                self._initiative_work[right_id].priority_profile,
+            )
+            if comparison:
+                return comparison
+        return 0
+
+    def _initiative_plan_is_better(
+        self,
+        candidate: tuple[int, tuple[str, ...], tuple[int, ...]],
+        current: tuple[int, tuple[str, ...], tuple[int, ...]],
+    ) -> bool:
+        """Apply count, rung profile, completion, then stable ID ordering."""
+
+        if candidate[0] != current[0]:
+            return candidate[0] > current[0]
+        profile_comparison = self._compare_initiative_orders(
+            candidate[1], current[1]
+        )
+        if profile_comparison:
+            return profile_comparison > 0
+        if candidate[2] != current[2]:
+            return candidate[2] < current[2]
+        return candidate[1] < current[1]
+
+    @staticmethod
+    def _initiative_completion_sprint(
+        initiative_id: str,
+        remaining: Mapping[str, Mapping[str, Any]],
+        completed: Mapping[str, int],
+    ) -> int:
+        return max(
+            completed[task_id]
+            for task_id, task in remaining.items()
+            if _text(task.get("initiative_id")) == initiative_id
+        )
 
     def _task_result(
         self,
@@ -884,10 +969,8 @@ class BaselineQuarterPlanner:
     ) -> str | None:
         """Choose a first initiative that maximizes complete initiatives.
 
-        The bounded exhaustive search is used only for the small number of
-        reliable initiatives normally considered in a quarterly plan. It keeps
-        resource and dependency simulation authoritative instead of treating
-        task count, SP, or hours as the primary objective.
+        Resource and dependency simulation remains authoritative instead of
+        treating task count, SP, or hours as the primary objective.
         """
 
         initiative_ids = tuple(sorted({
@@ -895,20 +978,64 @@ class BaselineQuarterPlanner:
             for task in pending.values()
             if _text(task.get("initiative_id")) in self._initiative_work
         }))
-        if not initiative_ids or len(initiative_ids) > EXACT_INITIATIVE_SEARCH_LIMIT:
+        if not initiative_ids:
             return None
+        self._initiative_choice_queue = [
+            initiative_id
+            for initiative_id in self._initiative_choice_queue
+            if initiative_id in initiative_ids
+        ]
+        if self._initiative_choice_queue:
+            return self._initiative_choice_queue[0]
+
+        memo: dict[
+            tuple[
+                tuple[str, ...],
+                tuple[tuple[int, tuple, tuple, tuple], ...],
+                tuple[tuple[str, int], ...],
+            ],
+            tuple[int, tuple[str, ...], tuple[int, ...]],
+        ] = {}
+
+        def state_key(
+            candidate_ids: tuple[str, ...],
+            state: Mapping[int, SprintLedger],
+            completed: Mapping[str, int],
+        ) -> tuple[
+            tuple[str, ...],
+            tuple[tuple[int, tuple, tuple, tuple], ...],
+            tuple[tuple[str, int], ...],
+        ]:
+            ledger_key = tuple(
+                (
+                    sprint,
+                    tuple(sorted(ledger.team_sp_used.items())),
+                    tuple(sorted(ledger.engineer_hours_used.items())),
+                    tuple(
+                        (engineer_id, tuple(sorted(team_hours.items())))
+                        for engineer_id, team_hours in sorted(
+                            ledger.engineer_team_hours_used.items()
+                        )
+                    ),
+                )
+                for sprint, ledger in sorted(state.items())
+            )
+            return candidate_ids, ledger_key, tuple(sorted(completed.items()))
 
         def search(
             remaining: Mapping[str, Mapping[str, Any]],
             state: dict[int, SprintLedger],
             completed: dict[str, int],
-        ) -> tuple[int, tuple[float, ...], tuple[str, ...]]:
-            candidates = sorted({
+        ) -> tuple[int, tuple[str, ...], tuple[int, ...]]:
+            candidates = tuple(sorted({
                 _text(task.get("initiative_id"))
                 for task in remaining.values()
                 if _text(task.get("initiative_id")) in self._initiative_work
-            })
-            best = (0, (), ())
+            }))
+            key = state_key(candidates, state, completed)
+            if key in memo:
+                return memo[key]
+            best: tuple[int, tuple[str, ...], tuple[int, ...]] = (0, (), ())
             for initiative_id in candidates:
                 success, next_state, next_completed = self._simulate_complete_initiative(
                     initiative_id, remaining, state, completed, results
@@ -920,18 +1047,26 @@ class BaselineQuarterPlanner:
                     for task_id, task in remaining.items()
                     if _text(task.get("initiative_id")) != initiative_id
                 }
-                count, rungs, order = search(next_remaining, next_state, next_completed)
-                # Initiative work stores negative rung so lexical ordering keeps
-                # the higher business priority first when counts are equal.
-                initiative_rung = self._initiative_work[initiative_id][2]
-                candidate = (count + 1, (initiative_rung, *rungs), (initiative_id, *order))
-                if candidate[0] > best[0] or (
-                    candidate[0] == best[0] and candidate[1:] < best[1:]
-                ):
+                count, order, completion_sprints = search(
+                    next_remaining, next_state, next_completed
+                )
+                candidate = (
+                    count + 1,
+                    (initiative_id, *order),
+                    (
+                        self._initiative_completion_sprint(
+                            initiative_id, remaining, next_completed
+                        ),
+                        *completion_sprints,
+                    ),
+                )
+                if self._initiative_plan_is_better(candidate, best):
                     best = candidate
+            memo[key] = best
             return best
 
-        _, _, order = search(pending, ledgers, completed_tasks)
+        _, order, _ = search(pending, ledgers, completed_tasks)
+        self._initiative_choice_queue = list(order)
         return order[0] if order else None
 
     def plan(self) -> QuarterPlan:
@@ -1071,9 +1206,8 @@ class BaselineQuarterPlanner:
             }
             task_id = min(
                 selectable_ids,
-                key=lambda candidate_id: (
-                    self._initiative_sort_key(pending[candidate_id]),
-                    score_sort_key(pending[candidate_id], scored[candidate_id]),
+                key=lambda candidate_id: score_sort_key(
+                    pending[candidate_id], scored[candidate_id]
                 ),
             )
             task = pending.pop(task_id)

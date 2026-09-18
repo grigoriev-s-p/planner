@@ -72,6 +72,52 @@ def test_primary_initiative_objective_beats_high_rung_resource_mix() -> None:
     assert result_by_id(plan, "MIXED").status == PlanStatus.MOVED
 
 
+def test_primary_initiative_objective_holds_above_exact_search_threshold() -> None:
+    quarter = SyntheticQuarter().team("Team-A", velocity=20)
+    for role in ("Role-A", "Role-B", "Role-C", "Role-D", "Role-E"):
+        quarter.engineer(f"ENG-{role}", "Team-A", role)
+    quarter.task(
+        "MIXED",
+        initiative_id="INIT-MIXED",
+        story_points=1,
+        role_hours={"Role-A": 240, "Role-B": 240},
+        rung=100,
+    )
+    quarter.task(
+        "ROLE-A",
+        initiative_id="INIT-A",
+        story_points=2,
+        role_hours={"Role-A": 320},
+        rung=10,
+    )
+    quarter.task(
+        "ROLE-B",
+        initiative_id="INIT-B",
+        story_points=2,
+        role_hours={"Role-B": 320},
+        rung=10,
+    )
+    for role in ("Role-C", "Role-D", "Role-E"):
+        quarter.task(
+            role,
+            initiative_id=f"INIT-{role}",
+            story_points=3,
+            role_hours={role: 480},
+            rung=10,
+        )
+
+    plan = quarter.plan()
+
+    assert plan.completed_initiative_ids == (
+        "INIT-A",
+        "INIT-B",
+        "INIT-Role-C",
+        "INIT-Role-D",
+        "INIT-Role-E",
+    )
+    assert result_by_id(plan, "MIXED").status == PlanStatus.MOVED
+
+
 def test_infeasible_high_rung_does_not_block_lower_rung() -> None:
     quarter = _single_team_quarter()
     quarter.task("HIGH", story_points=2, role_hours={"Backend": 500}, rung=100)
@@ -391,7 +437,8 @@ def test_same_synthetic_input_produces_identical_plan() -> None:
         .task("C", initiative_id="I-2", team_id="Team-B", story_points=2, role_hours={"Backend": 80}, rung=70)
     )
 
-    assert quarter.plan().to_dict() == quarter.plan().to_dict()
+    snapshots = [quarter.plan().to_dict() for _ in range(5)]
+    assert all(snapshot == snapshots[0] for snapshot in snapshots[1:])
 
 
 def test_plan_keeps_fields_needed_for_quarter_metrics() -> None:

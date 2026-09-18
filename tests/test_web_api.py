@@ -116,5 +116,69 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             self.assertNotIn(old_demo_name, app_source)
 
 
+class FrontendRefinementTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.frontend = PROCESSED_DIR.parents[1] / "frontend"
+        cls.html = (cls.frontend / "index.html").read_text(encoding="utf-8")
+        cls.app = (cls.frontend / "app.js").read_text(encoding="utf-8")
+        cls.styles = (cls.frontend / "styles.css").read_text(encoding="utf-8")
+
+    def test_top_navigation_has_no_tasks_entry(self) -> None:
+        navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
+        self.assertNotIn('data-page="tasks"', navigation)
+        for page in ("home", "planning", "risks", "recalc", "star"):
+            self.assertIn(f'data-page="{page}"', navigation)
+
+    def test_technical_banner_and_header_version_are_absent(self) -> None:
+        self.assertNotIn("dataModeRibbon", self.html + self.app)
+        self.assertNotIn("header-quarter", self.html + self.app)
+        self.assertNotIn("РЕАЛЬНЫЕ ДАННЫЕ", self.html + self.app)
+        self.assertNotIn("Processed dataset", self.html + self.app)
+
+    def test_home_uses_current_planned_sprints_instead_of_source_status(self) -> None:
+        render_home = self.app.split("function renderHome()", 1)[1].split(
+            "function initiativeTaskList", 1
+        )[0]
+        self.assertIn("inQuarter(task) && taskSprints(task).includes(currentSprint())", render_home)
+        self.assertNotIn("source_status", render_home)
+        self.assertNotIn("active.slice", render_home)
+
+    def test_board_renders_six_compact_columns_without_global_horizontal_scroll(self) -> None:
+        render_planning = self.app.split("function renderPlanning()", 1)[1].split(
+            "function renderTasks()", 1
+        )[0]
+        self.assertIn("Array.from({length: 6}", render_planning)
+        self.assertIn("sprint-task-scroll", render_planning)
+        self.assertIn("grid-template-columns:repeat(6,minmax(0,1fr))", self.styles)
+        self.assertIn(".board-viewport{overflow:hidden", self.styles)
+        for forbidden in ("priority_label", "status_label", "initiative_id", "portion(task, sprint)"):
+            self.assertNotIn(forbidden, render_planning)
+
+    def test_initiatives_and_excluded_tasks_use_backend_results(self) -> None:
+        self.assertIn('id="completedInitiatives"', self.html)
+        self.assertIn('id="incompleteInitiatives"', self.html)
+        self.assertIn("initiative.completed_in_quarter", self.app)
+        self.assertIn("task.reasons", self.app)
+        self.assertIn("REASON_GROUPS", self.app)
+        self.assertIn("Другая причина", self.app)
+
+    def test_task_detail_is_contextual_and_has_dynamic_hero_id(self) -> None:
+        self.assertIn('id="page-tasks"', self.html)
+        self.assertIn('id="taskHeroId"', self.html)
+        self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
+        self.assertIn("taskReturnPage", self.app)
+        self.assertNotIn('id="taskSearch"', self.html)
+
+    def test_development_notice_is_reused_on_three_pages(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 3)
+        for target in (
+            "risksDevelopmentNotice",
+            "recalcDevelopmentNotice",
+            "starDevelopmentNotice",
+        ):
+            self.assertIn(f'id="{target}"', self.html)
+
+
 if __name__ == "__main__":
     unittest.main()

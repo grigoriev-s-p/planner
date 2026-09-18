@@ -153,7 +153,7 @@ Total occurrences: **94** (27 critical and 67 data-quality). Counts overlap when
 - `INITIATIVE_REGISTRY_NOT_AVAILABLE` (1 problem): Initiatives without tasks and duplicate initiative entities cannot be detected from task foreign keys alone.
 - `BLANK_INITIATIVE_ID` (7 problems, 7 affected tasks): The task cannot contribute to initiative completion or PI Predictability.
 - `MISSING_STORY_POINTS` (7 problems, 7 affected tasks): Team SP capacity and prioritization cannot be evaluated for the task.
-- `HOURS_WITHOUT_STORY_POINTS` (7 problems, 7 affected tasks): Role-hours exist, but the task cannot be constrained by team velocity or included reliably in SP KPIs.
+- `HOURS_WITHOUT_STORY_POINTS` (7 problems, 7 affected tasks): Role-hours exist, but the task cannot be constrained by team velocity or included reliably in SP s.
 - `TASK_HOURS_TOTAL_MISMATCH` (4 problems, 4 affected tasks): Task estimated_hh and the sum of role-hours imply different workload totals.
 - `STATUS_REFERENCE_NOT_AVAILABLE` (1 problem): Unknown statuses cannot be distinguished from valid source statuses without an independent catalog.
 - `TASK_STATUS_MISSING` (7 problems, 7 affected tasks): The planner cannot decide whether the task is eligible, completed, or already in progress.
