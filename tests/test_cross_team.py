@@ -219,7 +219,13 @@ class CrossTeamTests(unittest.TestCase):
         self.assertIn(ReasonCode.NO_AVAILABLE_ROLE_SPECIALIST, [r.code for r in blocked.reasons])
 
     def test_story_points_use_only_task_team_and_respect_its_limit(self) -> None:
-        data = context([engineer("EXT", "Team-B")])
+        data = context(
+            [
+                engineer("LOCAL", "Team-A", 0.75),
+                engineer("EXT", "Team-B"),
+            ],
+            hours=80,
+        )
         data = replace(data, team_history=(
             {"team_id": "Team-A", "velocity_achieved": 2.5},
             {"team_id": "Team-B", "velocity_achieved": 100},
@@ -227,20 +233,26 @@ class CrossTeamTests(unittest.TestCase):
         check = FeasibilityService(data).check("T", SprintState(1))
         self.assertTrue(check.can_complete)
         self.assertEqual(check.team_capacity.available_sp, 2)
-        plan = build_quarter_plan(data)
+        plan = build_quarter_plan(data, allow_team_reassignment=False)
         self.assertEqual(result(plan).completion_sprint, 1)
         self.assertEqual([s.team_sp_used.get("Team-A", 0) for s in plan.sprints], [2, 0, 0, 0, 0, 0])
         self.assertTrue(all(s.team_sp_used.get("Team-B", 0) == 0 for s in plan.sprints))
+        self.assertTrue(any(
+            item.cross_team
+            for allocation in result(plan).allocations
+            for item in allocation.engineer_allocations
+        ))
 
     def test_external_engineer_can_complete_work_across_sprints(self) -> None:
         plan = build_quarter_plan(context([engineer("EXT", "Team-B")], hours=130))
         planned = result(plan)
         self.assertEqual(planned.status, PlanStatus.PLANNED)
+        self.assertEqual(planned.assigned_team_id, "Team-B")
         self.assertEqual(planned.completion_sprint, 2)
         self.assertAlmostEqual(planned.allocations[0].allocated_hours, 80)
         self.assertAlmostEqual(planned.allocations[1].allocated_hours, 50)
         self.assertTrue(all(
-            e.cross_team for a in planned.allocations for e in a.engineer_allocations
+            not e.cross_team for a in planned.allocations for e in a.engineer_allocations
         ))
         self.assertTrue(all(s.engineer_hours_used.get("EXT", 0) <= 80 for s in plan.sprints))
 
@@ -261,10 +273,11 @@ class CrossTeamTests(unittest.TestCase):
             a.outcome == PlacementOutcome.ROLLED_BACK and a.allocated_hours == 160
             for a in huge.placement_attempts
         ))
-        self.assertEqual(following.completion_sprint, 1)
-        self.assertEqual(plan.sprints[0].engineer_hours_used, {"LOCAL": 80, "EXT": 80})
-        self.assertEqual(plan.sprints[0].team_sp_used, {"Team-A": 2})
-        self.assertTrue(all(not s.engineer_hours_used and not s.team_sp_used for s in plan.sprints[1:]))
+        self.assertEqual(following.completion_sprint, 2)
+        self.assertEqual(plan.sprints[0].engineer_hours_used, {"LOCAL": 80})
+        self.assertEqual(plan.sprints[1].engineer_hours_used, {"LOCAL": 80})
+        self.assertNotIn("EXT", plan.sprints[0].engineer_hours_used)
+        self.assertTrue(all(not s.engineer_hours_used and not s.team_sp_used for s in plan.sprints[2:]))
         self.assertTrue(all(a.task_id == "NEXT" for s in plan.sprints for a in s.task_allocations))
 
     def test_selection_is_stable_by_locality_free_hours_then_id(self) -> None:
@@ -277,9 +290,10 @@ class CrossTeamTests(unittest.TestCase):
         plans = [build_quarter_plan(context(rows, hours=180)) for rows in (profiles, profiles[::-1])]
         self.assertEqual(plans[0].to_dict(), plans[1].to_dict())
         allocations = result(plans[0]).allocations[0].engineer_allocations
+        self.assertEqual(result(plans[0]).assigned_team_id, "Team-B")
         self.assertEqual(
             [(a.engineer_id, a.hours) for a in allocations],
-            [("Z-LOCAL", 40), ("A-EXT", 80), ("B-EXT", 60)],
+            [("B-EXT", 80), ("C-EXT", 40), ("A-EXT", 60)],
         )
 
     def test_cross_team_does_not_bypass_supplied_skill_requirements(self) -> None:

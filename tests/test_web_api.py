@@ -76,6 +76,16 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("original_team_id", tasks[0])
         self.assertIn("assigned_team_id", tasks[0])
         self.assertTrue(any(task["team_reassigned"] for task in tasks))
+        planned = [task for task in tasks if task["status"] == "PLANNED"]
+        self.assertTrue(all(task["ownership"]["valid"] for task in planned))
+        for task in planned:
+            ownership = task["ownership"]
+            if ownership["external_hours"] > 0:
+                self.assertGreater(ownership["owner_hours"], ownership["external_hours"])
+                self.assertGreaterEqual(
+                    ownership["owner_engineer_count"],
+                    ownership["external_engineer_count"],
+                )
 
         task_id = tasks[0]["task_id"]
         response = self.client.get(f"/api/tasks/{task_id}")
@@ -219,6 +229,42 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("previewPlan = planResult", constructor_source)
         self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
         self.assertIn("onPlanApproved(approvedPlan);", constructor_source)
+
+    def test_constructor_kpi_uses_backend_percent_without_second_multiplication(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("format(parsed)", constructor_source)
+        self.assertNotIn("Number(value) * 100", constructor_source)
+        self.assertNotIn("Math.round(expectedKpi * 100)", constructor_source)
+        self.assertIn("KPI недоступен", constructor_source)
+
+    def test_constructor_renders_changed_task_effect_without_reoptimizing(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("changed_tasks", constructor_source)
+        self.assertIn("scrollIntoView", constructor_source)
+        self.assertIn("task-card--just-added", constructor_source)
+        self.assertIn("prefers-reduced-motion", constructor_source)
+        self.assertIn("applyOptimisticDelta", constructor_source)
+        self.assertNotIn("refreshRecommendations(draftId", constructor_source)
+
+    def test_recommendation_ui_uses_work_volume_and_saved_best_state(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Лучший найденный вариант выбран", constructor_source)
+        self.assertIn("Перераспределение задач", constructor_source)
+        self.assertIn("Помощь между командами", constructor_source)
+        self.assertIn("После подключения", constructor_source)
+        self.assertIn("Кто выполняет работу", constructor_source)
+        self.assertIn("Основная команда", constructor_source)
+        self.assertIn("Внешняя помощь", constructor_source)
+        self.assertIn("Команда выполняет", constructor_source)
+        self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+
+    def test_task_detail_groups_owner_team_and_external_help(self) -> None:
+        self.assertIn("Основная команда —", self.app)
+        self.assertIn("Помощь других команд", self.app)
+        self.assertIn("task.ownership", self.app)
+        self.assertIn("Команда выполняет ${number(ownership.owner_share_percent)}%", self.app)
+        self.assertNotIn("'Cross-team'", self.app)
+        self.assertNotIn("'Доля bucket'", self.app)
 
     def test_home_plan_links_open_current_plan(self) -> None:
         home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
