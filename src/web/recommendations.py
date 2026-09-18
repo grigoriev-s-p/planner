@@ -15,11 +15,13 @@ import logging
 from time import perf_counter
 from typing import Any, Iterable
 
+from src.planning.ownership import evaluate_ownership_rows
+
 from .constructor import _without_support_tasks
 from .service import PlanningAPIService
 
 LOGGER = logging.getLogger(__name__)
-TYPE_ORDER = {"TASK_SWAP": 0, "TASK_REASSIGNMENT": 1, "CROSS_TEAM_HELP": 2}
+TYPE_ORDER = {"TASK_SWAP": 0, "TASK_REASSIGNMENT": 1, "ATOMIC_PACKAGE": 2, "CROSS_TEAM_HELP": 3}
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -58,7 +60,10 @@ def _signature(action: dict[str, Any]) -> str:
 def _atomic_actions(action: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten one user-visible atomic package into planner configuration actions."""
     if action.get("type") == "TASK_SWAP":
-        return [deepcopy(item) for item in action.get("changes", [])]
+        return [
+            *[deepcopy(item) for item in action.get("changes", [])],
+            *[deepcopy(item) for item in action.get("linked_actions", [])],
+        ]
     primary = {key: deepcopy(value) for key, value in action.items() if key != "linked_actions"}
     return [primary, *[deepcopy(item) for item in action.get("linked_actions", [])]]
 
@@ -259,6 +264,142 @@ class RecommendationDraft:
         ))
 
     @staticmethod
+    def _link_actions(primary: dict[str, Any], dependent: dict[str, Any]) -> dict[str, Any]:
+        """Keep planner actions that only work together in one user action."""
+        package = deepcopy(primary)
+        linked = package.setdefault("linked_actions", [])
+        existing = {_signature(item) for item in _atomic_actions(package)}
+        for item in _atomic_actions(dependent):
+            if _signature(item) not in existing:
+                linked.append(deepcopy(item))
+                existing.add(_signature(item))
+        return package
+
+    def _action_affinity(self, left: dict[str, Any], right: dict[str, Any]) -> tuple[int, int]:
+        """Prefer the recommendation that actually shares a dependency/resource."""
+        left_ids, right_ids = set(_action_task_ids(left)), set(_action_task_ids(right))
+        dependency_pairs = {
+            (str(row.get("blocking_task_id")), str(row.get("blocked_task_id")))
+            for row in self.tables.get("task_dependencies", [])
+        }
+        dependency = int(any(
+            (left_id, right_id) in dependency_pairs or (right_id, left_id) in dependency_pairs
+            for left_id in left_ids for right_id in right_ids
+        ))
+
+        def engineers(task_ids: set[str]) -> set[str]:
+            return {
+                str(row.get("engineer_id"))
+                for task_id in task_ids
+                for row in _task(self.optimized_plan, task_id).get("allocations", [])
+                if row.get("engineer_id")
+            }
+
+        return dependency, len(engineers(left_ids) & engineers(right_ids))
+
+    @staticmethod
+    def _action_changed(action: dict[str, Any], before: dict[str, Any], after: dict[str, Any]) -> bool:
+        fields = ("status", "assigned_team_id", "planned_sprints", "completion_sprint", "allocations")
+        return any(
+            any(_task(before, task_id).get(field) != _task(after, task_id).get(field) for field in fields)
+            for task_id in _action_task_ids(action)
+        )
+
+    def _recommendation_specs(
+        self, actions: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Keep independent actions separate and package only proven joint changes."""
+        specs: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        for action in actions:
+            recommendation = self._recommendation(action, self.base_plan, self._plan([action]))
+            if recommendation:
+                specs.append({"node": _signature(action), "action": deepcopy(action), "requires": [], "recommendation": recommendation})
+            else:
+                pending.append(deepcopy(action))
+
+        def ordered_specs(action: dict[str, Any]) -> list[dict[str, Any]]:
+            return sorted(
+                specs,
+                key=lambda spec: self._action_affinity(spec["action"], action),
+                reverse=True,
+            )
+
+        while pending:
+            progress = False
+            for action in list(pending):
+                # A prerequisite is not an atomic package: reveal this action
+                # separately after the required recommendation was accepted.
+                for prerequisite in ordered_specs(action):
+                    before = self._plan([prerequisite["action"]])
+                    after = self._plan([prerequisite["action"], action])
+                    recommendation = self._recommendation(action, before, after)
+                    if recommendation:
+                        specs.append({
+                            "node": _signature(action), "action": deepcopy(action),
+                            "requires": [prerequisite["node"]], "recommendation": recommendation,
+                        })
+                        pending.remove(action)
+                        progress = True
+                        break
+                if progress:
+                    break
+
+                # A support action that has no useful effect on its own belongs
+                # to the smallest recommendation whose simulation it changes.
+                for prerequisite in ordered_specs(action):
+                    without_support = self._plan([prerequisite["action"]])
+                    package = self._link_actions(prerequisite["action"], action)
+                    with_support = self._plan([package])
+                    recommendation = self._recommendation(package, self.base_plan, with_support)
+                    if self._action_changed(action, without_support, with_support) and recommendation:
+                        prerequisite["action"] = package
+                        prerequisite["recommendation"] = recommendation
+                        pending.remove(action)
+                        progress = True
+                        break
+                if progress:
+                    break
+
+            if progress:
+                continue
+
+            # Neither change is feasible/useful alone in the same state. Only
+            # this case is exposed as a genuine atomic package.
+            packaged = False
+            for index, left in enumerate(pending):
+                for right in pending[index + 1:]:
+                    package = self._link_actions(left, right)
+                    recommendation = self._recommendation(
+                        package, self.base_plan, self._plan([package])
+                    )
+                    if recommendation:
+                        specs.append({
+                            "node": _signature(package), "action": package,
+                            "requires": [], "recommendation": recommendation,
+                        })
+                        pending.remove(left)
+                        pending.remove(right)
+                        packaged = True
+                        break
+                if packaged:
+                    break
+            if not packaged:
+                raise ValueError("Не удалось разложить Best Plan на независимые рекомендации.")
+
+        id_by_node = {
+            spec["node"]: spec["recommendation"]["recommendation_id"] for spec in specs
+        }
+        recommendations = {}
+        packages = []
+        for spec in specs:
+            recommendation = spec["recommendation"]
+            recommendation["requires"] = [id_by_node[node] for node in spec["requires"]]
+            recommendations[recommendation["recommendation_id"]] = recommendation
+            packages.append(spec["action"])
+        return packages, recommendations
+
+    @staticmethod
     def _changed_tasks(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
         changes = []
         previous_by_id = {item.get("task_id"): item for item in before.get("tasks", [])}
@@ -287,6 +428,19 @@ class RecommendationDraft:
     def _engineer_name(plan: dict[str, Any], engineer_id: str) -> str:
         engineer = next((item for item in plan.get("engineers", []) if item.get("engineer_id") == engineer_id), {})
         return str(engineer.get("name") or engineer_id)
+
+    @staticmethod
+    def _task_ownership(task: dict[str, Any]) -> dict[str, Any]:
+        owner_team = str(task.get("assigned_team_id") or "").strip()
+        if not owner_team:
+            return {}
+        calculated = evaluate_ownership_rows(
+            owner_team, task.get("allocations", [])
+        ).to_dict()
+        # Recalculate from the final allocation even when the API DTO already
+        # contains evidence, so recommendation validation never trusts stale
+        # ownership metadata.
+        return calculated
 
     def _cross_team_evidence(self, before: dict[str, Any], after: dict[str, Any], task_ids: list[str]) -> list[dict[str, Any]]:
         allocations = self._all_allocations(after)
@@ -322,11 +476,13 @@ class RecommendationDraft:
                 item.get("task_id") for item in after.get("tasks", [])
                 if item.get("assigned_team_id") == source_team and item.get("status") == "PLANNED"
             }
+            ownership = self._task_ownership(_task(after, str(task_id)))
             output.append({
                 "engineer_id": engineer_id,
                 "engineer_name": self._engineer_name(after, str(engineer_id)),
                 "role": role, "source_team": source_team, "target_team": target_team,
                 "target_task": task_id, "sprint": sprint, "help_hours": recommended,
+                "ownership": ownership,
                 "engineer_capacity": {
                     "sprint": sprint, "source_team": source_team,
                     "capacity_hours": capacity, "already_allocated_hours": own,
@@ -381,6 +537,7 @@ class RecommendationDraft:
             sp_row = (team.get("sp_by_sprint") or {}).get(str(sprint), {}) if sprint else {}
             task_sp_load = _number((new_task.get("sp_load_by_sprint") or {}).get(str(sprint)))
             required, available = self._role_capacity(after, task_id, target_team, sprint)
+            ownership = self._task_ownership(new_task)
             enters = old_task.get("status") != "PLANNED" and new_task.get("status") == "PLANNED"
             output.append({
                 "task_id": task_id,
@@ -393,7 +550,19 @@ class RecommendationDraft:
                     "task_sp": _number(new_task.get("story_points")),
                     "resulting_used_sp": _number(sp_row.get("used")), "capacity_sp": _number(sp_row.get("capacity")),
                     "role_hours_required": required, "role_hours_available": available,
-                    "fits_capacity": new_task.get("status") == "PLANNED",
+                    "fits_capacity": (
+                        new_task.get("status") == "PLANNED"
+                        and bool(ownership.get("valid", True))
+                    ),
+                },
+                "ownership": ownership,
+                "workload": {
+                    "total_hours": ownership.get("total_hours", 0.0),
+                    "owner_hours": ownership.get("owner_hours", 0.0),
+                    "external_hours": ownership.get("external_hours", 0.0),
+                    "owner_engineer_count": ownership.get("owner_engineer_count", 0),
+                    "external_engineer_count": ownership.get("external_engineer_count", 0),
+                    "owner_share_percent": ownership.get("owner_share_percent"),
                 },
                 "effect": "Задача войдёт в квартал." if enters else f"Завершение: Sprint {_completion(old_task)} → Sprint {sprint}.",
             })
@@ -401,7 +570,15 @@ class RecommendationDraft:
 
     def _recommendation(self, action: dict[str, Any], before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
         task_ids = _action_task_ids(action)
+        atomic_actions = _atomic_actions(action)
         old_tasks, new_tasks = ([_task(plan, task_id) for task_id in task_ids] for plan in (before, after))
+        if any(
+            task.get("status") == "PLANNED"
+            and task.get("allocations")
+            and not self._task_ownership(task).get("valid", False)
+            for task in new_tasks
+        ):
+            return None
         if not any(_improves(left, right) for left, right in zip(old_tasks, new_tasks)):
             return None
         rung = max((_number(item.get("rung")) for item in old_tasks), default=0.0)
@@ -412,6 +589,8 @@ class RecommendationDraft:
             return None
         reassignment = self._reassignment_evidence(before, after, action)
         action_type = str(action.get("type"))
+        is_atomic_package = action_type != "TASK_SWAP" and len(task_ids) > 1
+        display_type = "ATOMIC_PACKAGE" if is_atomic_package else action_type
         if action_type == "CROSS_TEAM_HELP" and not cross:
             return None
         title = {
@@ -419,6 +598,8 @@ class RecommendationDraft:
             "TASK_REASSIGNMENT": "Передать задачу другой команде",
             "CROSS_TEAM_HELP": "Подключить специалиста другой команды",
         }.get(action_type, "Улучшить распределение задач")
+        if is_atomic_package:
+            title = f"Совместное перераспределение {len(task_ids)} задач"
         enters = [right.get("task_id") for left, right in zip(old_tasks, new_tasks) if left.get("status") != "PLANNED" and right.get("status") == "PLANNED"]
         moved = [(_completion(left), _completion(right)) for left, right in zip(old_tasks, new_tasks) if _completion(left) is not None and _completion(right) is not None and _completion(right) < _completion(left)]
         summary = f"+{len(enters)} задач(а) войдёт в квартал." if enters else f"Завершение: Sprint {moved[0][0]} → Sprint {moved[0][1]}." if moved else "Устранено ресурсное ограничение задачи."
@@ -432,8 +613,8 @@ class RecommendationDraft:
         primary = old_tasks[0] if old_tasks else {}
         first_cross, first_reassign = (cross or [{}])[0], (reassignment or [{}])[0]
         return {
-            "recommendation_id": recommendation_id, "type": action_type,
-            "group_id": "task-allocation" if action_type != "CROSS_TEAM_HELP" else "cross-team-help",
+            "recommendation_id": recommendation_id, "type": display_type,
+            "group_id": "task-allocation" if display_type != "CROSS_TEAM_HELP" else "cross-team-help",
             "state": "available", "title": title, "tasks": task_ids,
             "task_id": task_ids[0] if task_ids else None, "rung": rung,
             "engineer_id": first_cross.get("engineer_id"),
@@ -451,6 +632,11 @@ class RecommendationDraft:
                 "enters_quarter": bool(enters), "tasks_entering_quarter": enters, "summary": summary,
             },
             "engineer_help": cross, "task_reassignment": reassignment,
+            "is_atomic_package": is_atomic_package,
+            "package_actions": [{
+                "type": item.get("type"), "task_id": item.get("task_id"),
+                "source_team_id": item.get("source_team_id"), "team_id": item.get("team_id"),
+            } for item in atomic_actions] if is_atomic_package else [],
             "plan_delta": {
                 "base_revision": 0, "base_fingerprint": self.base_fingerprint,
                 "recommendation_signature": recommendation_id,
@@ -466,20 +652,11 @@ class RecommendationDraft:
             started = perf_counter()
             shadow = self._shadow()
             self.timings_ms["shadow_plan"] = round((perf_counter() - started) * 1000, 2)
-            self.optimized_actions = self._shadow_actions(shadow)
-            self.optimized_plan = self._plan(self.optimized_actions)
+            raw_actions = self._shadow_actions(shadow)
+            self.optimized_plan = self._plan(raw_actions)
+            self.optimized_actions, recommendations = self._recommendation_specs(raw_actions)
             self.best_fingerprint = _plan_fingerprint(self.optimized_plan)
             started = perf_counter()
-            recommendations = {}
-            for action in self.optimized_actions:
-                # Precompute the canonical standalone state once. This is the
-                # heavier initial pass that makes later Apply optimistic and
-                # avoids every global optimization rerun.
-                recommendation = self._recommendation(
-                    action, self.base_plan, self._plan([action])
-                )
-                if recommendation:
-                    recommendations[recommendation["recommendation_id"]] = recommendation
             self._all_recommendations = recommendations
             self._refresh_available()
             self.timings_ms["recommendation_precompute"] = round((perf_counter() - started) * 1000, 2)
@@ -498,6 +675,7 @@ class RecommendationDraft:
         available = [
             deepcopy(item) for recommendation_id, item in self._all_recommendations.items()
             if recommendation_id not in accepted_ids and recommendation_id not in self.rejected
+            and set(item.get("requires", [])).issubset(accepted_ids)
         ]
         available.sort(key=lambda item: (
             TYPE_ORDER.get(item.get("type"), 99), -_number(item.get("rung")),
@@ -629,7 +807,16 @@ class RecommendationDraft:
 
     def undo(self, change_id: str) -> None:
         original = len(self.accepted)
-        self.accepted = [item for item in self.accepted if item["change_id"] != change_id]
+        removed = {change_id}
+        while True:
+            dependent = {
+                item["change_id"] for item in self.accepted
+                if set(self._all_recommendations.get(item["change_id"], {}).get("requires", [])) & removed
+            }
+            if dependent.issubset(removed):
+                break
+            removed.update(dependent)
+        self.accepted = [item for item in self.accepted if item["change_id"] not in removed]
         if len(self.accepted) == original:
             raise KeyError(change_id)
         self._set_current_from_actions(self.current_plan)

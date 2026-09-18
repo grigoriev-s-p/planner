@@ -56,13 +56,14 @@ window.planConstructor = (() => {
     const rows = new Map();
     (plan.tasks || []).forEach((task) => (task.allocations || []).filter((item) => item.cross_team).forEach((item) => {
       const key = [item.engineer_id, item.source_team_id, item.assigned_task_team_id, task.task_id, item.sprint].join('|');
-      const row = rows.get(key) || {...item, task_id: task.task_id, title: task.title, hours: 0};
+      const row = rows.get(key) || {...item, task_id: task.task_id, title: task.title, ownership: task.ownership, hours: 0};
       row.hours += Number(item.allocated_hours || 0);
       rows.set(key, row);
     }));
     return [...rows.values()].sort((left, right) => left.sprint - right.sprint || left.task_id.localeCompare(right.task_id, 'ru')).map((row) => {
       const engineer = engineers.get(row.engineer_id);
-      return `<article class="preview-help-row"><div><b>${esc(engineer?.name || row.engineer_id)}</b><span>${esc(row.source_team_id)} → ${esc(row.assigned_task_team_id)}</span></div><div><span>Sprint ${esc(row.sprint)} · ${esc(row.task_id)}</span><strong>${number(row.hours)} ч</strong></div></article>`;
+      const ownership = row.ownership || {};
+      return `<article class="preview-help-row"><div><b>${esc(engineer?.name || row.engineer_id)}</b><span>${esc(row.source_team_id)} → ${esc(row.assigned_task_team_id)} · ${esc(row.role)}</span><small>${esc(row.task_id)} · Sprint ${esc(row.sprint)}</small></div><div><strong>${number(row.hours)} ч</strong><span>${ownership.owner_share_percent == null ? '' : `Команда выполняет ${number(ownership.owner_share_percent)}%`}</span></div></article>`;
     }).join('') || '<p class="muted">Внешняя помощь между командами не потребовалась.</p>';
   }
 
@@ -85,7 +86,7 @@ window.planConstructor = (() => {
     return definitions.map((group) => ({
       ...group,
       items: recommendations.filter((item) => group.key === 'cross-team-help'
-        ? item.type === 'CROSS_TEAM_HELP' : item.type === 'TASK_SWAP' || item.type === 'TASK_REASSIGNMENT')
+        ? item.type === 'CROSS_TEAM_HELP' : ['TASK_SWAP', 'TASK_REASSIGNMENT', 'ATOMIC_PACKAGE'].includes(item.type))
         .sort((left, right) => Number(right.rung || 0) - Number(left.rung || 0)
           || Number(left.effect?.before_sprint || 99) - Number(right.effect?.before_sprint || 99)
           || String(left.task_id).localeCompare(String(right.task_id), 'ru')),
@@ -97,27 +98,48 @@ window.planConstructor = (() => {
     return `<div class="recommendation-evidence"><b>Ресурс специалиста</b><dl><div><dt>Доступно</dt><dd>${number(capacity.capacity_hours)} ч</dd></div><div><dt>Свои задачи</dt><dd>${number(capacity.already_allocated_hours)} ч</dd></div><div><dt>Помощь</dt><dd>+${number(capacity.recommended_hours)} ч</dd></div><div><dt>После подключения</dt><dd>${number(capacity.resulting_total_hours)} / ${number(capacity.capacity_hours)} ч</dd></div><div><dt>Останется</dt><dd>${number(capacity.remaining_hours)} ч</dd></div></dl><p class="recommendation-check">✓ Специалист помещается по часам</p><p class="recommendation-check">${capacity.source_team_plan_stays_feasible ? '✓' : '⚠'} Задачи основной команды остаются выполнимыми</p></div>`;
   }
 
+  function ownershipRows(ownership) {
+    if (!ownership || ownership.total_hours == null) return '';
+    return `<div class="recommendation-evidence"><b>Кто выполняет работу</b><dl><div><dt>Всего</dt><dd>${number(ownership.total_hours)} ч</dd></div><div><dt>Основная команда</dt><dd>${number(ownership.owner_hours)} ч · ${number(ownership.owner_engineer_count)} инженер(а)</dd></div><div><dt>Внешняя помощь</dt><dd>${number(ownership.external_hours)} ч · ${number(ownership.external_engineer_count)} специалист(а)</dd></div><div><dt>Доля команды</dt><dd>${number(ownership.owner_share_percent)}%</dd></div></dl><p class="recommendation-check">${ownership.valid ? '✓' : '⚠'} ${esc(ownership.status_message || '')}</p></div>`;
+  }
+
   function reassignmentRows(rows) {
     return rows.map((row) => {
       const target = row.target_capacity || {};
       const roles = Object.entries(target.role_hours_required || {}).map(([role, hours]) => `<li>${esc(role)}: требуется ${number(hours)} ч, доступно ${number(target.role_hours_available?.[role])} ч</li>`).join('');
       const bottlenecks = (row.source_bottlenecks || []).map((reason) => `<li>${esc(reason)}</li>`).join('');
-      return `<div class="recommendation-evidence"><b>${esc(row.task_id)}: ${esc(row.from_team)} → ${esc(row.to_team)}</b><div class="recommendation-before-after"><section><span>Сейчас</span><strong>${esc(row.from_team)}</strong><ul>${bottlenecks}</ul></section><section><span>Предлагается</span><strong>${esc(row.to_team)}</strong><p>Sprint ${esc(row.after_sprint || '—')}</p><p>SP: требуется ${number(row.task_sp)}, доступно ${number(target.available_sp)}</p><ul>${roles}</ul></section></div><p class="recommendation-check">✓ ${esc(row.effect)}</p><p class="recommendation-check">✓ Команда помещает задачу без превышения ресурсов</p></div>`;
+      return `<div class="recommendation-evidence"><b>${esc(row.task_id)}: ${esc(row.from_team)} → ${esc(row.to_team)}</b><div class="recommendation-before-after"><section><span>Сейчас</span><strong>${esc(row.from_team)}</strong><ul>${bottlenecks}</ul></section><section><span>Предлагается</span><strong>${esc(row.to_team)}</strong><p>Sprint ${esc(row.after_sprint || '—')}</p><p>SP: требуется ${number(row.task_sp)}, доступно ${number(target.available_sp)}</p><ul>${roles}</ul></section></div>${ownershipRows(row.ownership)}<p class="recommendation-check">✓ ${esc(row.effect)}</p><p class="recommendation-check">✓ Команда помещает задачу без превышения ресурсов</p></div>`;
     }).join('');
+  }
+
+  function crossTeamRows(rows) {
+    return rows.map((help) => `<div class="recommendation-evidence"><b>${esc(help.target_task)} · ${esc(help.engineer_name || help.engineer_id)}</b><p><b>Кто:</b> ${esc(help.engineer_name || help.engineer_id)} · ${esc(help.role)}</p><p><b>Откуда:</b> ${esc(help.source_team)} · <b>Куда:</b> ${esc(help.target_team)}</p><p><b>Sprint:</b> ${esc(help.sprint)} · <b>Помощь:</b> ${number(help.help_hours)} ч</p>${ownershipRows(help.ownership)}${capacityRows(help)}</div>`).join('');
+  }
+
+  function packageRows(actions) {
+    const labels = {TASK_REASSIGNMENT: 'Передать задачу', CROSS_TEAM_HELP: 'Подключить внешнюю помощь'};
+    const rows = (actions || []).map((action) => `<li><b>${esc(action.task_id)}</b> — ${esc(labels[action.type] || 'Изменить распределение')}${action.team_id ? `: ${esc(action.source_team_id)} → ${esc(action.team_id)}` : ''}</li>`).join('');
+    return rows ? `<div class="recommendation-evidence"><b>Изменения применяются совместно</b><ul>${rows}</ul></div>` : '';
   }
 
   function recommendationCard(item) {
     const effect = item.effect || {};
-    const help = (item.engineer_help || [])[0];
+    const helps = item.engineer_help || [];
+    const help = helps[0];
     const transfers = item.task_reassignment || [];
-    const taskLabel = (item.tasks || [item.task_id]).filter(Boolean).map((taskId) => `${esc(taskId)}${Number.isFinite(Number(item.rung)) ? ` · R${esc(item.rung)}` : ''}`).join(' + ');
-    const actor = help
-      ? `${help.engineer_name || help.engineer_id} · ${help.source_team} → ${help.target_team}`
-      : transfers.map((row) => `${row.from_team} → ${row.to_team}`).join(' · ');
-    const timing = help ? `Sprint ${help.sprint} · ${number(help.help_hours)} ч` : transfers[0]?.after_sprint ? `Sprint ${transfers[0].after_sprint}` : '';
-    const detail = help
-      ? `<p><b>Кто:</b> ${esc(help.engineer_name || help.engineer_id)} · ${esc(help.role)}</p><p><b>Откуда:</b> ${esc(help.source_team)} · <b>Куда:</b> ${esc(help.target_team)}</p><p><b>Задача:</b> ${esc(help.target_task)} · <b>Sprint:</b> ${esc(help.sprint)} · <b>Помощь:</b> ${number(help.help_hours)} ч</p>${(item.engineer_help || []).map(capacityRows).join('')}`
-      : reassignmentRows(transfers);
+    const tasks = (item.tasks || [item.task_id]).filter(Boolean);
+    const taskLabel = item.is_atomic_package
+      ? `${tasks.length} связанные задачи`
+      : item.type === 'TASK_SWAP'
+        ? tasks.map(esc).join(' ↔ ')
+        : `${esc(tasks[0] || '')}${Number.isFinite(Number(item.rung)) ? ` · R${esc(item.rung)}` : ''}`;
+    const actor = item.is_atomic_package
+      ? 'Только совместное применение'
+      : transfers.length
+        ? transfers.map((row) => `${row.from_team} → ${row.to_team}`).join(' · ')
+        : help ? `${help.engineer_name || help.engineer_id} · ${help.source_team} → ${help.target_team}` : '';
+    const timing = transfers[0]?.after_sprint ? `Sprint ${transfers[0].after_sprint}` : help ? `Sprint ${help.sprint} · ${number(help.help_hours)} ч` : '';
+    const detail = `${item.is_atomic_package ? packageRows(item.package_actions) : ''}${transfers.length ? reassignmentRows(transfers) : ''}${helps.length ? crossTeamRows(helps) : ''}`;
     const applying = activeRecommendationId === item.recommendation_id;
     return `<article class="recommendation-card ${applying ? 'recommendation-card--loading' : ''}" id="recommendation-${esc(item.recommendation_id)}"><div class="recommendation-card-title"><b>${esc(item.title)}</b><span>${taskLabel}</span></div><p>${esc(actor)}${timing ? ` · ${esc(timing)}` : ''}</p><strong>${esc(effect.summary || 'План станет выполнимее.')}</strong><p class="recommendation-check">✓ Изменение проверено планировщиком</p><details><summary>Подробнее</summary>${detail}</details><div class="recommendation-actions"><button type="button" class="btn btn-outline" data-recommendation-reject="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>Отклонить</button><button type="button" class="btn btn-blue" data-recommendation-apply="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>${applying ? 'Применяем…' : 'Применить'}</button></div></article>`;
   }
@@ -154,7 +176,7 @@ window.planConstructor = (() => {
       ? `<div class="apply-all-recommendations ${optimization.best_selected ? 'apply-all-recommendations--selected' : ''}"><div><b>Лучший найденный совместимый вариант</b><small>Сохранённый вариант не меняется при применении или отклонении отдельных рекомендаций.</small></div><button class="btn btn-blue" type="button" id="applyAllRecommendations" ${recommendationUpdateInFlight || optimization.best_selected ? 'disabled' : ''}>${optimization.best_selected ? '✓ Лучший найденный вариант выбран' : activeRecommendationId === 'apply-all' ? 'Применяем…' : 'Применить все рекомендации'}</button></div>` : '';
     const recommendationContent = optimization.status === 'pending' ? '' : optimization.recommendation_error
       ? `<p class="muted">Не удалось обновить рекомендации: ${esc(optimization.recommendation_error)}. Предварительный план доступен для утверждения.</p>`
-      : groups.length ? `${cards}${moreGroups}` : '<p class="muted">Дополнительных улучшений с помощью перераспределения доступных ресурсов не найдено.</p>';
+      : groups.length ? `<div class="recommendation-groups-scroll">${cards}${moreGroups}</div>` : '<p class="muted">Дополнительных улучшений с помощью перераспределения доступных ресурсов не найдено.</p>';
     return `<section class="preview-section recommendations-section"><h3>Как можно улучшить план</h3><p class="muted">Можно перераспределить доступные ресурсы и сразу увидеть, как изменится квартальный план.</p>${comparison}${applyAll}${recommendationContent}</section>`;
   }
 

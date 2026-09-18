@@ -41,7 +41,10 @@ class StructuredExplainabilityTests(unittest.TestCase):
     def test_cross_team_help_is_not_team_reassignment(self):
         plan = build_quarter_plan(context([task("EXT")], effort=[
             {"task_id": "EXT", "role": "Backend", "required_hours": 20},
-        ], engineers=[{"engineer_id": "E-B", "team_id": "Team-B", "role": "Backend", "capacity_rate": 1}]))
+        ], engineers=[
+            {"engineer_id": "E-A", "team_id": "Team-A", "role": "Backend", "capacity_rate": 0.2},
+            {"engineer_id": "E-B", "team_id": "Team-B", "role": "Backend", "capacity_rate": 1},
+        ]))
         item = explanation(plan, "EXT")
         cross = [reason for reason in item.reasons if reason.code.value == "CROSS_TEAM_HELP"]
         self.assertTrue(cross)

@@ -18,6 +18,7 @@ import pandas as pd
 from src.bus_factor import BusFactorService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
+from src.planning.ownership import evaluate_ownership_rows
 from src.replanning import (
     ActualResults,
     PlanItem,
@@ -116,7 +117,7 @@ RISK_PRESENTATION = {
 def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Presentation DTO for product users; raw planner codes remain internal."""
     groups: dict[str, dict[str, Any]] = {}
-    order = {"dependency": 0, "specialists": 1, "engineer_hours": 2, "team_capacity": 3, "quarter": 4, "other": 5}
+    order = {"dependency": 0, "specialists": 1, "engineer_hours": 2, "team_capacity": 3, "ownership": 4, "quarter": 5, "other": 6}
     for reason in reasons:
         code = str(reason.get("code") or "")
         details = reason.get("details") or {}
@@ -135,6 +136,9 @@ def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, An
             key, title = "team_capacity", "Недостаточно ресурсов команды"
             deficit = _number(details.get("deficit_sp"))
             values = [f"Не хватает {deficit:g} SP." if deficit else "Не хватает доступной ёмкости команды."]
+        elif code == "INVALID_TASK_OWNERSHIP":
+            key, title = "ownership", "Команда не может быть основным исполнителем"
+            values = [str(details.get("status_message") or "Большую часть работы пришлось бы выполнять специалистам других команд.")]
         elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
             key, title, values = "quarter", "Не помещается в текущий квартал", ["Для завершения требуется срок за пределами шести спринтов."]
         elif code in {"ALLOCATION_ROLLED_BACK", "MULTI_SPRINT_REQUIRED"}:
@@ -679,6 +683,11 @@ class PlanningAPIService:
             result = self._task_results[task_id]
             explanation = self._task_explanations[task_id]
             allocations = self._task_allocations(task_id)
+            ownership = (
+                evaluate_ownership_rows(explanation.assigned_team_id, allocations).to_dict()
+                if explanation.assigned_team_id
+                else None
+            )
             role_hours_by_sprint = {
                 str(item["sprint"]): dict(item["allocated_role_hours"])
                 for item in explanation.allocations
@@ -718,6 +727,7 @@ class PlanningAPIService:
                     "role_requirements": self._task_role_requirements(task_id),
                     "dependencies": self._task_dependencies(task_id),
                     "allocations": allocations,
+                    "ownership": ownership,
                     "reasons": reasons,
                     "reason_blocks": _human_reason_blocks(reasons),
                     "risks": [item.to_dict() for item in explanation.risks],

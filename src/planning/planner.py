@@ -23,6 +23,7 @@ from .plan_models import (
     TaskAllocation,
     TaskPlanResult,
 )
+from .ownership import evaluate_task_ownership
 from .planning_calendar import PlanningCalendar, shift_days, shift_direction
 from .reasons import ReasonCode
 from .scoring import (
@@ -630,6 +631,8 @@ class BaselineQuarterPlanner:
                     remaining,
                     feasibility,
                     max_total_hours=max_task_hours,
+                    prior_ownership=evaluate_task_ownership(team_id, allocations),
+                    enforce_owner_majority=True,
                 )
                 if outcome.total_hours <= 1e-9:
                     attempts.append(
@@ -854,7 +857,6 @@ class BaselineQuarterPlanner:
                     is_completed=completes_now,
                     check_reasons=(previous.check_reasons if previous else ()),
                 )
-                trial_ledgers[sprint_number].add_allocation(team_id, allocation)
                 finalized_allocations.append(allocation)
                 previous_attempt = attempts_by_sprint.get(sprint_number)
                 updated_attempt = PlacementAttempt(
@@ -871,6 +873,43 @@ class BaselineQuarterPlanner:
                 else:
                     attempts[attempts.index(previous_attempt)] = updated_attempt
             allocations = finalized_allocations
+            ownership = evaluate_task_ownership(team_id, allocations)
+            if not ownership.valid:
+                ownership_reason = FeasibilityReason(
+                    ReasonCode.INVALID_TASK_OWNERSHIP,
+                    ownership.to_dict(),
+                )
+                tentative_indexes = [
+                    index
+                    for index, attempt in enumerate(attempts)
+                    if attempt.outcome == PlacementOutcome.TENTATIVE
+                ]
+                if tentative_indexes:
+                    index = tentative_indexes[-1]
+                    attempt = attempts[index]
+                    attempts[index] = PlacementAttempt(
+                        attempt.sprint_number,
+                        attempt.outcome,
+                        allocated_hours=attempt.allocated_hours,
+                        capacity_sp_load=attempt.capacity_sp_load,
+                        planned_completion_sp=attempt.planned_completion_sp,
+                        completed_sp=attempt.completed_sp,
+                        reasons=attempt.reasons + (ownership_reason,),
+                    )
+                else:
+                    attempts.append(
+                        PlacementAttempt(
+                            completion_sprint,
+                            PlacementOutcome.REJECTED,
+                            reasons=(ownership_reason,),
+                        )
+                    )
+                success = False
+            else:
+                for allocation in allocations:
+                    trial_ledgers[allocation.sprint_number].add_allocation(
+                        team_id, allocation
+                    )
 
         final_outcome = PlacementOutcome.COMMITTED if success else PlacementOutcome.ROLLED_BACK
         finalized_attempts = tuple(
@@ -1297,6 +1336,7 @@ class BaselineQuarterPlanner:
                                 "team_sp",
                                 "roles",
                                 "engineer_hours",
+                                "task_ownership",
                                 "dependencies",
                                 "quarter_horizon",
                             ],

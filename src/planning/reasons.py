@@ -21,6 +21,7 @@ class ReasonCode(str, Enum):
     NO_AVAILABLE_ROLE_SPECIALIST = "NO_AVAILABLE_ROLE_SPECIALIST"
     UNSUPPORTED_TASK_STATUS = "UNSUPPORTED_TASK_STATUS"
     TEAM_REASSIGNED = "TEAM_REASSIGNED"
+    INVALID_TASK_OWNERSHIP = "INVALID_TASK_OWNERSHIP"
     # Explainability-layer codes. Legacy feasibility codes above remain part of
     # the public contract; these codes describe a planner decision in a form
     # that can be rendered directly by an API or UI.

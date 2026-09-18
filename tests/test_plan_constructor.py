@@ -73,22 +73,37 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 class ConstructorDomainTests(unittest.TestCase):
     @staticmethod
     def cross_team_payload(task_count: int = 1) -> dict:
+        engineers = []
+        tasks = []
+        for index in range(1, task_count + 1):
+            role = f"Backend-{index}"
+            engineers.extend([
+                {
+                    "engineer_id": "ENG-A" if index == 1 else f"ENG-A-{index}",
+                    "name": f"Engineer A {index}",
+                    "assignments": [{"team_id": "Team-A", "role": role, "capacity_rate": 0.75}],
+                    "skills": [],
+                },
+                {
+                    "engineer_id": "ENG-B" if index == 1 else f"ENG-B-{index}",
+                    "name": f"Engineer B {index}",
+                    "assignments": [{"team_id": "Team-B", "role": role, "capacity_rate": 0.25}],
+                    "skills": [],
+                },
+            ])
+            tasks.append({
+                "task_id": f"TASK-{index}", "title": "Needs help", "initiative_id": f"I-{index}",
+                "team_id": "Team-A", "status": "ToDo", "rung": 100 - index,
+                "story_points": 1, "role_requirements": [{"role": role, "required_hours": 400, "skills": []}],
+                "depends_on": [],
+            })
         return {
             "teams": [
                 {"team_id": "Team-A", "name": "A", "expected_velocity_sp": 20, "focus_factor": 0.8},
                 {"team_id": "Team-B", "name": "B", "expected_velocity_sp": 20, "focus_factor": 0.8},
             ],
-            "engineers": [{
-                "engineer_id": "ENG-B", "name": "Engineer B",
-                "assignments": [{"team_id": "Team-B", "role": "Backend", "capacity_rate": 1}],
-                "skills": [],
-            }],
-            "tasks": [{
-                "task_id": f"TASK-{index}", "title": "Needs help", "initiative_id": f"I-{index}",
-                "team_id": "Team-A", "status": "ToDo", "rung": 100 - index,
-                "story_points": 1, "role_requirements": [{"role": "Backend", "required_hours": 8, "skills": []}],
-                "depends_on": [],
-            } for index in range(1, task_count + 1)],
+            "engineers": engineers,
+            "tasks": tasks,
         }
 
     def test_recommendations_simulate_cross_team_without_changing_base_plan(self) -> None:
@@ -98,6 +113,9 @@ class ConstructorDomainTests(unittest.TestCase):
         draft = RecommendationDraft(base)
         recommendation = next(item for item in draft.recommendations.values() if item["type"] == "CROSS_TEAM_HELP")
         self.assertEqual(recommendation["engineer_id"], "ENG-B")
+        ownership = recommendation["engineer_help"][0]["ownership"]
+        self.assertTrue(ownership["valid"])
+        self.assertGreater(ownership["owner_hours"], ownership["external_hours"])
         self.assertEqual(draft.base_plan["tasks"][0]["status"], "MOVED")
 
         draft.apply(recommendation["recommendation_id"])
@@ -171,6 +189,80 @@ class ConstructorDomainTests(unittest.TestCase):
         draft.undo(draft.accepted[0]["change_id"])
         self.assertFalse(draft.snapshot("draft-1")["optimization"]["best_selected"])
 
+    def test_independent_recommendations_stay_separate_and_equal_apply_all(self) -> None:
+        payload = self.cross_team_payload(3)
+        base = build_constructor_plan(ConstructorScenario(**payload))
+        sequential = RecommendationDraft(deepcopy(base))
+        apply_all = RecommendationDraft(deepcopy(base))
+
+        self.assertEqual(len(sequential.recommendations), 3)
+        self.assertTrue(all(
+            len(recommendation["tasks"]) == 1
+            and not recommendation["is_atomic_package"]
+            for recommendation in sequential.recommendations.values()
+        ))
+        while sequential.recommendations:
+            sequential.apply(next(iter(sequential.recommendations)))
+        apply_all.apply_all()
+
+        def comparable_plan(draft: RecommendationDraft) -> dict:
+            tasks = []
+            for task in sorted(draft.current_plan["tasks"], key=lambda item: item["task_id"]):
+                tasks.append({
+                    "task_id": task["task_id"],
+                    "status": task["status"],
+                    "assigned_team_id": task.get("assigned_team_id"),
+                    "planned_sprints": task.get("planned_sprints"),
+                    "completion_sprint": task.get("completion_sprint"),
+                    "allocations": sorted(
+                        task.get("allocations", []),
+                        key=lambda row: (row.get("sprint", 0), row.get("engineer_id", ""), row.get("role", "")),
+                    ),
+                })
+            snapshot = draft.snapshot("comparison")["optimization"]
+            return {
+                "tasks": tasks,
+                "plan": draft.current_plan.get("plan"),
+                "initiatives": draft.current_plan.get("initiatives"),
+                "kpis": draft.current_plan.get("kpis"),
+                "summary": snapshot["current_summary"],
+            }
+
+        self.assertEqual(comparable_plan(sequential), comparable_plan(apply_all))
+        self.assertTrue(sequential.snapshot("sequential")["optimization"]["best_selected"])
+
+    def test_genuinely_joint_changes_are_one_small_atomic_package(self) -> None:
+        base = {"tasks": [
+            {"task_id": "A", "status": "MOVED", "assigned_team_id": "Team-A", "rung": 10, "allocations": []},
+            {"task_id": "B", "status": "PLANNED", "assigned_team_id": "Team-B", "completion_sprint": 1, "rung": 9, "allocations": []},
+        ], "teams": [], "engineers": []}
+        draft = RecommendationDraft(deepcopy(base))
+        left = {"type": "TASK_REASSIGNMENT", "task_id": "A", "source_team_id": "Team-A", "team_id": "Team-X"}
+        right = {"type": "TASK_REASSIGNMENT", "task_id": "B", "source_team_id": "Team-B", "team_id": "Team-Y"}
+
+        def simulated_plan(actions: list[dict]) -> dict:
+            result = deepcopy(base)
+            atomic = []
+            for action in actions:
+                atomic.extend(action.get("changes", []))
+                atomic.append({key: value for key, value in action.items() if key != "linked_actions"})
+                atomic.extend(action.get("linked_actions", []))
+            task_ids = {action.get("task_id") for action in atomic}
+            if {"A", "B"}.issubset(task_ids):
+                result["tasks"][0].update({"status": "PLANNED", "assigned_team_id": "Team-X", "completion_sprint": 1})
+                result["tasks"][1]["assigned_team_id"] = "Team-Y"
+            return result
+
+        draft.optimized_plan = simulated_plan([left, right])
+        with patch.object(draft, "_plan", side_effect=simulated_plan):
+            packages, recommendations = draft._recommendation_specs([left, right])
+
+        self.assertEqual(len(packages), 1)
+        recommendation = next(iter(recommendations.values()))
+        self.assertTrue(recommendation["is_atomic_package"])
+        self.assertEqual(recommendation["title"], "Совместное перераспределение 2 задач")
+        self.assertEqual(recommendation["tasks"], ["A", "B"])
+
     def test_cross_team_capacity_evidence_uses_source_team_bucket(self) -> None:
         before = {
             "tasks": [{
@@ -233,7 +325,9 @@ class ConstructorDomainTests(unittest.TestCase):
 
     def test_reassignment_recommendation_has_before_after_resource_evidence(self) -> None:
         payload = self.cross_team_payload()
-        payload["engineers"][0]["assignments"][0]["capacity_rate"] = 0.5
+        payload["engineers"][0]["assignments"][0]["capacity_rate"] = 0.25
+        payload["engineers"][1]["assignments"][0]["capacity_rate"] = 0.75
+        payload["tasks"][0]["role_requirements"][0]["required_hours"] = 300
         base = build_constructor_plan(ConstructorScenario(**payload))
         draft = RecommendationDraft(base)
         action = {
@@ -247,6 +341,15 @@ class ConstructorDomainTests(unittest.TestCase):
         self.assertEqual(evidence["to_team"], "Team-B")
         self.assertIn("role_hours_required", evidence["target_capacity"])
         self.assertIn("role_hours_available", evidence["target_capacity"])
+        self.assertTrue(evidence["ownership"]["valid"])
+        self.assertGreater(
+            evidence["workload"]["owner_hours"],
+            evidence["workload"]["external_hours"],
+        )
+        self.assertGreaterEqual(
+            evidence["workload"]["owner_engineer_count"],
+            evidence["workload"]["external_engineer_count"],
+        )
         self.assertNotIn("before_kpi", recommendation["effect"])
 
     def test_reciprocal_reassignments_are_one_atomic_swap(self) -> None:
@@ -476,7 +579,10 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(approval.status_code, 200, approval.text)
         self.assertEqual(approval.json()["plan"], applied.json()["plan"])
-        self.assertTrue(approval.json()["tasks"][0]["allocations"][0]["cross_team"])
+        self.assertTrue(any(
+            row["cross_team"]
+            for row in approval.json()["tasks"][0]["allocations"]
+        ))
 
     def test_apply_all_changes_only_draft_until_approve(self) -> None:
         plan_drafts.reset()

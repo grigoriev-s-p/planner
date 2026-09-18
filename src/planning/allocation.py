@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .models import FeasibilityResult
+from .ownership import TaskOwnership
 from .plan_models import EngineerTaskAllocation
 
 
@@ -23,6 +24,8 @@ def allocate_available_hours(
     feasibility: FeasibilityResult,
     *,
     max_total_hours: float = float("inf"),
+    prior_ownership: TaskOwnership | None = None,
+    enforce_owner_majority: bool = False,
 ) -> AllocationOutcome:
     """Prefer local engineers, then free hours and engineer_id within each role.
 
@@ -91,7 +94,101 @@ def allocate_available_hours(
             if allocated >= role_remaining - 1e-9:
                 break
         role_allocations[role] = allocated
-    return AllocationOutcome(
+    outcome = AllocationOutcome(
         allocated_role_hours=role_allocations,
         engineer_allocations=tuple(engineer_allocations),
+    )
+    if not enforce_owner_majority or task_team is None:
+        return outcome
+    return _limit_cross_team_to_owner(
+        outcome,
+        remaining_role_hours=remaining_role_hours,
+        task_team=task_team,
+        prior_ownership=prior_ownership,
+    )
+
+
+def _limit_cross_team_to_owner(
+    outcome: AllocationOutcome,
+    *,
+    remaining_role_hours: dict[str, float],
+    task_team: str,
+    prior_ownership: TaskOwnership | None,
+) -> AllocationOutcome:
+    """Keep external help residual and bounded by actual owner participation.
+
+    The greedy allocator still consumes every matching local bucket first. This
+    second, cheap pass only limits external rows so a task cannot finish with
+    an external-hours majority or more external than owner-team performers.
+    A temporary hours tie may continue into a later sprint; a final tie is
+    deliberately deferred so later owner capacity can perform the remainder.
+    """
+
+    previous_owner_hours = prior_ownership.owner_hours if prior_ownership else 0.0
+    previous_external_hours = (
+        prior_ownership.external_hours if prior_ownership else 0.0
+    )
+    owner_ids = set(prior_ownership.owner_engineer_ids if prior_ownership else ())
+    external_ids = set(
+        prior_ownership.external_engineer_ids if prior_ownership else ()
+    )
+    local_rows = [
+        row for row in outcome.engineer_allocations
+        if row.source_team_id == task_team and row.hours > 1e-9
+    ]
+    external_rows = [
+        row for row in outcome.engineer_allocations
+        if row.source_team_id != task_team and row.hours > 1e-9
+    ]
+    owner_ids.update(row.engineer_id for row in local_rows)
+    local_hours_this_sprint = sum(row.hours for row in local_rows)
+    owner_hours = previous_owner_hours + local_hours_this_sprint
+    external_hours = previous_external_hours
+    accepted_external: list[EngineerTaskAllocation] = []
+
+    # External-only sprints are not allowed. Headcount is checked on unique
+    # actual performers, never on all catalog members.
+    if local_hours_this_sprint > 1e-9:
+        for row in external_rows:
+            is_new = row.engineer_id not in external_ids
+            if is_new and len(external_ids) >= len(owner_ids):
+                continue
+            available_for_external = max(owner_hours - external_hours, 0.0)
+            hours = min(row.hours, available_for_external)
+            if hours <= 1e-9:
+                continue
+            accepted_external.append(
+                row if abs(hours - row.hours) <= 1e-9 else replace(row, hours=hours)
+            )
+            external_hours += hours
+            external_ids.add(row.engineer_id)
+
+    accepted = [*local_rows, *accepted_external]
+    role_allocations: dict[str, float] = {}
+    for row in accepted:
+        role_allocations[row.role] = role_allocations.get(row.role, 0.0) + row.hours
+    for role in remaining_role_hours:
+        role_allocations.setdefault(role, 0.0)
+
+    completes_task = all(
+        role_allocations.get(role, 0.0) >= max(float(hours), 0.0) - 1e-9
+        for role, hours in remaining_role_hours.items()
+    )
+    if (
+        completes_task
+        and accepted_external
+        and external_hours >= owner_hours - 1e-9
+    ):
+        # Avoid a completed 50/50 task. Removing the last external contribution
+        # leaves real residual work for a later owner-first sprint.
+        accepted.remove(accepted_external[-1])
+        role = accepted_external[-1].role
+        role_allocations[role] = max(
+            role_allocations.get(role, 0.0) - accepted_external[-1].hours,
+            0.0,
+        )
+
+    return AllocationOutcome(
+        allocated_role_hours=role_allocations,
+        engineer_allocations=tuple(accepted),
     )
