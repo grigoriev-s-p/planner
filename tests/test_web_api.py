@@ -26,7 +26,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         for page_id in (
-            "home", "planning", "current-plan", "tasks", "risks", "recalc", "star"
+            "home", "planning", "current-plan", "tasks", "task-detail", "risks", "recalc", "star"
         ):
             self.assertIn(f'id="page-{page_id}"', page.text)
         for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
@@ -201,12 +201,12 @@ class FrontendRefinementTests(unittest.TestCase):
         cls.app = (cls.frontend / "app.js").read_text(encoding="utf-8")
         cls.styles = (cls.frontend / "styles.css").read_text(encoding="utf-8")
 
-    def test_top_navigation_has_no_tasks_entry(self) -> None:
+    def test_top_navigation_includes_task_catalog(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
-        self.assertNotIn('data-page="tasks"', navigation)
         self.assertNotIn('data-page="constructor"', navigation)
-        for page in ("home", "planning", "current-plan", "risks", "recalc", "star"):
+        for page in ("home", "planning", "current-plan", "tasks", "risks", "recalc", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
+        self.assertIn('data-page="tasks">Задачи</button>', navigation)
         self.assertIn('data-page="planning">Планирование</button>', navigation)
         self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
 
@@ -258,13 +258,53 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("REASON_GROUPS", self.app)
         self.assertIn("Другая причина", self.app)
 
-    def test_task_detail_is_contextual_and_has_dynamic_hero_id(self) -> None:
+    def test_task_catalog_and_detail_are_contextual(self) -> None:
         self.assertIn('id="page-tasks"', self.html)
+        self.assertIn('id="page-task-detail"', self.html)
+        self.assertIn('id="tasksTableBody"', self.html)
         self.assertIn('id="taskHeroId"', self.html)
         self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
         self.assertIn("taskReturnPage", self.app)
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
-        self.assertNotIn('id="taskSearch"', self.html)
+        self.assertIn("show('task-detail')", self.app)
+
+    def test_task_catalog_sorts_every_required_column(self) -> None:
+        for key in (
+            "task_id", "title", "story_points", "rung", "assigned_team_id",
+            "initiative_id", "start_sprint", "status",
+        ):
+            self.assertIn(f'data-task-sort="{key}"', self.html)
+        self.assertIn("state.taskSortDirection === 'asc'", self.app)
+        self.assertIn("numericKeys", self.app)
+        self.assertIn("aria-sort", self.app)
+        self.assertIn("rungBadge(task)", self.app)
+        self.assertIn("taskStatusIndicator(task)", self.app)
+        self.assertIn("data-tooltip=", self.app)
+        self.assertIn(".task-status-indicator", self.styles)
+
+    def test_task_detail_uses_real_dependencies_and_cross_team_allocations(self) -> None:
+        detail = self.app.split("function renderTaskDetail()", 1)[1].split(
+            "function renderRisks()", 1
+        )[0]
+        self.assertIn("task.dependencies?.incoming", detail)
+        self.assertIn("task.dependencies?.outgoing", detail)
+        self.assertIn('data-open-employee', detail)
+        self.assertIn("item.cross_team", detail)
+        self.assertIn("Другая команда", detail)
+        self.assertIn("$('#taskTopActions').innerHTML", detail)
+        self.assertIn('id="taskTopActions"', self.html)
+        self.assertEqual(detail.count('data-archive-entity="task"'), 1)
+        self.assertNotIn("ОБЪЯСНЕНИЯ BACKEND", detail)
+        self.assertNotIn("task.reasons", detail)
+
+    def test_shareable_task_routes_serve_the_spa(self) -> None:
+        client = TestClient(app)
+        self.assertEqual(client.get("/tasks").status_code, 200)
+        response = client.get("/tasks/AI-302")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="page-task-detail"', response.text)
+        self.assertIn('href="/styles.css"', response.text)
+        self.assertIn('src="/app.js"', response.text)
 
     def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
         self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="shell">
@@ -15,6 +15,7 @@
         <button type="button" class="nav-link active" data-page="home">Главная</button>
         <button type="button" class="nav-link" data-page="planning">Планирование</button>
         <button type="button" class="nav-link" data-page="current-plan">Текущий план</button>
+        <button type="button" class="nav-link" data-page="tasks">Задачи</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
         <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
@@ -79,10 +80,32 @@
         <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
       </section>
 
-      <section class="page" id="page-tasks" aria-labelledby="tasksTitle">
-        <button class="task-back" type="button" data-task-back>← Назад</button>
-        <div class="page-intro task-detail-hero"><div><div class="eyebrow">ПОДРОБНАЯ ИНФОРМАЦИЯ</div><h1 id="tasksTitle">Карточка задачи</h1><p id="taskHeroDescription">Выбранная задача квартального плана.</p></div><div class="task-id-hero" id="taskHeroId" aria-label="ID задачи">—</div></div>
-        <div id="taskSummary" class="task-summary"></div><div id="taskTeamResource" class="panel"></div><div class="two-cols task-columns"><article class="panel" id="taskDescription"></article><article class="panel" id="taskPeople"></article></div><article class="panel" id="taskDependencies"></article><article class="panel" id="taskHours"></article><article class="panel reason-panel" id="taskReason" hidden></article>
+      <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
+        <div class="page-intro tasks-list-hero"><div><h1 id="tasksListTitle">Задачи</h1><p>Все задачи текущего набора: приоритет, команда, инициатива и положение в квартальном плане.</p></div><div class="page-intro-icon" aria-hidden="true">✓</div></div>
+        <article class="panel tasks-list-panel">
+          <div class="panel-heading"><div><h2>Список задач</h2><p class="hint">Нажмите на ID или строку, чтобы открыть карточку задачи.</p></div><span class="tag" id="tasksListCount">0</span></div>
+          <div id="tasksListState" aria-live="polite"></div>
+          <div class="table-scroll" id="tasksTableWrap"><table class="data-table tasks-table"><thead><tr>
+            <th><button class="sort-button" type="button" data-task-sort="task_id">ID <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="title">Название <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="story_points">SP <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="rung">Rung <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="assigned_team_id">Команда <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="initiative_id">Инициатива <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="start_sprint">Спринт <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="status">Статус <span aria-hidden="true"></span></button></th>
+          </tr></thead><tbody id="tasksTableBody"></tbody></table></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-task-detail" aria-labelledby="taskDetailTitle">
+        <div class="task-detail-toolbar"><button class="task-back" type="button" data-task-back>← Назад</button><div id="taskTopActions"></div></div>
+        <div class="page-intro task-detail-hero"><div class="task-hero-title"><h1 id="taskDetailTitle">Карточка задачи</h1></div><div class="task-hero-meta"><div class="task-id-hero" id="taskHeroId" aria-label="ID задачи">—</div><div class="task-hero-status" id="taskHeroStatus"></div></div></div>
+        <div id="taskDetailState" aria-live="polite"></div>
+        <div id="taskDetailContent">
+          <div class="task-overview-grid"><article class="panel task-facts" id="taskFacts"></article><article class="panel" id="taskDependencies"></article></div>
+          <article class="panel task-resource-panel" id="taskHours"></article>
+        </div>
       </section>
 
       <section class="page" id="page-risks" aria-labelledby="risksTitle"><div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Что произошло, почему и к чему это может привести — без дополнительных оценочных шкал.</p></div><div class="page-intro-icon">◇</div></div><div id="risksDevelopmentNotice"></div><div class="panel risk-filter"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button><button class="chip" data-risk-filter="Компетенции" type="button">Компетенции</button></div></div><div class="risk-layout"><article class="panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article><aside class="panel risk-detail" id="riskDetail" aria-live="polite"></aside></div></section>
@@ -112,8 +135,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="api.js"></script>
-  <script src="constructor.js"></script>
-  <script src="app.js"></script>
+  <script src="/api.js"></script>
+  <script src="/constructor.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

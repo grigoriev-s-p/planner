@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .constructor import (
@@ -404,6 +404,14 @@ def archive_team(team_id: str, request: ArchiveRequest) -> dict:
 
 if not FRONTEND_DIR.is_dir():
     raise RuntimeError(f"Frontend directory does not exist: {FRONTEND_DIR}")
+
+
+@app.get("/tasks", include_in_schema=False)
+@app.get("/tasks/{task_id}", include_in_schema=False)
+def task_frontend_route(task_id: str | None = None) -> FileResponse:
+    """Serve the SPA shell for shareable task catalog and detail URLs."""
+
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 # Registered last so /api/* routes always win over the SPA/static fallback.
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

@@ -6,6 +6,7 @@ const state = {
   riskFilter: 'Все', skillTeam: 'all', skillRole: 'all', skillTech: 'all',
   competency: null, criticalOnly: false,
   taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
+  taskSortKey: 'task_id', taskSortDirection: 'asc',
 };
 
 const data = {
@@ -40,10 +41,44 @@ const sprintLabel = (task) => {
 const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Выполнен'}[sprintBy(sprint)?.status] || 'Запланирован');
 const statusClass = (status) => ({DONE: 'done', PLANNED: 'planned', MOVED: 'moved', UNPLANNABLE: 'cancelled'}[status] || 'planned');
 const badge = (task) => `<span class="status ${statusClass(task.status)}">${escapeHtml(task.status_label)}</span>`;
+const taskDisplayStatus = (task) => {
+  const sourceStatus = String(task?.source_status || '').replaceAll(' ', '').toUpperCase();
+  if (sourceStatus === 'CANCELLED' || sourceStatus === 'CANCELED') return 'Отменена';
+  if (task?.status === 'PLANNED' && sourceStatus === 'INPROGRESS') return 'В процессе';
+  return ({PLANNED: 'Запланирована', DONE: 'Выполнена', COMPLETED: 'Выполнена', IN_PROGRESS: 'В процессе', CANCELLED: 'Отменена', MOVED: 'Перенесена', UNPLANNABLE: 'Невыполнима'}[task?.status] || task?.status_label || 'Статус не указан');
+};
+const taskStatusClass = (task) => {
+  const label = taskDisplayStatus(task);
+  return ({'Запланирована': 'planned', 'Выполнена': 'done', 'В процессе': 'work', 'Отменена': 'cancelled', 'Перенесена': 'moved', 'Невыполнима': 'cancelled'}[label] || 'planned');
+};
+const taskStatusTooltip = (task) => ({
+  'Запланирована': 'Задача выполнима и включена в квартальный план.',
+  'Выполнена': 'Задача выполнена.',
+  'В процессе': 'Задача находится в процессе выполнения.',
+  'Отменена': 'Задача отменена.',
+  'Перенесена': 'Задача перенесена за пределы текущего плана.',
+  'Невыполнима': 'Задача невыполнима при текущих ограничениях.',
+}[taskDisplayStatus(task)] || `Статус задачи: ${taskDisplayStatus(task)}.`);
+const taskStatusIndicator = (task) => `<span class="task-status-indicator ${taskStatusClass(task)}" tabindex="0" role="img" aria-label="${attr(taskStatusTooltip(task))}" data-tooltip="${attr(taskStatusTooltip(task))}"></span>`;
 const riskClass = (type) => ({'Сроки': 'deadline', 'Зависимости': 'dependency', 'Ресурсы': 'resource', 'Компетенции': 'competence'}[type] || 'resource');
 const teamEngineers = (teamId) => data.engineers.filter((engineer) => engineer.team_ids.includes(teamId));
 const teamSprintResource = (teamId, sprint) => teamBy(teamId).sp_by_sprint?.[String(sprint)] || {capacity: 0, used: 0, remaining: 0};
 const tButton = (task, label = task.task_id) => `<button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(label)}</button>`;
+const rungValues = () => [...new Set(data.tasks.filter(inQuarter).map((task) => Number(task.rung)).filter(Number.isFinite))].sort((left, right) => left - right);
+const rungLevel = (task) => {
+  const values = rungValues();
+  if (values.length < 2) return 'medium';
+  const value = Number(task.rung);
+  const index = values.indexOf(value);
+  const resolvedIndex = index >= 0 ? index : values.filter((item) => item < value).length;
+  if (values.length === 2) return resolvedIndex >= 1 ? 'high' : 'low';
+  const third = Math.floor(values.length / 3);
+  if (resolvedIndex >= values.length - third) return 'high';
+  return resolvedIndex < third ? 'low' : 'medium';
+};
+const rungBadge = (task) => Number.isFinite(Number(task.rung))
+  ? `<span class="rung-badge rung-${rungLevel(task)}">R${escapeHtml(task.rung)}</span>`
+  : '<span class="muted">—</span>';
 const REASON_GROUPS = Object.freeze({
   MISSING_SPECIALIST: 'Нет специалиста требуемой роли',
   NO_AVAILABLE_ROLE_SPECIALIST: 'Нет специалиста требуемой роли',
@@ -208,7 +243,7 @@ async function submitArchive() {
       refreshWarning = 'Обновите страницу, чтобы перечитать Bus Factor.';
     }
     closeArchiveModal();
-    if (entityType === 'task') renderTasks();
+    if (entityType === 'task') { renderTasks(); if (state.page === 'task-detail') renderTaskDetail(); }
     if (entityType === 'engineer') openEmployee(entityId);
     if (entityType === 'team') renderStarTeams();
     showToast([result.message, result.warning, refreshWarning].filter(Boolean).join(' '));
@@ -227,12 +262,28 @@ async function submitArchive() {
   }
 }
 
-function show(page) {
+function pageLocation(page) {
+  if (page === 'task-detail' && state.taskId) return `/tasks/${encodeURIComponent(state.taskId)}`;
+  if (page === 'tasks') return '/tasks';
+  return page === 'home' ? '/' : `/#${page}`;
+}
+
+function routeFromLocation() {
+  const match = window.location.pathname.match(/^\/tasks\/([^/]+)\/?$/);
+  if (match) return {page: 'task-detail', taskId: decodeURIComponent(match[1])};
+  if (window.location.pathname === '/tasks' || window.location.pathname === '/tasks/') return {page: 'tasks', taskId: null};
+  const hashPage = window.location.hash.replace(/^#/, '');
+  const knownPages = new Set(['home', 'planning', 'current-plan', 'tasks', 'risks', 'recalc', 'star']);
+  return {page: knownPages.has(hashPage) ? hashPage : 'home', taskId: null};
+}
+
+function show(page, historyMode = 'push') {
   state.page = page;
   $$('.page').forEach((element) => element.classList.toggle('active', element.id === `page-${page}`));
-  $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
+  $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === (page === 'task-detail' ? 'tasks' : page)));
   closeEmployee();
   renderPage(page);
+  if (historyMode) window.history[historyMode === 'replace' ? 'replaceState' : 'pushState']({page, taskId: state.taskId}, '', pageLocation(page));
   window.scrollTo({top: 0, behavior: 'instant'});
 }
 
@@ -241,7 +292,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
+  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
 }
 
 function renderUnavailable() {
@@ -249,14 +300,18 @@ function renderUnavailable() {
   if ($('#homeSprints')) $('#homeSprints').innerHTML = empty(message);
   if ($('#homeTasks')) $('#homeTasks').innerHTML = empty(message);
   if ($('#homeRisks')) $('#homeRisks').innerHTML = empty(message);
+  if ($('#tasksListState')) $('#tasksListState').innerHTML = empty(message);
+  if ($('#tasksTableWrap')) $('#tasksTableWrap').hidden = true;
+  if ($('#taskDetailState')) $('#taskDetailState').innerHTML = empty(message);
+  if ($('#taskDetailContent')) $('#taskDetailContent').hidden = true;
 }
 
 function gotoTask(taskId) {
   if (!taskBy(taskId)) return;
-  if (state.page !== 'tasks') state.taskReturnPage = state.page;
+  if (state.page !== 'task-detail') state.taskReturnPage = state.page;
   state.taskId = taskId;
   state.taskSprint = null;
-  show('tasks');
+  show('task-detail');
 }
 
 function gotoTeam(teamId) {
@@ -356,18 +411,6 @@ function renderKpis() {
 }
 
 function renderPlanning() {
-  const rungValues = [...new Set(data.tasks.filter(inQuarter).map((task) => Number(task.rung)).filter(Number.isFinite))].sort((left, right) => left - right);
-  const rungLevel = (task) => {
-    if (rungValues.length < 2) return 'medium';
-    const index = rungValues.indexOf(Number(task.rung));
-    if (rungValues.length === 2) return index === 1 ? 'high' : 'low';
-    const third = Math.floor(rungValues.length / 3);
-    if (index >= rungValues.length - third) return 'high';
-    return index < third ? 'low' : 'medium';
-  };
-  const rungBadge = (task) => Number.isFinite(Number(task.rung))
-    ? `<span class="rung-badge rung-${rungLevel(task)}">R${escapeHtml(task.rung)}</span>`
-    : '';
   $('#sprintBoard').innerHTML = Array.from({length: 6}, (_, index) => {
     const sprint = index + 1;
     const tasks = data.tasks
@@ -386,50 +429,84 @@ function renderPlanning() {
 }
 
 function renderTasks() {
-  const task = taskBy(state.taskId) || data.tasks[0];
-  if (!task) {
-    $('#taskSummary').innerHTML = empty('Задач нет.');
+  const body = $('#tasksTableBody');
+  const wrap = $('#tasksTableWrap');
+  const stateBox = $('#tasksListState');
+  $('#tasksListCount').textContent = `${data.tasks.length}`;
+  stateBox.innerHTML = '';
+  wrap.hidden = false;
+  const numericKeys = new Set(['story_points', 'rung', 'start_sprint']);
+  const sorted = [...data.tasks].sort((left, right) => {
+    const leftValue = state.taskSortKey === 'status' ? taskDisplayStatus(left) : left[state.taskSortKey];
+    const rightValue = state.taskSortKey === 'status' ? taskDisplayStatus(right) : right[state.taskSortKey];
+    const leftMissing = leftValue == null || leftValue === '';
+    const rightMissing = rightValue == null || rightValue === '';
+    if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : (leftMissing ? 1 : -1);
+    const comparison = numericKeys.has(state.taskSortKey)
+      ? Number(leftValue) - Number(rightValue)
+      : String(leftValue).localeCompare(String(rightValue), 'ru', {numeric: true, sensitivity: 'base'});
+    return state.taskSortDirection === 'asc' ? comparison : -comparison;
+  });
+  $$('[data-task-sort]').forEach((button) => {
+    const active = button.dataset.taskSort === state.taskSortKey;
+    button.classList.toggle('active', active);
+    button.parentElement.setAttribute('aria-sort', active ? (state.taskSortDirection === 'asc' ? 'ascending' : 'descending') : 'none');
+    $('span', button).textContent = active ? (state.taskSortDirection === 'asc' ? '↑' : '↓') : '↕';
+  });
+  if (!sorted.length) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty-state">Задач пока нет.</div></td></tr>';
     return;
   }
-  state.taskId = task.task_id;
+  body.innerHTML = sorted.map((task) => `<tr data-open-task="${attr(task.task_id)}" data-task-row tabindex="0"><td>${tButton(task)}</td><td>${escapeHtml(task.title)}</td><td>${number(task.story_points)}</td><td>${rungBadge(task)}</td><td>${escapeHtml(task.assigned_team_id || '—')}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${task.start_sprint ? `Sprint ${number(task.start_sprint)}` : '—'}</td><td class="task-status-cell">${taskStatusIndicator(task)}</td></tr>`).join('');
+}
+
+function renderTaskDetail() {
+  const task = taskBy(state.taskId);
+  const content = $('#taskDetailContent');
+  const stateBox = $('#taskDetailState');
+  if (!task) {
+    $('#taskDetailTitle').textContent = 'Задача не найдена';
+    $('#taskHeroId').textContent = state.taskId || '—';
+    $('#taskHeroStatus').innerHTML = '';
+    $('#taskTopActions').innerHTML = '';
+    stateBox.innerHTML = empty(state.taskId ? `Задача ${state.taskId} отсутствует в текущем наборе.` : 'Задача не выбрана.');
+    content.hidden = true;
+    return;
+  }
+  content.hidden = false;
+  stateBox.innerHTML = '';
+  $('#taskDetailTitle').textContent = task.title || 'Название не указано';
   $('#taskHeroId').textContent = task.task_id;
-  $('#taskHeroDescription').textContent = task.title;
+  $('#taskHeroStatus').innerHTML = `<span class="hero-status-dot ${taskStatusClass(task)}" aria-hidden="true"></span>${escapeHtml(taskDisplayStatus(task))}`;
+  $('#taskTopActions').innerHTML = task.archived ? archiveState(task) : `<button class="btn btn-danger" type="button" data-archive-entity="task" data-archive-id="${attr(task.task_id)}" data-current-plan-reference="${inQuarter(task)}">Удалить</button>`;
   const sprints = taskSprints(task);
   const selectedSprint = state.taskSprint && sprints.includes(state.taskSprint) ? state.taskSprint : (sprints[0] || null);
   state.taskSprint = selectedSprint;
-  const team = teamBy(task.assigned_team_id);
-  const resource = selectedSprint ? teamSprintResource(team.team_id, selectedSprint) : null;
-  const shownSp = selectedSprint ? portion(task, selectedSprint) : null;
-  const summary = [
-    ['Спринт', sprintLabel(task)], ['В квартальном плане', inQuarter(task) ? 'Да' : 'Нет'],
-    ['Story Points', `${number(task.story_points)} SP`], ['Статус', task.status_label],
-    ['Приоритет', task.priority_label], ['Инициатива', task.initiative_id || '—'],
-  ];
-  $('#taskSummary').innerHTML = summary.map(([name, value]) => `<div class="summary-item"><span>${escapeHtml(name)}</span><b>${escapeHtml(value)}</b></div>`).join('');
-  const teamSwitch = task.team_reassigned ? `<p class="hint">Исходная команда: <b>${escapeHtml(task.original_team_id)}</b>. Назначенная команда: <b>${escapeHtml(task.assigned_team_id)}</b>.</p>` : '';
-  $('#taskTeamResource').innerHTML = `<div class="panel-heading"><div><div class="eyebrow">КОМАНДНЫЙ РЕСУРС · STORY POINTS</div><h2>${escapeHtml(team.name)} · ${selectedSprint ? `Sprint ${selectedSprint}` : 'вне квартального плана'}</h2></div>${task.multi_sprint && selectedSprint ? `<label class="filters">Выбранный спринт <select id="taskSprintSelect">${sprints.map((sprint) => `<option value="${sprint}" ${sprint === selectedSprint ? 'selected' : ''}>Sprint ${sprint}</option>`).join('')}</select></label>` : ''}</div>${resource ? `<div class="metrics"><div class="metric"><span>Доступно</span><b>${number(resource.capacity)} SP</b></div><div class="metric"><span>Всего использовано</span><b>${number(resource.used)} SP</b></div><div class="metric"><span>Доля задачи</span><b>${number(shownSp)} SP</b></div></div>${meter(resource.used, resource.capacity)}` : empty('Ресурс спринта не указан для этой задачи.')}${teamSwitch}`;
-  const riskMatches = data.risks.filter((risk) => risk.task_id === task.task_id);
-  $('#taskDescription').innerHTML = `<div class="eyebrow">ОПИСАНИЕ</div><h2>${escapeHtml(task.title)}</h2><p style="margin-top:15px">${escapeHtml(task.description || 'Описание отсутствует.')}</p><div class="detail-grid"><div><span>Задача</span><b>${escapeHtml(task.task_id)}</b></div><div><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div><div><span>SP</span><b>${number(task.story_points)}</b></div><div><span>Rung</span><b>${number(task.rung)}</b></div><div><span>Статус</span><b>${escapeHtml(task.status_label)}</b></div><div><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div></div>${riskMatches.length ? `<h3 class="needs-title">Связанные риски</h3>${riskMatches.map((risk) => `<p>${escapeHtml(risk.title)}: ${escapeHtml(risk.cause)}</p>`).join('')}` : ''}${archiveState(task)}${task.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="task" data-archive-id="${attr(task.task_id)}" data-current-plan-reference="${inQuarter(task)}">Удалить</button></div>`}`;
-  const allocations = task.allocations.filter((item) => selectedSprint == null || item.sprint === selectedSprint);
-  const people = [...new Set(allocations.map((item) => item.engineer_id))];
-  $('#taskPeople').innerHTML = `<div class="eyebrow">КОМАНДА И СПЕЦИАЛИСТЫ</div><h2>Исполнители</h2><button type="button" class="profile-link" data-open-team="${attr(task.assigned_team_id)}">Команда: ${escapeHtml(task.assigned_team_id)} ↗</button>${people.length ? people.map((engineerId) => { const engineer = engineerBy(engineerId); const engineerAllocations = allocations.filter((item) => item.engineer_id === engineerId); const external = engineerAllocations.some((item) => item.cross_team); const hours = engineerAllocations.reduce((sum, item) => sum + Number(item.allocated_hours), 0); return `<button type="button" class="person-link" data-open-employee="${attr(engineerId)}"><b>${escapeHtml(engineerId)}${external ? ` · привлечён из ${escapeHtml(engineerAllocations[0].source_team_id)}` : ''}</b><span>${escapeHtml(engineer?.roles?.join(', ') || engineerAllocations[0].role)} · ${number(hours)} ч ↗</span></button>`; }).join('') : empty('Исполнители не назначены.')}`;
-  const incoming = task.dependencies.incoming || [];
-  const outgoing = task.dependencies.outgoing || [];
+  const allocations = (task.allocations || []).filter((item) => selectedSprint == null || item.sprint === selectedSprint);
+  const teamValue = task.assigned_team_id
+    ? `<button type="button" class="fact-link" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)} ↗</button>`
+    : '<b>—</b>';
+  $('#taskFacts').innerHTML = `<div class="task-fact"><span>Команда</span>${teamValue}</div><div class="task-fact"><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div><div class="task-fact"><span>Rung</span>${rungBadge(task)}</div><div class="task-fact"><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div>${task.team_reassigned ? `<p class="task-team-note">Исходная команда: <b>${escapeHtml(task.original_team_id || '—')}</b></p>` : ''}`;
+  const incoming = task.dependencies?.incoming || [];
+  const outgoing = task.dependencies?.outgoing || [];
+  const dependencyLink = (taskId, title) => {
+    const linkedTask = taskBy(taskId);
+    const label = `${taskId || 'Неизвестная задача'}${title ? ` · ${title}` : ''}`;
+    return linkedTask ? tButton(linkedTask, label) : `<b>${escapeHtml(label)}</b>`;
+  };
   const incomingRows = incoming.map((item) => {
-    const title = item.blocking_task_title ? ` · ${escapeHtml(item.blocking_task_title)}` : '';
     const cssClass = item.state === 'HISTORICAL_DONE' ? 'dependency-satisfied' : (item.state === 'MISSING' ? 'dependency-missing' : '');
     const mark = item.state === 'HISTORICAL_DONE' ? '✓ ' : '';
-    return `<p class="${cssClass}"><b>${mark}${escapeHtml(item.blocking_task_id)}${title}</b><br><span>${escapeHtml(item.status_message)} · ${escapeHtml(item.dependency_type)}</span></p>`;
+    return `<p class="${cssClass}">${mark}${dependencyLink(item.blocking_task_id, item.blocking_task_title)}<small>${escapeHtml(item.status_message)} · ${escapeHtml(item.dependency_type)}</small></p>`;
   });
-  $('#taskDependencies').innerHTML = `<div class="eyebrow">ЗАВИСИМОСТИ</div><h2>Положение в квартальном плане</h2><p class="hint">Показывается сохранённое backend-направление blocking_task_id → blocked_task_id вместе с исходным dependency_type.</p><div class="dependency-grid"><div class="dependency-box"><strong>Блокирующие задачи</strong>${incomingRows.length ? incomingRows.join('') : '<p>Нет</p>'}</div><div class="dependency-box"><strong>Зависимые задачи</strong>${outgoing.length ? outgoing.map((item) => `<p>${escapeHtml(item.blocked_task_id)} · ${escapeHtml(item.dependency_type)}</p>`).join('') : '<p>Нет</p>'}</div></div>`;
-  const hours = selectedSprint ? sprintHours(task, selectedSprint) : task.role_requirements;
-  const allocationRows = allocations.map((item) => `<tr><td><button class="table-button" type="button" data-open-employee="${attr(item.engineer_id)}">${escapeHtml(item.engineer_id)} ↗</button></td><td>${escapeHtml(item.role)}</td><td>${escapeHtml(item.source_team_id)}</td><td>${number(item.allocated_hours)} ч</td><td>${item.cross_team ? 'Да' : 'Нет'}</td><td>${item.capacity_used_share == null ? '—' : `${number(Number(item.capacity_used_share) * 100)}%`}</td></tr>`);
-  const roleRows = Object.entries(hours || {}).map(([role, required]) => `<tr><td>${escapeHtml(role)}</td><td>${number(required)} ч</td></tr>`);
-  $('#taskHours').innerHTML = `<div class="eyebrow">РАБОЧЕЕ ВРЕМЯ · ${selectedSprint ? `SPRINT ${selectedSprint}` : 'ВСЯ ЗАДАЧА'}</div><h2>Распределение ресурсов</h2><p class="hint">Часы и доля capacity получены от planner API; SP не переводятся в часы.</p>${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено', 'Cross-team', 'Доля bucket'], allocationRows) : empty('Распределений инженеров нет.')}<h3 class="needs-title">Трудозатраты по ролям</h3>${roleRows.length ? table(['Роль', 'Часы'], roleRows) : empty('Часы по ролям не предоставлены.')}`;
-  const reasonBox = $('#taskReason');
-  const structured = [...task.reasons.map((item) => ({kind: 'Причина', ...item})), ...task.risks.map((item) => ({kind: 'Риск', title: item.code, ...item})), ...task.recommendations.map((item) => ({kind: 'Рекомендация', severity: item.available ? 'INFO' : 'WARNING', ...item}))];
-  reasonBox.hidden = !structured.length;
-  if (structured.length) reasonBox.innerHTML = `<div class="eyebrow">ОБЪЯСНЕНИЯ BACKEND</div><h2>${escapeHtml(task.summary)}</h2><div class="stack">${structured.map((item) => `<div class="reason-card"><b>${escapeHtml(item.kind)} · ${escapeHtml(item.code)} · ${escapeHtml(item.title || '')}</b><p>${escapeHtml(item.message || '')}</p></div>`).join('')}</div>`;
+  const outgoingRows = outgoing.map((item) => `<p>${dependencyLink(item.blocked_task_id, taskBy(item.blocked_task_id)?.title)}<small>${escapeHtml(item.dependency_type)}</small></p>`);
+  $('#taskDependencies').innerHTML = `<h2>Зависимости</h2><p class="hint">Положение в квартальном плане</p><div class="dependency-grid"><div class="dependency-box"><strong>Блокирующие задачи</strong>${incomingRows.length ? incomingRows.join('') : '<p>Нет</p>'}</div><div class="dependency-box"><strong>Зависимые задачи</strong>${outgoingRows.length ? outgoingRows.join('') : '<p>Нет</p>'}</div></div>`;
+  const allocationRows = allocations.map((item) => {
+    const crossTeam = Boolean(item.cross_team) || Boolean(item.source_team_id && task.assigned_team_id && item.source_team_id !== task.assigned_team_id);
+    return `<tr class="${crossTeam ? 'cross-team-row' : ''}"><td><button class="table-button" type="button" data-open-employee="${attr(item.engineer_id)}">${escapeHtml(item.engineer_id)} ↗</button></td><td>${escapeHtml(item.role || '—')}</td><td>${escapeHtml(item.source_team_id || '—')}${crossTeam ? '<span class="cross-team-badge" title="Сотрудник привлечён из другой команды">⚠ Другая команда</span>' : ''}</td><td>${number(item.allocated_hours)} ч</td></tr>`;
+  });
+  const sprintPicker = task.multi_sprint && selectedSprint ? `<label class="task-sprint-picker">Показать спринт<select id="taskSprintSelect">${sprints.map((sprint) => `<option value="${sprint}" ${sprint === selectedSprint ? 'selected' : ''}>Sprint ${sprint}</option>`).join('')}</select></label>` : '';
+  $('#taskHours').innerHTML = `<div class="panel-heading"><div><h2>Распределение ресурсов</h2><p class="hint">Фактические назначения planner-а${selectedSprint ? ` для Sprint ${selectedSprint}` : ''}.</p></div>${sprintPicker}</div>${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено'], allocationRows) : empty('Распределения ресурсов отсутствуют.')}`;
 }
 
 function renderRisks() {
@@ -597,8 +674,16 @@ function bindEvents() {
     const archive = event.target.closest('[data-archive-entity]');
     if (archive) { openArchiveModal(archive.dataset.archiveEntity, archive.dataset.archiveId, archive.dataset.currentPlanReference === 'true'); return; }
     if (event.target.closest('[data-close-drawer]')) { closeEmployee(); return; }
-    if (event.target.closest('[data-task-back]')) { show(state.taskReturnPage || 'current-plan'); return; }
+    if (event.target.closest('[data-task-back]')) { show(state.taskReturnPage || 'tasks'); return; }
     const nav = event.target.closest('button[data-page]'); if (nav) { show(nav.dataset.page); return; }
+    const taskSort = event.target.closest('[data-task-sort]');
+    if (taskSort) {
+      const key = taskSort.dataset.taskSort;
+      if (state.taskSortKey === key) state.taskSortDirection = state.taskSortDirection === 'asc' ? 'desc' : 'asc';
+      else { state.taskSortKey = key; state.taskSortDirection = 'asc'; }
+      renderTasks();
+      return;
+    }
     const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('current-plan'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
     const planTask = event.target.closest('[data-plan-task]'); if (planTask) { gotoTask(planTask.dataset.planTask); return; }
     const task = event.target.closest('[data-open-task]'); if (task) { gotoTask(task.dataset.openTask); return; }
@@ -611,8 +696,18 @@ function bindEvents() {
     const backToTeam = event.target.closest('[data-employee-team]'); if (backToTeam) { closeEmployee(); gotoTeam(backToTeam.dataset.employeeTeam); return; }
     const starTab = event.target.closest('[data-star-tab]'); if (starTab) { state.starTab = starTab.dataset.starTab; renderStar(); return; }
   });
-  document.addEventListener('change', (event) => { if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTasks(); } });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeArchiveModal(); closeEmployee(); } });
+  document.addEventListener('change', (event) => { if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); } });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { closeArchiveModal(); closeEmployee(); }
+    const taskRow = event.target.closest?.('[data-task-row]');
+    if (taskRow && event.target === taskRow && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); gotoTask(taskRow.dataset.openTask); }
+  });
+  window.addEventListener('popstate', () => {
+    const route = routeFromLocation();
+    state.taskId = route.taskId || state.taskId;
+    state.taskSprint = null;
+    show(route.page, false);
+  });
 }
 
 function hydrate(payload) {
@@ -629,7 +724,7 @@ function hydrate(payload) {
   data.ready = true;
   state.loading = false;
   state.error = null;
-  state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
+  if (!state.taskId) state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
   state.teamId = data.starMap.teams?.[0]?.team_id || data.teams[0]?.team_id || null;
   state.competency = null;
   state.riskId = data.risks[0]?.risk_id || null;
@@ -637,7 +732,9 @@ function hydrate(payload) {
 
 async function initialize() {
   bindEvents();
-  show('home');
+  const initialRoute = routeFromLocation();
+  state.taskId = initialRoute.taskId;
+  show(initialRoute.page, 'replace');
   try {
     const [dashboard, constructorCatalog, archiveReasons] = await Promise.all([
       window.postcodeApi.getDashboard(),
