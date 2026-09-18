@@ -15,17 +15,24 @@ from fastapi.staticfiles import StaticFiles
 from .constructor import (
     ConstructorDatasetUploadError,
     ConstructorScenario,
+    PreparedConstructorUpload,
     ScenarioValidationError,
     build_constructor_catalog,
     build_constructor_plan,
-    build_constructor_plan_from_workbook,
+    build_constructor_plan_from_prepared,
+    prepare_constructor_workbook,
 )
+<<<<<<< Updated upstream
+from .service import PlanningAPIService, ServiceDataError, get_planning_service
+=======
+from .data_preflight import structural_preflight
 from .service import (
     PlanningAPIService,
     ServiceDataError,
     build_bus_factor_payload,
     get_planning_service,
 )
+>>>>>>> Stashed changes
 from .catalog import (
     ARCHIVE_REASON_LABELS,
     ArchiveConflictError,
@@ -33,7 +40,11 @@ from .catalog import (
     CatalogNotFoundError,
     get_catalog_repository,
 )
+<<<<<<< Updated upstream
+=======
 from .recommendations import RecommendationDraft
+from src.planning.task_states import is_historical_done
+>>>>>>> Stashed changes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -51,98 +62,39 @@ class DraftApprovalRequest(BaseModel):
     draft_id: str
 
 
-class RecommendationRequest(BaseModel):
-    recommendation_id: str
-
-
-class AcceptedChangeRequest(BaseModel):
-    change_id: str
-
-
-class RecommendationRefreshRequest(BaseModel):
-    revision: int
-
-
 class PlanDraftStore:
     """Keep one reviewable plan draft and the last approved plan in memory."""
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._drafts: dict[str, RecommendationDraft] = {}
+        self._drafts: dict[str, dict] = {}
         self._approved: dict | None = None
 
     def create(self, payload: dict) -> dict:
         draft_id = uuid4().hex
-        draft = RecommendationDraft(payload)
+        draft = deepcopy(payload)
+        draft["draft"] = {
+            **draft.get("draft", {}),
+            "id": draft_id,
+            "storage": "server_memory",
+            "server_persisted": True,
+            "approved": False,
+        }
         with self._lock:
-            self._drafts = {draft_id: draft}
-        return draft.snapshot(draft_id)
-
-    def snapshot(self, draft_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            return draft.snapshot(draft_id)
-
-    def apply(self, draft_id: str, recommendation_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.apply(recommendation_id)
-            return draft.snapshot(draft_id)
-
-    def reject(self, draft_id: str, recommendation_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.reject(recommendation_id)
-            return draft.snapshot(draft_id)
-
-    def undo(self, draft_id: str, change_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.undo(change_id)
-            return draft.snapshot(draft_id)
-
-    def reset_to_base(self, draft_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.reset()
-            return draft.snapshot(draft_id)
-
-    def apply_all(self, draft_id: str) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.apply_all()
-            return draft.snapshot(draft_id)
-
-    def refresh_recommendations(self, draft_id: str, revision: int) -> dict:
-        with self._lock:
-            draft = self._drafts.get(draft_id)
-            if draft is None:
-                raise KeyError(draft_id)
-            draft.refresh_optimization(expected_revision=revision)
-            return draft.snapshot(draft_id)
+            self._drafts = {draft_id: deepcopy(draft)}
+        return draft
 
     def approve(self, draft_id: str) -> dict:
         with self._lock:
             draft = self._drafts.get(draft_id)
             if draft is None:
                 raise KeyError(draft_id)
-            approved = draft.snapshot(draft_id)
+            approved = deepcopy(draft)
             approved["draft"] = {
                 **approved.get("draft", {}),
                 "approved": True,
             }
+            approved = _current_plan_without_historical_done(approved)
             self._approved = approved
             return deepcopy(approved)
 
@@ -157,6 +109,91 @@ class PlanDraftStore:
 
 
 plan_drafts = PlanDraftStore()
+
+
+class PreparedUploadStore:
+    """Keep the already parsed snapshot while the user reviews warnings."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._uploads: dict[str, PreparedConstructorUpload] = {}
+
+    def create(self, upload: PreparedConstructorUpload) -> str:
+        upload_id = uuid4().hex
+        with self._lock:
+            self._uploads = {upload_id: upload}
+        return upload_id
+
+    def take(self, upload_id: str) -> PreparedConstructorUpload:
+        with self._lock:
+            upload = self._uploads.pop(upload_id, None)
+        if upload is None:
+            raise KeyError(upload_id)
+        return upload
+
+    def reset(self) -> None:
+        with self._lock:
+            self._uploads = {}
+
+
+prepared_uploads = PreparedUploadStore()
+
+
+def _current_plan_without_historical_done(payload: dict) -> dict:
+    """Keep historical completions in planning input, not operational DTOs."""
+
+    current = deepcopy(payload)
+    source_tasks = current.get("tasks", [])
+    done_ids = {
+        str(task.get("task_id"))
+        for task in source_tasks
+        if task.get("task_id") and is_historical_done(task)
+    }
+    if not done_ids:
+        return current
+
+    def active_rows(rows: list[dict]) -> list[dict]:
+        return [
+            row for row in rows
+            if row.get("task_id") not in done_ids and not is_historical_done(row)
+        ]
+
+    current["tasks"] = active_rows(source_tasks)
+    current["risks"] = [
+        row for row in current.get("risks", [])
+        if row.get("task_id") not in done_ids
+    ]
+    for collection in ("initiatives",):
+        for initiative in current.get(collection, []):
+            if isinstance(initiative.get("task_ids"), list):
+                initiative["task_ids"] = [
+                    task_id for task_id in initiative["task_ids"]
+                    if task_id not in done_ids
+                ]
+
+    for collection in ("teams", "engineers"):
+        for entity in current.get(collection, []):
+            if isinstance(entity.get("allocations"), list):
+                entity["allocations"] = active_rows(entity["allocations"])
+
+    plan = current.get("plan")
+    if isinstance(plan, dict):
+        plan["tasks"] = active_rows(plan.get("tasks", []))
+        plan["allocations"] = active_rows(plan.get("allocations", []))
+        for sprint in plan.get("sprints", []):
+            sprint["tasks"] = active_rows(sprint.get("tasks", []))
+        for initiative in plan.get("initiatives", []):
+            if isinstance(initiative.get("task_ids"), list):
+                initiative["task_ids"] = [
+                    task_id for task_id in initiative["task_ids"]
+                    if task_id not in done_ids
+                ]
+        if isinstance(plan.get("summary"), dict):
+            plan["summary"]["total_tasks"] = len(current["tasks"])
+
+    if isinstance(current.get("summary"), dict):
+        current["summary"]["total_tasks"] = len(current["tasks"])
+    return current
 
 
 def _service():
@@ -178,17 +215,14 @@ def _with_lifecycle(payload: dict, entity_type: str, entity_id: str) -> dict:
 
 
 def _current_dashboard() -> dict:
-    return plan_drafts.approved() or deepcopy(_service().dashboard)
+    return _current_plan_without_historical_done(
+        plan_drafts.approved() or deepcopy(_service().dashboard)
+    )
 
 
 def _dashboard_with_lifecycle() -> dict:
     payload = _current_dashboard()
     repository = get_catalog_repository()
-    # Current Bus Factor follows the active catalog even when an approved plan
-    # remains historically unchanged after an archive action. This calls only
-    # the existing analytics service and never launches the quarter planner.
-    payload["star_map"] = build_bus_factor_payload(repository.active_planning_tables())
-    payload.setdefault("features", {})["bus_factor"] = "AVAILABLE"
     for collection, entity_type, id_field in (
         ("tasks", "task", "task_id"),
         ("teams", "team", "team_id"),
@@ -314,7 +348,7 @@ def engineer(engineer_id: str) -> dict:
 
 @app.get("/api/star-map")
 def star_map() -> dict:
-    return build_bus_factor_payload(get_catalog_repository().active_planning_tables())
+    return _current_dashboard()["star_map"]
 
 
 @app.get("/api/plan-constructor/catalog")
@@ -332,22 +366,87 @@ def plan_constructor_plan_upload(
     filename: str,
     content: bytes = Body(media_type="application/octet-stream"),
 ) -> dict:
-    """Build a complete six-sprint plan directly from an uploaded workbook."""
+    """Audit an Excel upload before any catalog merge or planner execution."""
 
     try:
-        return plan_drafts.create(
-            build_constructor_plan_from_workbook(
-                filename, content, get_catalog_repository()
+        prepared = prepare_constructor_workbook(
+            filename, content, get_catalog_repository()
+        )
+    except ConstructorDatasetUploadError as error:
+        if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Не удалось использовать загруженный датасет.",
+                    "errors": [str(error)],
+                },
+            ) from error
+        return {
+            "data_preflight": {
+                "status": "blocked",
+                "upload_id": None,
+                "file": {"name": Path(filename).name, "size_bytes": len(content)},
+                "audit": structural_preflight(
+                    "Проверьте, что файл не повреждён и содержит все обязательные таблицы."
+                ),
+            }
+        }
+
+    preflight = {
+        "status": "blocked" if prepared.audit["has_critical_errors"] else "review_required",
+        "upload_id": None,
+        "file": {"name": prepared.filename, "size_bytes": prepared.size_bytes},
+        "audit": prepared.audit,
+    }
+    if prepared.audit["has_critical_errors"]:
+        return {"data_preflight": preflight}
+    if prepared.audit["show_dialog"]:
+        preflight["upload_id"] = prepared_uploads.create(prepared)
+        return {"data_preflight": preflight}
+
+    result = plan_drafts.create(
+        build_constructor_plan_from_prepared(prepared, get_catalog_repository())
+    )
+    return {
+        **result,
+        "data_preflight": {**preflight, "status": "clear"},
+    }
+
+
+@app.post("/api/plan-constructor/plan/upload/{upload_id}/continue")
+def continue_constructor_plan_upload(upload_id: str) -> dict:
+    """Build from the exact audited snapshot accepted by the user."""
+
+    try:
+        prepared = prepared_uploads.take(upload_id)
+    except KeyError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Проверенные данные больше недоступны. Загрузите Excel ещё раз.",
+        ) from error
+    try:
+        result = plan_drafts.create(
+            build_constructor_plan_from_prepared(
+                prepared, get_catalog_repository()
             )
         )
     except ConstructorDatasetUploadError as error:
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Не удалось использовать загруженный датасет.",
+                "message": "Не удалось построить план по проверенным данным.",
                 "errors": [str(error)],
             },
         ) from error
+    return {
+        **result,
+        "data_preflight": {
+            "status": "accepted",
+            "upload_id": upload_id,
+            "file": {"name": prepared.filename, "size_bytes": prepared.size_bytes},
+            "audit": prepared.audit,
+        },
+    }
 
 
 @app.post("/api/plan-constructor/plan")
@@ -381,65 +480,6 @@ def approve_constructor_plan(request: DraftApprovalRequest) -> dict:
             status_code=409,
             detail="Предварительный план больше недоступен. Постройте его заново.",
         ) from error
-
-
-def _draft_action(action, draft_id: str, entity_id: str) -> dict:
-    try:
-        return action(draft_id, entity_id)
-    except KeyError as error:
-        raise HTTPException(
-            status_code=409,
-            detail="Рекомендация устарела. Черновик обновлён, выберите актуальный вариант.",
-        ) from error
-
-
-@app.get("/api/plan-constructor/drafts/{draft_id}")
-def constructor_draft(draft_id: str) -> dict:
-    try:
-        return plan_drafts.snapshot(draft_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail="Черновик не найден.") from error
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/recommendations/apply")
-def apply_recommendation(draft_id: str, request: RecommendationRequest) -> dict:
-    return _draft_action(plan_drafts.apply, draft_id, request.recommendation_id)
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/recommendations/reject")
-def reject_recommendation(draft_id: str, request: RecommendationRequest) -> dict:
-    return _draft_action(plan_drafts.reject, draft_id, request.recommendation_id)
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/recommendations/apply-all")
-def apply_all_recommendations(draft_id: str) -> dict:
-    try:
-        return plan_drafts.apply_all(draft_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail="Черновик не найден.") from error
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/recommendations/refresh")
-def refresh_recommendations(draft_id: str, request: RecommendationRefreshRequest) -> dict:
-    try:
-        return plan_drafts.refresh_recommendations(draft_id, request.revision)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail="Черновик не найден.") from error
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail="Черновик уже изменился. Запросите актуальные рекомендации.") from error
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/changes/undo")
-def undo_accepted_change(draft_id: str, request: AcceptedChangeRequest) -> dict:
-    return _draft_action(plan_drafts.undo, draft_id, request.change_id)
-
-
-@app.post("/api/plan-constructor/drafts/{draft_id}/reset")
-def reset_constructor_draft(draft_id: str) -> dict:
-    try:
-        return plan_drafts.reset_to_base(draft_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail="Черновик не найден.") from error
 
 
 @app.get("/api/catalog/archive-reasons")

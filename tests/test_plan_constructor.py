@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import unittest
-from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.web.api import app, plan_drafts
+from src.web.api import PlanDraftStore, app, plan_drafts
 from src.web.constructor import (
     ConstructorScenario,
     ScenarioValidationError,
     build_constructor_plan,
+    build_constructor_catalog,
+    scenario_tables,
     validate_constructor_scenario,
 )
+<<<<<<< Updated upstream
+=======
+from src.web.service import PlanningAPIService
 from src.web.recommendations import RecommendationDraft
+>>>>>>> Stashed changes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -71,335 +75,6 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 
 
 class ConstructorDomainTests(unittest.TestCase):
-    @staticmethod
-    def cross_team_payload(task_count: int = 1) -> dict:
-        engineers = []
-        tasks = []
-        for index in range(1, task_count + 1):
-            role = f"Backend-{index}"
-            engineers.extend([
-                {
-                    "engineer_id": "ENG-A" if index == 1 else f"ENG-A-{index}",
-                    "name": f"Engineer A {index}",
-                    "assignments": [{"team_id": "Team-A", "role": role, "capacity_rate": 0.75}],
-                    "skills": [],
-                },
-                {
-                    "engineer_id": "ENG-B" if index == 1 else f"ENG-B-{index}",
-                    "name": f"Engineer B {index}",
-                    "assignments": [{"team_id": "Team-B", "role": role, "capacity_rate": 0.25}],
-                    "skills": [],
-                },
-            ])
-            tasks.append({
-                "task_id": f"TASK-{index}", "title": "Needs help", "initiative_id": f"I-{index}",
-                "team_id": "Team-A", "status": "ToDo", "rung": 100 - index,
-                "story_points": 1, "role_requirements": [{"role": role, "required_hours": 400, "skills": []}],
-                "depends_on": [],
-            })
-        return {
-            "teams": [
-                {"team_id": "Team-A", "name": "A", "expected_velocity_sp": 20, "focus_factor": 0.8},
-                {"team_id": "Team-B", "name": "B", "expected_velocity_sp": 20, "focus_factor": 0.8},
-            ],
-            "engineers": engineers,
-            "tasks": tasks,
-        }
-
-    def test_recommendations_simulate_cross_team_without_changing_base_plan(self) -> None:
-        payload = self.cross_team_payload()
-        base = build_constructor_plan(ConstructorScenario(**payload))
-        self.assertEqual(base["tasks"][0]["status"], "MOVED")
-        draft = RecommendationDraft(base)
-        recommendation = next(item for item in draft.recommendations.values() if item["type"] == "CROSS_TEAM_HELP")
-        self.assertEqual(recommendation["engineer_id"], "ENG-B")
-        ownership = recommendation["engineer_help"][0]["ownership"]
-        self.assertTrue(ownership["valid"])
-        self.assertGreater(ownership["owner_hours"], ownership["external_hours"])
-        self.assertEqual(draft.base_plan["tasks"][0]["status"], "MOVED")
-
-        draft.apply(recommendation["recommendation_id"])
-        planned = draft.current_plan["tasks"][0]
-        self.assertEqual(planned["status"], "PLANNED")
-        self.assertTrue(any(row["cross_team"] for row in planned["allocations"]))
-        draft.undo(recommendation["recommendation_id"])
-        self.assertEqual(draft.current_plan["tasks"][0]["status"], "MOVED")
-
-    def test_reject_hides_recommendation_and_backend_keeps_all_candidates(self) -> None:
-        base = build_constructor_plan(ConstructorScenario(**self.cross_team_payload(6)))
-        draft = RecommendationDraft(base)
-        self.assertGreater(len(draft.recommendations), 5)
-        recommendation_id = next(iter(draft.recommendations))
-        draft.reject(recommendation_id)
-        self.assertNotIn(recommendation_id, draft.recommendations)
-        self.assertFalse(draft.accepted)
-
-    def test_apply_all_uses_the_saved_optimized_shadow_scenario(self) -> None:
-        base = build_constructor_plan(ConstructorScenario(**self.cross_team_payload(3)))
-        draft = RecommendationDraft(base)
-        self.assertTrue(draft.optimized_actions)
-        self.assertEqual(draft.current_plan["tasks"][0]["status"], "MOVED")
-        draft.apply_all()
-        self.assertEqual(
-            [task["status"] for task in draft.current_plan["tasks"]],
-            ["PLANNED", "PLANNED", "PLANNED"],
-        )
-        self.assertEqual(len(draft.last_changed_tasks), 3)
-        self.assertGreaterEqual(
-            draft.last_changed_tasks[0]["rung"], draft.last_changed_tasks[-1]["rung"]
-        )
-        self.assertTrue(draft.accepted)
-
-    def test_apply_returns_current_draft_without_waiting_for_optimizer(self) -> None:
-        draft = RecommendationDraft(
-            build_constructor_plan(ConstructorScenario(**self.cross_team_payload()))
-        )
-        recommendation_id = next(iter(draft.recommendations))
-        with patch.object(draft, "refresh_optimization") as optimizer:
-            draft.apply(recommendation_id)
-        optimizer.assert_not_called()
-        snapshot = draft.snapshot("draft-1")
-        self.assertEqual(snapshot["optimization"]["status"], "ready")
-        self.assertFalse(snapshot["optimization"]["needs_refresh"])
-        self.assertEqual(snapshot["tasks"][0]["status"], "PLANNED")
-        self.assertEqual(snapshot["optimization"]["changed_tasks"][0]["change"], "added_to_plan")
-
-    def test_best_plan_is_immutable_after_apply_reject_and_undo(self) -> None:
-        draft = RecommendationDraft(
-            build_constructor_plan(ConstructorScenario(**self.cross_team_payload(3)))
-        )
-        best_fingerprint = draft.snapshot("draft-1")["optimization"]["best_plan_fingerprint"]
-        first_id = next(iter(draft.recommendations))
-        draft.apply(first_id)
-        self.assertEqual(draft.snapshot("draft-1")["optimization"]["best_plan_fingerprint"], best_fingerprint)
-        second_id = next(iter(draft.recommendations))
-        draft.reject(second_id)
-        self.assertEqual(draft.snapshot("draft-1")["optimization"]["best_plan_fingerprint"], best_fingerprint)
-        draft.undo(first_id)
-        self.assertEqual(draft.snapshot("draft-1")["optimization"]["best_plan_fingerprint"], best_fingerprint)
-
-    def test_apply_all_selects_exact_saved_best_and_undo_reenables_it(self) -> None:
-        draft = RecommendationDraft(
-            build_constructor_plan(ConstructorScenario(**self.cross_team_payload(2)))
-        )
-        draft.apply_all()
-        selected = draft.snapshot("draft-1")["optimization"]
-        self.assertTrue(selected["best_selected"])
-        self.assertEqual(selected["current_plan_fingerprint"], selected["best_plan_fingerprint"])
-        draft.undo(draft.accepted[0]["change_id"])
-        self.assertFalse(draft.snapshot("draft-1")["optimization"]["best_selected"])
-
-    def test_independent_recommendations_stay_separate_and_equal_apply_all(self) -> None:
-        payload = self.cross_team_payload(3)
-        base = build_constructor_plan(ConstructorScenario(**payload))
-        sequential = RecommendationDraft(deepcopy(base))
-        apply_all = RecommendationDraft(deepcopy(base))
-
-        self.assertEqual(len(sequential.recommendations), 3)
-        self.assertTrue(all(
-            len(recommendation["tasks"]) == 1
-            and not recommendation["is_atomic_package"]
-            for recommendation in sequential.recommendations.values()
-        ))
-        while sequential.recommendations:
-            sequential.apply(next(iter(sequential.recommendations)))
-        apply_all.apply_all()
-
-        def comparable_plan(draft: RecommendationDraft) -> dict:
-            tasks = []
-            for task in sorted(draft.current_plan["tasks"], key=lambda item: item["task_id"]):
-                tasks.append({
-                    "task_id": task["task_id"],
-                    "status": task["status"],
-                    "assigned_team_id": task.get("assigned_team_id"),
-                    "planned_sprints": task.get("planned_sprints"),
-                    "completion_sprint": task.get("completion_sprint"),
-                    "allocations": sorted(
-                        task.get("allocations", []),
-                        key=lambda row: (row.get("sprint", 0), row.get("engineer_id", ""), row.get("role", "")),
-                    ),
-                })
-            snapshot = draft.snapshot("comparison")["optimization"]
-            return {
-                "tasks": tasks,
-                "plan": draft.current_plan.get("plan"),
-                "initiatives": draft.current_plan.get("initiatives"),
-                "kpis": draft.current_plan.get("kpis"),
-                "summary": snapshot["current_summary"],
-            }
-
-        self.assertEqual(comparable_plan(sequential), comparable_plan(apply_all))
-        self.assertTrue(sequential.snapshot("sequential")["optimization"]["best_selected"])
-
-    def test_genuinely_joint_changes_are_one_small_atomic_package(self) -> None:
-        base = {"tasks": [
-            {"task_id": "A", "status": "MOVED", "assigned_team_id": "Team-A", "rung": 10, "allocations": []},
-            {"task_id": "B", "status": "PLANNED", "assigned_team_id": "Team-B", "completion_sprint": 1, "rung": 9, "allocations": []},
-        ], "teams": [], "engineers": []}
-        draft = RecommendationDraft(deepcopy(base))
-        left = {"type": "TASK_REASSIGNMENT", "task_id": "A", "source_team_id": "Team-A", "team_id": "Team-X"}
-        right = {"type": "TASK_REASSIGNMENT", "task_id": "B", "source_team_id": "Team-B", "team_id": "Team-Y"}
-
-        def simulated_plan(actions: list[dict]) -> dict:
-            result = deepcopy(base)
-            atomic = []
-            for action in actions:
-                atomic.extend(action.get("changes", []))
-                atomic.append({key: value for key, value in action.items() if key != "linked_actions"})
-                atomic.extend(action.get("linked_actions", []))
-            task_ids = {action.get("task_id") for action in atomic}
-            if {"A", "B"}.issubset(task_ids):
-                result["tasks"][0].update({"status": "PLANNED", "assigned_team_id": "Team-X", "completion_sprint": 1})
-                result["tasks"][1]["assigned_team_id"] = "Team-Y"
-            return result
-
-        draft.optimized_plan = simulated_plan([left, right])
-        with patch.object(draft, "_plan", side_effect=simulated_plan):
-            packages, recommendations = draft._recommendation_specs([left, right])
-
-        self.assertEqual(len(packages), 1)
-        recommendation = next(iter(recommendations.values()))
-        self.assertTrue(recommendation["is_atomic_package"])
-        self.assertEqual(recommendation["title"], "Совместное перераспределение 2 задач")
-        self.assertEqual(recommendation["tasks"], ["A", "B"])
-
-    def test_cross_team_capacity_evidence_uses_source_team_bucket(self) -> None:
-        before = {
-            "tasks": [{
-                "task_id": "OWN", "assigned_team_id": "Team-L", "status": "PLANNED",
-                "allocations": [],
-            }, {
-                "task_id": "HELP", "assigned_team_id": "Team-P", "status": "MOVED",
-                "rung": 9, "allocations": [],
-            }],
-            "engineers": [{"engineer_id": "E1", "name": "Engineer One"}],
-        }
-        after = deepcopy(before)
-        after["tasks"][0]["allocations"] = [{
-            "engineer_id": "E1", "role": "Backend", "source_team_id": "Team-L",
-            "assigned_task_team_id": "Team-L", "sprint": 1, "allocated_hours": 8,
-            "capacity_bucket_hours": 40, "cross_team": False,
-        }]
-        after["tasks"][1].update({"status": "PLANNED", "completion_sprint": 1})
-        after["tasks"][1]["allocations"] = [{
-            "engineer_id": "E1", "role": "Backend", "source_team_id": "Team-L",
-            "assigned_task_team_id": "Team-P", "sprint": 1, "allocated_hours": 30,
-            "capacity_bucket_hours": 40, "cross_team": True,
-        }]
-        evidence = RecommendationDraft(deepcopy(before))._cross_team_evidence(before, after, ["HELP"])[0]
-        capacity = evidence["engineer_capacity"]
-        self.assertEqual(capacity["capacity_hours"], 40)
-        self.assertEqual(capacity["already_allocated_hours"], 8)
-        self.assertEqual(capacity["recommended_hours"], 30)
-        self.assertEqual(capacity["resulting_total_hours"], 38)
-        self.assertEqual(capacity["remaining_hours"], 2)
-        self.assertTrue(capacity["fits_capacity"])
-
-    def test_overloaded_cross_team_change_is_not_a_recommendation(self) -> None:
-        before = {"tasks": [{
-            "task_id": "HELP", "assigned_team_id": "Team-P", "status": "MOVED",
-            "rung": 9, "allocations": [],
-        }], "engineers": [{"engineer_id": "E1", "name": "Engineer One"}]}
-        after = deepcopy(before)
-        after["tasks"][0].update({"status": "PLANNED", "completion_sprint": 1})
-        after["tasks"][0]["allocations"] = [{
-            "engineer_id": "E1", "role": "Backend", "source_team_id": "Team-L",
-            "assigned_task_team_id": "Team-P", "sprint": 1, "allocated_hours": 45,
-            "capacity_bucket_hours": 40, "cross_team": True,
-        }]
-        draft = RecommendationDraft(deepcopy(before))
-        self.assertIsNone(draft._recommendation(
-            {"type": "CROSS_TEAM_HELP", "task_id": "HELP"}, before, after
-        ))
-
-    def test_recommendations_order_task_changes_before_help_and_by_rung(self) -> None:
-        draft = RecommendationDraft({"tasks": []})
-        draft._all_recommendations = {
-            "help": {"recommendation_id": "help", "type": "CROSS_TEAM_HELP", "rung": 100, "task_id": "H", "effect": {}},
-            "low": {"recommendation_id": "low", "type": "TASK_REASSIGNMENT", "rung": 5, "task_id": "L", "effect": {}},
-            "high": {"recommendation_id": "high", "type": "TASK_REASSIGNMENT", "rung": 10, "task_id": "A", "effect": {}},
-        }
-        draft._refresh_available()
-        ordered = list(draft.recommendations.values())
-        self.assertEqual([item["recommendation_id"] for item in ordered], ["high", "low", "help"])
-
-    def test_reassignment_recommendation_has_before_after_resource_evidence(self) -> None:
-        payload = self.cross_team_payload()
-        payload["engineers"][0]["assignments"][0]["capacity_rate"] = 0.25
-        payload["engineers"][1]["assignments"][0]["capacity_rate"] = 0.75
-        payload["tasks"][0]["role_requirements"][0]["required_hours"] = 300
-        base = build_constructor_plan(ConstructorScenario(**payload))
-        draft = RecommendationDraft(base)
-        action = {
-            "type": "TASK_REASSIGNMENT", "task_id": "TASK-1",
-            "team_id": "Team-B", "source_team_id": "Team-A",
-        }
-        recommendation = draft._recommendation(action, draft.base_plan, draft._plan([action]))
-        self.assertIsNotNone(recommendation)
-        evidence = recommendation["task_reassignment"][0]
-        self.assertEqual(evidence["from_team"], "Team-A")
-        self.assertEqual(evidence["to_team"], "Team-B")
-        self.assertIn("role_hours_required", evidence["target_capacity"])
-        self.assertIn("role_hours_available", evidence["target_capacity"])
-        self.assertTrue(evidence["ownership"]["valid"])
-        self.assertGreater(
-            evidence["workload"]["owner_hours"],
-            evidence["workload"]["external_hours"],
-        )
-        self.assertGreaterEqual(
-            evidence["workload"]["owner_engineer_count"],
-            evidence["workload"]["external_engineer_count"],
-        )
-        self.assertNotIn("before_kpi", recommendation["effect"])
-
-    def test_reciprocal_reassignments_are_one_atomic_swap(self) -> None:
-        base = {"tasks": [
-            {"task_id": "A", "assigned_team_id": "Team-A", "rung": 10, "allocations": []},
-            {"task_id": "B", "assigned_team_id": "Team-B", "rung": 9, "allocations": []},
-        ]}
-        shadow = {"tasks": [
-            {"task_id": "A", "assigned_team_id": "Team-B", "allocations": []},
-            {"task_id": "B", "assigned_team_id": "Team-A", "allocations": []},
-        ]}
-        draft = RecommendationDraft(deepcopy(base))
-        actions = draft._shadow_actions(shadow)
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0]["type"], "TASK_SWAP")
-        self.assertEqual({item["task_id"] for item in actions[0]["changes"]}, {"A", "B"})
-
-    def test_refresh_rejects_a_stale_draft_revision(self) -> None:
-        draft = RecommendationDraft(
-            build_constructor_plan(ConstructorScenario(**self.cross_team_payload()))
-        )
-        with self.assertRaisesRegex(ValueError, "stale revision"):
-            draft.refresh_optimization(expected_revision=draft.revision + 1)
-
-    def test_changed_task_dto_reports_move_and_cross_team_update(self) -> None:
-        before = {"tasks": [{
-            "task_id": "TASK-A", "status": "PLANNED", "completion_sprint": 5,
-            "assigned_team_id": "Team-A", "rung": 10, "allocations": [],
-        }]}
-        after = {"tasks": [{
-            "task_id": "TASK-A", "status": "PLANNED", "completion_sprint": 3,
-            "assigned_team_id": "Team-A", "rung": 10,
-            "allocations": [{"cross_team": True}],
-        }]}
-        change = RecommendationDraft._changed_tasks(before, after)[0]
-        self.assertEqual(change["change"], "moved")
-        self.assertEqual(change["from_sprint"], 5)
-        self.assertEqual(change["to_sprint"], 3)
-
-    def test_human_reason_blocks_group_duplicate_roles(self) -> None:
-        from src.web.service import _human_reason_blocks
-        blocks = _human_reason_blocks([
-            {"code": "MISSING_SPECIALIST", "details": {"role": "Backend"}},
-            {"code": "MISSING_SPECIALIST", "details": {"role": "QA"}},
-            {"code": "MISSING_SPECIALIST", "details": {"role": "Backend"}},
-            {"code": "DEPENDENCY_NOT_COMPLETED", "details": {"blocking_task_id": "TASK-0"}},
-        ])
-        self.assertEqual([block["type"] for block in blocks], ["dependency", "specialists"])
-        self.assertEqual(blocks[1]["details"], ["Backend", "QA"])
-
     def test_real_planner_builds_six_sprints_from_ephemeral_scenario(self) -> None:
         result = build_constructor_plan(ConstructorScenario(**scenario_payload()))
 
@@ -449,6 +124,240 @@ class ConstructorDomainTests(unittest.TestCase):
         payload["tasks"][0]["depends_on"] = ["TASK-2"]
         with self.assertRaisesRegex(ScenarioValidationError, "цикл"):
             validate_constructor_scenario(ConstructorScenario(**payload))
+
+    def test_selected_done_task_stays_visible_but_uses_no_quarter_resources(self) -> None:
+        payload = scenario_payload()
+        done_task = {
+            "task_id": "TASK-DONE", "title": "Historical task", "status": "Done",
+            "rung": 0, "story_points": 0, "depends_on": [],
+        }
+        payload["tasks"].append(done_task)
+        payload["tasks"][0]["depends_on"] = ["TASK-DONE"]
+        result = build_constructor_plan(
+            ConstructorScenario(**payload),
+            catalog_tables={"tasks": [{"task_id": "TASK-DONE", "status": "ToDo"}]},
+        )
+
+        by_id = {task["task_id"]: task for task in result["tasks"]}
+        done = by_id["TASK-DONE"]
+        self.assertEqual(done["status"], "DONE")
+        self.assertEqual(done["status_label"], "Завершена до начала планирования")
+        self.assertEqual(done["allocations"], [])
+        self.assertEqual(done["planned_sprints"], [])
+        self.assertEqual(done["sp_load_by_sprint"], {})
+        self.assertEqual(by_id["TASK-1"]["start_sprint"], 1)
+        self.assertEqual(by_id["TASK-1"]["dependencies"]["incoming"][0]["state"], "HISTORICAL_DONE")
+        self.assertNotIn("TASK-DONE", {task["task_id"] for task in result["tasks"] if task["status"] in {"MOVED", "UNPLANNABLE"}})
+
+    def test_global_done_status_overrides_scenario_active_status(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"][0]["status"] = "ToDo"
+        result = build_constructor_plan(
+            ConstructorScenario(**payload),
+            catalog_tables={"tasks": [{"task_id": "TASK-1", "status": "Done"}]},
+        )
+
+        self.assertEqual(result["tasks"][0]["status"], "DONE")
+        self.assertEqual(result["tasks"][0]["allocations"], [])
+
+    def test_manual_catalog_keeps_done_visible_without_team_or_role_data(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"][0].update(status="Done", team_id=None, story_points=0, role_requirements=[])
+        service = PlanningAPIService.from_tables(
+            scenario_tables(ConstructorScenario(**payload)), plan_version="done-catalog-test"
+        )
+
+        catalog = build_constructor_catalog(service)
+
+        historical = next(task for task in catalog["tasks"] if task["task_id"] == "TASK-1")
+        self.assertEqual(historical["status"], "Done")
+        self.assertEqual(historical["role_requirements"], [])
+        self.assertIsNone(historical["team_id"])
+
+    def test_unselected_historical_done_blocker_allows_dependent_in_sprint_one(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"][0]["depends_on"] = ["ARCHIVED-DONE"]
+        catalog = {"tasks": [{"task_id": "ARCHIVED-DONE", "summary": "Archived blocker", "status": "Done", "archived": True}]}
+
+        result = build_constructor_plan(ConstructorScenario(**payload), catalog_tables=catalog)
+
+        task = next(item for item in result["tasks"] if item["task_id"] == "TASK-1")
+        self.assertEqual(task["status"], "PLANNED")
+        self.assertEqual(task["start_sprint"], 1)
+        self.assertEqual(task["dependencies"]["incoming"][0]["state"], "HISTORICAL_DONE")
+        historical = next(item for item in result["tasks"] if item["task_id"] == "ARCHIVED-DONE")
+        self.assertEqual(historical["status"], "DONE")
+        self.assertEqual(historical["allocations"], [])
+        self.assertEqual(historical["planned_sprints"], [])
+
+    def test_unselected_done_non_blocker_is_kept_as_historical_context(self) -> None:
+        payload = scenario_payload()
+        catalog = {
+            "tasks": [
+                {
+                    "task_id": "DONE-NON-BLOCKER",
+                    "summary": "Already completed",
+                    "status": "Done",
+                    "story_points": 3,
+                }
+            ]
+        }
+
+        tables = scenario_tables(ConstructorScenario(**payload), catalog)
+        self.assertIn("DONE-NON-BLOCKER", {row["task_id"] for row in tables["tasks"]})
+
+        result = build_constructor_plan(ConstructorScenario(**payload), catalog)
+        historical = next(item for item in result["tasks"] if item["task_id"] == "DONE-NON-BLOCKER")
+        self.assertEqual(historical["status"], "DONE")
+        self.assertEqual(historical["planned_sprints"], [])
+        self.assertEqual(historical["allocations"], [])
+        self.assertEqual(historical["sp_load_by_sprint"], {})
+        self.assertEqual(result["summary"]["done_tasks"], 1)
+
+    def test_manual_all_active_matches_excel_base_with_all_done_context(self) -> None:
+        payload = scenario_payload()
+        catalog = {
+            "tasks": [
+                {
+                    "task_id": "DONE-NON-BLOCKER",
+                    "summary": "Already completed",
+                    "status": "Done",
+                    "initiative_id": "PRODF-HISTORY",
+                    "team_id": "Team-A",
+                    "rung": 1,
+                    "story_points": 3,
+                }
+            ]
+        }
+        manual = build_constructor_plan(ConstructorScenario(**payload), catalog)
+
+        excel_tables = scenario_tables(ConstructorScenario(**payload))
+        excel_tables["tasks"].append(dict(catalog["tasks"][0]))
+        excel = PlanningAPIService.from_tables(
+            excel_tables,
+            plan_version="excel-equivalent",
+            planner_options={
+                "allow_team_reassignment": False,
+                "allow_cross_team": False,
+            },
+        ).dashboard
+
+        def base_signature(result: dict) -> dict:
+            plan = result["plan"]
+            return {
+                "summary": {
+                    key: value
+                    for key, value in result["summary"].items()
+                    if key != "plan_version"
+                },
+                "tasks": sorted(
+                    (
+                        task["task_id"],
+                        task["status"],
+                        task["assigned_team_id"],
+                        tuple(task["planned_sprints"]),
+                        tuple(sorted(task["sp_load_by_sprint"].items())),
+                        tuple(sorted(task["hours_by_sprint"].items())),
+                        tuple(reason["code"] for reason in task["reasons"]),
+                    )
+                    for task in result["tasks"]
+                ),
+                "allocations": sorted(
+                    (
+                        row["task_id"], row["sprint"], row["engineer_id"],
+                        row["role"], row["allocated_hours"], row["source_team_id"],
+                    )
+                    for row in plan["allocations"]
+                ),
+                "sprints": sorted(
+                    (
+                        sprint["sprint_number"],
+                        tuple(task["task_id"] for task in sprint["tasks"]),
+                        tuple(
+                            sorted(
+                                (team["team_id"], team["used_sp"])
+                                for team in sprint["teams"]
+                            )
+                        ),
+                    )
+                    for sprint in plan["sprints"]
+                ),
+            }
+
+        self.assertEqual(base_signature(manual), base_signature(excel))
+        self.assertEqual(manual["summary"]["total_tasks"], 2)
+        self.assertEqual(manual["summary"]["done_tasks"], 1)
+
+    def test_unselected_active_and_unknown_blockers_have_distinct_errors(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"][0]["depends_on"] = ["ACTIVE-BLOCKER"]
+        scenario = ConstructorScenario(**payload)
+        with self.assertRaisesRegex(ScenarioValidationError, "активная блокирующая задача ACTIVE-BLOCKER не включена"):
+            validate_constructor_scenario(
+                scenario, {"tasks": [{"task_id": "ACTIVE-BLOCKER", "status": "ToDo"}]}
+            )
+
+        payload["tasks"][0]["depends_on"] = ["UNKNOWN-BLOCKER"]
+        with self.assertRaisesRegex(ScenarioValidationError, "UNKNOWN-BLOCKER неизвестна общему каталогу"):
+            validate_constructor_scenario(ConstructorScenario(**payload), {"tasks": []})
+
+    def test_inprogress_blocker_remains_active_planning_work(self) -> None:
+        payload = scenario_payload()
+        blocker = deepcopy(payload["tasks"][0])
+        blocker.update(task_id="TASK-IN-PROGRESS", title="Started", status="InProgress", depends_on=[])
+        payload["tasks"][0]["depends_on"] = ["TASK-IN-PROGRESS"]
+        payload["tasks"].append(blocker)
+
+        result = build_constructor_plan(ConstructorScenario(**payload))
+
+        by_id = {task["task_id"]: task for task in result["tasks"]}
+        self.assertEqual(by_id["TASK-IN-PROGRESS"]["status"], "PLANNED")
+        self.assertGreater(by_id["TASK-1"]["start_sprint"], 1)
+        self.assertNotEqual(by_id["TASK-1"]["dependencies"]["incoming"][0]["state"], "HISTORICAL_DONE")
+
+    def test_approval_removes_historical_done_from_current_plan_dtos(self) -> None:
+        payload = scenario_payload()
+        catalog = {
+            "tasks": [{
+                "task_id": "TASK-DONE", "summary": "Historical task", "status": "Done",
+                "rung": 0, "story_points": 5,
+            }]
+        }
+        base = build_constructor_plan(ConstructorScenario(**payload), catalog)
+        store = PlanDraftStore()
+        draft = store.create(base)
+        approved = store.approve(draft["draft"]["id"])
+
+        self.assertIn("TASK-DONE", {task["task_id"] for task in base["tasks"]})
+        self.assertNotIn("TASK-DONE", {task["task_id"] for task in approved["tasks"]})
+        self.assertNotIn("TASK-DONE", {task["task_id"] for task in approved["plan"]["tasks"]})
+        self.assertFalse(any(row.get("task_id") == "TASK-DONE" for row in approved["plan"]["allocations"]))
+        self.assertFalse(any(
+            row.get("task_id") == "TASK-DONE"
+            for sprint in approved["plan"]["sprints"]
+            for row in sprint["tasks"]
+        ))
+        self.assertTrue(all("TASK-DONE" not in item.get("task_ids", []) for item in approved["initiatives"]))
+        self.assertTrue(all("TASK-DONE" not in item.get("task_ids", []) for item in approved["plan"]["initiatives"]))
+        self.assertEqual(approved["summary"]["total_tasks"], 1)
+
+    def test_optimizer_never_proposes_historical_done_task(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"].append({
+            "task_id": "TASK-DONE", "title": "Historical task", "status": "Done",
+            "rung": 0, "story_points": 5, "depends_on": [],
+            "role_requirements": [{"role": "Backend", "required_hours": 40, "skills": ["Python"]}],
+        })
+        base = build_constructor_plan(ConstructorScenario(**payload))
+        draft = RecommendationDraft(base)
+        fake_shadow = deepcopy(base)
+        next(task for task in fake_shadow["tasks"] if task["task_id"] == "TASK-DONE")["assigned_team_id"] = "OTHER-TEAM"
+
+        actions = draft._shadow_actions(fake_shadow)
+        recommendations = list(draft.recommendations.values())
+
+        self.assertFalse(any("TASK-DONE" in action.get("tasks", []) or action.get("task_id") == "TASK-DONE" for action in actions))
+        self.assertFalse(any("TASK-DONE" in recommendation.get("tasks", []) for recommendation in recommendations))
 
     def test_non_standard_focus_factor_is_rejected(self) -> None:
         payload = scenario_payload()
@@ -539,13 +448,15 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(current_after_approval.status_code, 200)
         self.assertEqual(
             current_after_approval.json()["plan"]["quarter"]["plan_version"],
-            "constructor-base-draft",
+            "constructor-draft",
         )
         self.assertEqual(
             [task["task_id"] for task in current_after_approval.json()["tasks"]],
             ["TASK-1"],
         )
 
+<<<<<<< Updated upstream
+=======
     def test_apply_recommendation_keeps_current_plan_until_exact_draft_is_approved(self) -> None:
         plan_drafts.reset()
         response = self.client.post(
@@ -578,7 +489,16 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
             "/api/plan-constructor/drafts/approve", json={"draft_id": draft["draft"]["id"]},
         )
         self.assertEqual(approval.status_code, 200, approval.text)
-        self.assertEqual(approval.json()["plan"], applied.json()["plan"])
+        approved_task = next(
+            task for task in approval.json()["plan"]["tasks"]
+            if task["task_id"] == "TASK-1"
+        )
+        draft_task = next(
+            task for task in applied.json()["plan"]["tasks"]
+            if task["task_id"] == "TASK-1"
+        )
+        self.assertEqual(approved_task, draft_task)
+        self.assertFalse(any(task["status"] == "DONE" for task in approval.json()["tasks"]))
         self.assertTrue(any(
             row["cross_team"]
             for row in approval.json()["tasks"][0]["allocations"]
@@ -592,9 +512,12 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         current_before = self.client.get("/api/dashboard").json()
         applied = self.client.post(f"/api/plan-constructor/drafts/{draft['draft']['id']}/recommendations/apply-all")
         self.assertEqual(applied.status_code, 200, applied.text)
-        self.assertEqual(applied.json()["tasks"][0]["status"], "PLANNED")
+        task = next(item for item in applied.json()["tasks"] if item["task_id"] == "TASK-1")
+        self.assertEqual(task["status"], "PLANNED")
+        self.assertTrue(any(item["status"] == "DONE" for item in applied.json()["tasks"]))
         self.assertEqual(self.client.get("/api/dashboard").json()["plan"], current_before["plan"])
 
+>>>>>>> Stashed changes
     @unittest.skipUnless(RAW_WORKBOOK.is_file(), "raw workbook is absent")
     def test_uploaded_workbook_builds_plan_without_modifying_project_data(self) -> None:
         protected_files = [RAW_WORKBOOK, *sorted(PROCESSED_DIR.glob("*"))]
@@ -614,7 +537,16 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
+        preflight = response.json()["data_preflight"]
+        self.assertEqual(preflight["status"], "review_required")
+        self.assertFalse(preflight["audit"]["has_critical_errors"])
+        self.assertGreater(preflight["audit"]["summary"]["warning"], 0)
+
+        continued = self.client.post(
+            f"/api/plan-constructor/plan/upload/{preflight['upload_id']}/continue"
+        )
+        self.assertEqual(continued.status_code, 200, continued.text)
+        payload = continued.json()
         self.assertEqual(payload["uploaded_dataset"]["name"], RAW_WORKBOOK.name)
         self.assertTrue(payload["uploaded_dataset"]["server_persisted"])
         self.assertIn("catalog_merge", payload["uploaded_dataset"])
@@ -622,6 +554,10 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         self.assertTrue(payload["teams"])
         self.assertTrue(payload["engineers"])
         self.assertTrue(payload["tasks"])
+        historical_done = [task for task in payload["tasks"] if task["status"] == "DONE"]
+        self.assertTrue(historical_done)
+        self.assertTrue(all(task["status_label"] == "Завершена до начала планирования" for task in historical_done))
+        self.assertTrue(all(not task["planned_sprints"] and not task["allocations"] for task in historical_done))
         current_after_build = self.client.get("/api/dashboard")
         self.assertEqual(current_after_build.status_code, 200)
         self.assertEqual(current_after_build.json()["plan"], current_before.json()["plan"])
@@ -651,11 +587,11 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
             headers={"Content-Type": "application/octet-stream"},
         )
 
-        self.assertEqual(response.status_code, 422)
-        self.assertIn(
-            "Не удалось использовать",
-            response.json()["detail"]["message"],
-        )
+        self.assertEqual(response.status_code, 200)
+        preflight = response.json()["data_preflight"]
+        self.assertEqual(preflight["status"], "blocked")
+        self.assertTrue(preflight["audit"]["has_critical_errors"])
+        self.assertIsNone(preflight["upload_id"])
 
     def test_plan_endpoint_returns_readable_cross_entity_errors(self) -> None:
         payload = scenario_payload()

@@ -43,7 +43,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn('data-constructor-mode="upload"', page.text)
         self.assertNotIn('id="constructorAutoResult"', page.text)
 
-    def test_plan_contract_is_json_serializable_and_preserves_source_ids(self) -> None:
+    def test_current_plan_contract_excludes_historical_done_and_preserves_active_source_ids(self) -> None:
         response = self.client.get("/api/plan")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -54,8 +54,12 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         tasks = payload["tasks"]
         self.assertTrue(tasks)
         with (PROCESSED_DIR / "tasks.csv").open(encoding="utf-8-sig", newline="") as source:
-            source_ids = {row["task_id"] for row in csv.DictReader(source)}
-        self.assertEqual({task["task_id"] for task in tasks}, source_ids)
+            active_source_ids = {
+                row["task_id"] for row in csv.DictReader(source)
+                if row["status"].strip().casefold() != "done"
+            }
+        self.assertEqual({task["task_id"] for task in tasks}, active_source_ids)
+        self.assertFalse(any(task["status"] == "DONE" for task in tasks))
         self.assertTrue(any(task["initiative_id"] for task in tasks))
         self.assertTrue(any(task["multi_sprint"] for task in tasks))
 
@@ -177,7 +181,8 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("escapeHtml", app_source)
         self.assertIn("localStorage", constructor_source)
         self.assertIn("buildConstructorPlan", constructor_source)
-        self.assertIn("buildConstructorPlanFromDataset", constructor_source)
+        self.assertIn("preflightConstructorDataset", constructor_source)
+        self.assertIn("continueConstructorDataset", constructor_source)
         self.assertIn("previewPlan = planResult", constructor_source)
         self.assertIn("approveConstructorPlan", constructor_source)
         self.assertIn("invalidatePreview", constructor_source)
@@ -379,6 +384,28 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("item.state === 'HISTORICAL_DONE'", self.app)
         self.assertIn("dependency-satisfied", self.app)
         self.assertIn("item.status_message", self.app)
+
+    def test_manual_constructor_keeps_historical_done_visible_and_read_only(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Завершена до начала планирования", constructor_source)
+        self.assertIn("data-constructor-pick=\"tasks\"", constructor_source)
+        self.assertIn("${completed ? 'disabled' : ''}", constructor_source)
+        self.assertIn("data-open-task=\"${esc(task.task_id)}\"", constructor_source)
+
+    def test_excel_preflight_modal_is_user_facing_and_requires_confirmation(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        api_source = (self.frontend / "api.js").read_text(encoding="utf-8")
+        styles = (self.frontend / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="dataPreflightDialog"', self.html)
+        self.assertIn("Проверка данных", self.html)
+        self.assertIn("Продолжить с этими данными", constructor_source)
+        self.assertIn("Загрузить исправленный файл", constructor_source)
+        self.assertIn("preflightConstructorDataset", api_source)
+        self.assertIn("continueConstructorDataset", api_source)
+        self.assertIn("preflight.status === 'blocked'", constructor_source)
+        self.assertIn("preflight?.status === 'blocked' || preflight?.status === 'review_required'", constructor_source)
+        self.assertIn("max-height:84vh", styles)
 
 
 if __name__ == "__main__":

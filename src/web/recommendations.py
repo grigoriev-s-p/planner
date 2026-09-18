@@ -217,6 +217,8 @@ class RecommendationDraft:
         reassignments: list[dict[str, Any]] = []
         cross_task_ids: set[str] = set()
         for before in self.base_plan.get("tasks", []):
+            if before.get("status") == "DONE":
+                continue
             task_id = before.get("task_id")
             after = _task(shadow, task_id)
             if not task_id or not after:

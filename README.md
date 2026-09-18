@@ -120,18 +120,24 @@ python -m uvicorn src.web.api:app --reload
 - `/api/teams`, `/api/teams/{team_id}`;
 - `/api/engineers`, `/api/engineers/{engineer_id}`, `/api/star-map`;
 - `/api/plan-constructor/catalog`, `/api/plan-constructor/plan`;
-- `/api/plan-constructor/plan/upload` — загрузка Excel и накопительное обновление
-  рабочего каталога;
+- `/api/plan-constructor/plan/upload` — разбор Excel и проверка качества данных
+  до изменения каталога и запуска planner-а;
+- `/api/plan-constructor/plan/upload/{upload_id}/continue` — подтверждение
+  предупреждений и построение плана по уже проверенному снимку данных;
 - `/api/catalog/archive-reasons` и `POST .../{id}/archive` для задач,
   инженеров и команд.
 
 ### Рабочий каталог и загрузка Excel
 
 Product UI хранит рабочий каталог в `data/catalog/catalog.sqlite3`. При первом
-запуске он заполняется из `data/processed`, после чего успешная загрузка Excel
-выполняет цепочку `parse → normalize → validate → insert-only merge`. Новые
-задачи, команды, инженеры, связи, компетенции и назначения добавляются сразу и
-доступны constructor-у без перезапуска FastAPI.
+запуске он заполняется из `data/processed`. Загрузка Excel выполняет цепочку
+`parse → normalize → validate/audit`. Если замечаний нет, система сразу делает
+`insert-only merge` и строит предварительный план. Предупреждения сначала
+показываются в окне «Проверка данных»; после подтверждения используется уже
+разобранный снимок без повторного чтения Excel. Критические ошибки блокируют и
+planner, и изменение каталога. Новые задачи, команды, инженеры, связи,
+компетенции и назначения после принятой проверки доступны constructor-у без
+перезапуска FastAPI.
 
 Совпавший canonical ID не перезаписывается: каталог сохраняет существующую
 запись и возвращает warning. Отсутствующие в очередном Excel сущности остаются в
