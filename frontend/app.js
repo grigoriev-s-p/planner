@@ -143,7 +143,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, planning: renderPlanning, tasks: renderTasks, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
+  ({home: renderHome, constructor: window.planConstructor.render, planning: renderPlanning, tasks: renderTasks, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
 }
 
 function renderUnavailable() {
@@ -440,7 +440,12 @@ async function initialize() {
   bindEvents();
   show('home');
   try {
-    hydrate(await window.postcodeApi.getDashboard());
+    const [dashboard, constructorCatalog] = await Promise.all([
+      window.postcodeApi.getDashboard(),
+      window.postcodeApi.getConstructorCatalog(),
+    ]);
+    hydrate(dashboard);
+    window.planConstructor.initialize(constructorCatalog, window.postcodeApi);
     renderPage(state.page);
   } catch (error) {
     state.loading = false;
