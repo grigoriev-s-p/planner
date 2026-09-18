@@ -25,10 +25,23 @@ class ProductAPIIntegrationTests(unittest.TestCase):
     def test_frontend_and_assets_are_served(self) -> None:
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
-        for page_id in ("home", "planning", "tasks", "risks", "recalc", "star"):
+        for page_id in (
+            "home", "constructor", "planning", "tasks", "risks", "recalc", "star"
+        ):
             self.assertIn(f'id="page-{page_id}"', page.text)
-        for asset in ("/styles.css", "/api.js", "/app.js"):
+        for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
             self.assertEqual(self.client.get(asset).status_code, 200)
+        self.assertNotIn("СЦЕНАРИЙ / 6 СПРИНТОВ", page.text)
+        self.assertNotIn("Исходный датасет только для чтения", page.text)
+        self.assertNotIn("Черновик готов", page.text)
+        self.assertNotIn('id="addConstructorEngineer"', page.text)
+        self.assertNotIn('id="constructorTaskTeam"', page.text)
+        self.assertIn('id="constructorTaskSearch"', page.text)
+        self.assertIn('id="constructorDatasetInput"', page.text)
+        self.assertIn('id="uploadConstructorDataset"', page.text)
+        self.assertIn('data-constructor-mode="manual"', page.text)
+        self.assertIn('data-constructor-mode="upload"', page.text)
+        self.assertIn('id="constructorAutoResult"', page.text)
 
     def test_plan_contract_is_json_serializable_and_preserves_source_ids(self) -> None:
         response = self.client.get("/api/plan")
@@ -98,6 +111,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
         self.assertEqual(self.dashboard["features"]["bus_factor"], "NOT_IMPLEMENTED")
+        self.assertEqual(
+            self.dashboard["features"]["initial_excel_upload"],
+            "AVAILABLE_EPHEMERAL",
+        )
 
     def test_kpi_endpoint_exposes_structured_unavailable_fact_without_internal_ids(self) -> None:
         response = self.client.get("/api/kpis")
@@ -131,9 +148,22 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         frontend = PROCESSED_DIR.parents[1] / "frontend"
         api_source = (frontend / "api.js").read_text(encoding="utf-8")
         app_source = (frontend / "app.js").read_text(encoding="utf-8")
+        constructor_source = (frontend / "constructor.js").read_text(encoding="utf-8")
         self.assertEqual(api_source.count("fetch("), 1)
         self.assertNotIn("fetch(", app_source)
+        self.assertNotIn("fetch(", constructor_source)
         self.assertIn("escapeHtml", app_source)
+        self.assertIn("localStorage", constructor_source)
+        self.assertIn("buildConstructorPlan", constructor_source)
+        self.assertIn("buildConstructorPlanFromDataset", constructor_source)
+        self.assertIn("automaticEngineers", constructor_source)
+        self.assertIn("catalogWithDraft('tasks')", constructor_source)
+        self.assertIn("Number(right.expected_velocity_sp || 0)", constructor_source)
+        self.assertIn('team_id: null', constructor_source)
+        self.assertIn('list="constructorInitiativeOptions"', constructor_source)
+        self.assertIn('name="dependency_id"', constructor_source)
+        self.assertIn("/api/plan-constructor/plan", api_source)
+        self.assertIn("/api/plan-constructor/plan/upload", api_source)
         for old_demo_name in (
             "sampleTasks",
             "riskRecords",

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .constructor import (
+    ConstructorDatasetUploadError,
+    ConstructorScenario,
+    ScenarioValidationError,
+    build_constructor_catalog,
+    build_constructor_plan,
+    build_constructor_plan_from_workbook,
+)
 from .service import ServiceDataError, get_planning_service
 
 
@@ -107,6 +115,48 @@ def engineer(engineer_id: str) -> dict:
 @app.get("/api/star-map")
 def star_map() -> dict:
     return _service().star_map
+
+
+@app.get("/api/plan-constructor/catalog")
+def plan_constructor_catalog() -> dict:
+    """Return read-only dataset entities that can seed a browser draft."""
+
+    return build_constructor_catalog(_service())
+
+
+@app.post("/api/plan-constructor/plan/upload")
+def plan_constructor_plan_upload(
+    filename: str,
+    content: bytes = Body(media_type="application/octet-stream"),
+) -> dict:
+    """Build a complete six-sprint plan directly from an uploaded workbook."""
+
+    try:
+        return build_constructor_plan_from_workbook(filename, content)
+    except ConstructorDatasetUploadError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Не удалось использовать загруженный датасет.",
+                "errors": [str(error)],
+            },
+        ) from error
+
+
+@app.post("/api/plan-constructor/plan")
+def plan_constructor(scenario: ConstructorScenario) -> dict:
+    """Build a six-sprint plan in memory without changing source data."""
+
+    try:
+        return build_constructor_plan(scenario)
+    except ScenarioValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Исправьте ошибки в черновике плана.",
+                "errors": list(error.errors),
+            },
+        ) from error
 
 
 if not FRONTEND_DIR.is_dir():
