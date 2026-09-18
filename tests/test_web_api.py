@@ -8,6 +8,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from src.web.api import app
+from src.web.service import PlanningAPIService
+from tests.acceptance.builders import SyntheticQuarter
 
 
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
@@ -98,9 +100,24 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             json.dumps(response.json())
 
-        self.assertTrue(risks.json())
+        risk_rows = risks.json()
+        self.assertTrue(risk_rows)
         self.assertTrue(teams.json())
         self.assertTrue(engineers.json())
+        self.assertTrue({"ORANGE", "YELLOW"}.issubset({risk["severity"] for risk in risk_rows}))
+        self.assertTrue(all(risk["severity"] in {"RED", "ORANGE", "YELLOW"} for risk in risk_rows))
+        self.assertTrue(all(risk["effect"] for risk in risk_rows))
+        self.assertTrue(all(risk["recommendation"] for risk in risk_rows))
+        self.assertTrue(all(risk["evidence"] for risk in risk_rows))
+        self.assertFalse({"MULTI_SPRINT", "CROSS_TEAM_DEPENDENCY"} & {risk["code"] for risk in risk_rows})
+        orange = next(risk for risk in risk_rows if risk["severity"] == "ORANGE")
+        labels = {item["label"] for item in orange["evidence"]}
+        self.assertTrue({"Роль", "Требуется", "Доступно", "Дефицит"}.issubset(labels))
+        self.assertIn("bus_factor_context", orange)
+        yellow = next(risk for risk in risk_rows if risk["severity"] == "YELLOW")
+        self.assertIn("в исходном плане", yellow["cause"].lower())
+        self.assertIn("один спринт запаса", yellow["cause"].lower())
+        self.assertIn("при replanning", yellow["cause"].lower())
         self.assertEqual(
             len({engineer["engineer_id"] for engineer in engineers.json()}),
             len(engineers.json()),
@@ -193,6 +210,44 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             self.assertNotIn(old_demo_name, app_source)
 
 
+class ProductRiskSemanticsTests(unittest.TestCase):
+    def test_dependency_chain_outside_quarter_becomes_red_alert(self) -> None:
+        scenario = (
+            SyntheticQuarter()
+            .team("Team-A", velocity=100)
+            .engineer("ENG-1", "Team-A", "Developer")
+            .task(
+                "BLOCKER",
+                initiative_id="PRODF-RED",
+                story_points=1,
+                role_hours={"Developer": 400},
+            )
+            .task(
+                "BLOCKED",
+                initiative_id="PRODF-RED",
+                story_points=1,
+                role_hours={"Developer": 1},
+            )
+            .depends_on("BLOCKED", "BLOCKER")
+        )
+        service = PlanningAPIService.from_tables(
+            {
+                "tasks": scenario.tasks,
+                "task_role_effort": scenario.effort,
+                "task_dependencies": scenario.dependencies,
+                "engineers": scenario.engineers,
+                "engineer_skills": scenario.engineer_skills,
+                "team_history": scenario.team_history,
+            }
+        )
+        red = next(risk for risk in service.risks if risk["severity"] == "RED")
+        self.assertEqual(red["code"], "DEADLINE_OUTSIDE_QUARTER")
+        self.assertEqual(red["task_id"], "BLOCKED")
+        self.assertEqual(red["initiative_id"], "PRODF-RED")
+        self.assertGreater(red["sprint"], 6)
+        self.assertIn("текущем квартале", red["effect"])
+
+
 class FrontendRefinementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -266,13 +321,24 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
         self.assertNotIn('id="taskSearch"', self.html)
 
-    def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)
-        for target in (
-            "risksDevelopmentNotice",
-            "recalcDevelopmentNotice",
-        ):
-            self.assertIn(f'id="{target}"', self.html)
+    def test_development_notice_remains_only_on_unfinished_replanning_page(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 1)
+        self.assertNotIn('id="risksDevelopmentNotice"', self.html)
+        self.assertIn('id="recalcDevelopmentNotice"', self.html)
+
+    def test_risk_page_uses_three_actionable_alert_types(self) -> None:
+        self.assertIn('data-risk-filter="Сроки"', self.html)
+        self.assertIn('data-risk-filter="Ресурсы"', self.html)
+        self.assertIn('data-risk-filter="Зависимости"', self.html)
+        self.assertNotIn('data-risk-filter="Компетенции"', self.html)
+        self.assertIn('>Уровень</th>', self.html)
+        self.assertIn('renderRiskEvidence', self.app)
+        self.assertIn('renderRiskBusFactor', self.app)
+        self.assertIn('risk.severity_label', self.app)
+        self.assertIn('risk-detail-meta', self.app)
+        self.assertIn('risk-table-copy', self.app)
+        self.assertIn('.risk-evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr))', self.styles)
+        self.assertNotIn('.risk-detail{overflow-x:', self.styles)
 
     def test_star_map_uses_backend_bus_factor_for_selected_team(self) -> None:
         self.assertIn('id="competencyMap"', self.html)

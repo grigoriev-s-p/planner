@@ -3,7 +3,7 @@
 const state = {
   page: 'home', taskId: null, taskSprint: null,
   teamId: null, engineerId: null, starTab: 'teams', riskId: null,
-  riskFilter: 'Все', skillTeam: 'all', skillRole: 'all', skillTech: 'all',
+  riskFilter: 'Все', riskSearch: '', riskModalOpen: false, skillTeam: 'all', skillRole: 'all', skillTech: 'all',
   competency: null, criticalOnly: false,
   taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
 };
@@ -40,7 +40,8 @@ const sprintLabel = (task) => {
 const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Выполнен'}[sprintBy(sprint)?.status] || 'Запланирован');
 const statusClass = (status) => ({DONE: 'done', PLANNED: 'planned', MOVED: 'moved', UNPLANNABLE: 'cancelled'}[status] || 'planned');
 const badge = (task) => `<span class="status ${statusClass(task.status)}">${escapeHtml(task.status_label)}</span>`;
-const riskClass = (type) => ({'Сроки': 'deadline', 'Зависимости': 'dependency', 'Ресурсы': 'resource', 'Компетенции': 'competence'}[type] || 'resource');
+const riskClass = (type) => ({'Сроки': 'deadline', 'Зависимости': 'dependency', 'Ресурсы': 'resource'}[type] || 'resource');
+const severityClass = (severity) => ({RED: 'deadline', YELLOW: 'dependency', ORANGE: 'resource'}[severity] || 'resource');
 const teamEngineers = (teamId) => data.engineers.filter((engineer) => engineer.team_ids.includes(teamId));
 const teamSprintResource = (teamId, sprint) => teamBy(teamId).sp_by_sprint?.[String(sprint)] || {capacity: 0, used: 0, remaining: 0};
 const tButton = (task, label = task.task_id) => `<button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(label)}</button>`;
@@ -432,18 +433,127 @@ function renderTasks() {
   if (structured.length) reasonBox.innerHTML = `<div class="eyebrow">ОБЪЯСНЕНИЯ BACKEND</div><h2>${escapeHtml(task.summary)}</h2><div class="stack">${structured.map((item) => `<div class="reason-card"><b>${escapeHtml(item.kind)} · ${escapeHtml(item.code)} · ${escapeHtml(item.title || '')}</b><p>${escapeHtml(item.message || '')}</p></div>`).join('')}</div>`;
 }
 
+function riskEvidenceValue(item) {
+  const raw = item?.value;
+  const value = typeof raw === 'number' ? number(raw) : escapeHtml(raw);
+  if (!item?.unit) return value;
+  if (item.unit === 'спринт' && typeof raw === 'number') return `Sprint ${number(raw)}`;
+  return `${value} ${escapeHtml(item.unit)}`;
+}
+
+function renderRiskEvidence(risk) {
+  const evidence = risk.evidence || [];
+  if (!evidence.length) return '';
+  return `<div class="detail-row"><strong>Evidence</strong><div class="risk-evidence-grid">${evidence.map((item) => `<div class="risk-evidence-card"><span>${escapeHtml(item.label)}</span><b>${riskEvidenceValue(item)}</b></div>`).join('')}</div></div>`;
+}
+
+function renderRiskAffectedTasks(risk) {
+  const affected = [...new Set(risk.affected_tasks || [])];
+  if (!affected.length || (affected.length === 1 && affected[0] === risk.task_id)) return '';
+  return `<div class="detail-row"><strong>Затронутые задачи</strong><div class="risk-task-links">${affected.map((taskId) => `<button class="table-button" type="button" data-open-task="${attr(taskId)}">${escapeHtml(taskId)} ↗</button>`).join('')}</div></div>`;
+}
+
+function matchesRiskSearch(risk) {
+  const query = (state.riskSearch || '').trim().toLowerCase();
+  if (!query) return true;
+  const haystack = [
+    risk.risk_id,
+    risk.title,
+    risk.type,
+    risk.object,
+    risk.task_id,
+    risk.team_id,
+    risk.initiative_id,
+    risk.cause,
+    risk.effect,
+    risk.recommendation,
+    ...(risk.affected_tasks || []),
+    ...((risk.evidence || []).map((item) => `${item.label} ${item.value ?? ''} ${item.unit ?? ''}`)),
+  ].filter(Boolean).join(' ').toLowerCase();
+  return haystack.includes(query);
+}
+
+function riskDetailMarkup(risk) {
+  const accent = severityClass(risk.severity);
+  return `
+    <div class="eyebrow">ДЕТАЛИЗАЦИЯ РИСКА</div>
+    <div class="risk-dialog-heading">
+      <div>
+        <h2 id="riskDialogTitle">${escapeHtml(risk.title)}</h2>
+        <div class="risk-detail-pills">
+          <span class="alert-pill ${accent}">${escapeHtml(risk.severity_label)}</span>
+          <span class="risk-pill ${riskClass(risk.type)}">${escapeHtml(risk.type)}</span>
+        </div>
+      </div>
+      <div class="risk-dialog-meta">
+        <span class="risk-dialog-object">${escapeHtml(risk.object)}</span>
+        ${risk.sprint ? `<span>Sprint ${risk.sprint}</span>` : ''}
+        ${risk.initiative_id ? `<span>${escapeHtml(risk.initiative_id)}</span>` : ''}
+      </div>
+    </div>
+    <div class="risk-dialog-grid">
+      <section class="detail-row"><strong>Причина</strong><span class="risk-detail-copy">${escapeHtml(risk.cause)}</span></section>
+      ${renderRiskEvidence(risk)}
+      <section class="detail-row risk-consequence"><strong>Последствие</strong><span class="risk-detail-copy">${escapeHtml(risk.effect)}</span></section>
+      ${renderRiskAffectedTasks(risk)}
+      ${renderRiskBusFactor(risk)}
+      <section class="detail-row risk-recommendation"><strong>Рекомендация</strong><span class="risk-detail-copy">${escapeHtml(risk.recommendation)}</span></section>
+    </div>
+    <div class="risk-actions risk-actions-modal">
+      <button class="btn btn-blue" type="button" data-open-task="${attr(risk.task_id)}">Открыть ${escapeHtml(risk.task_id)} ↗</button>
+      ${risk.team_id ? `<button class="btn btn-outline" type="button" data-open-team="${attr(risk.team_id)}">Команда ${escapeHtml(risk.team_id)} ↗</button>` : ''}
+    </div>
+  `;
+}
+
+function openRiskModal(riskId = state.riskId) {
+  const dialog = $('#riskDialog');
+  const content = $('#riskDialogContent');
+  const risk = data.risks.find((item) => item.risk_id === riskId);
+  if (!dialog || !content || !risk) return;
+  state.riskId = risk.risk_id;
+  state.riskModalOpen = true;
+  content.innerHTML = riskDetailMarkup(risk);
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeRiskModal() {
+  state.riskModalOpen = false;
+  const dialog = $('#riskDialog');
+  if (dialog?.open) dialog.close();
+}
+
+function renderRiskBusFactor(risk) {
+  const context = risk.bus_factor_context;
+  if (!context) return '';
+  const helpers = context.potential_helpers || [];
+  const helperRows = helpers.length
+    ? `<div class="risk-helper-list">${helpers.map((helper) => `<button class="risk-helper" type="button" data-open-employee="${attr(helper.engineer_id)}"><b>${escapeHtml(helper.engineer_id)}</b><span>${escapeHtml(helper.role || context.role)} · ${escapeHtml(helper.grade || 'grade не указан')}</span><small>${escapeHtml(helper.source_team_id || 'внешняя команда')} ↗</small></button>`).join('')}</div>`
+    : '<p class="hint">Подходящий cross-team резерв по этой роли не найден.</p>';
+  return `<div class="detail-row"><strong>Кадровый контекст · Bus Factor</strong><div class="risk-bf-metrics"><div><span>Роль</span><b>${escapeHtml(context.role)}</b></div><div><span>Team BF</span><b>${number(context.team_bus_factor)}</b></div><div><span>Organization BF</span><b>${number(context.organization_bus_factor)}</b></div></div>${helperRows}<p class="hint risk-bf-note">${escapeHtml(context.availability_note || '')}</p></div>`;
+}
+
 function renderRisks() {
-  renderDevelopmentNotice('#risksDevelopmentNotice', 'Страница «Риски» пока не завершена. Отображаемые данные и структура могут измениться.');
   $$('#riskFilters button').forEach((button) => button.classList.toggle('selected', button.dataset.riskFilter === state.riskFilter));
-  const rows = data.risks.filter((risk) => state.riskFilter === 'Все' || risk.type === state.riskFilter);
-  if (!rows.some((risk) => risk.risk_id === state.riskId)) state.riskId = rows[0]?.risk_id || null;
+  const search = $('#riskSearch');
+  if (search && search.value !== state.riskSearch) search.value = state.riskSearch;
+  const rows = data.risks.filter((risk) => (state.riskFilter === 'Все' || risk.type === state.riskFilter) && matchesRiskSearch(risk));
+  if (!rows.some((risk) => risk.risk_id === state.riskId)) {
+    state.riskId = rows[0]?.risk_id || null;
+    if (!state.riskId) state.riskModalOpen = false;
+  }
   $('#riskCount').textContent = `${rows.length}`;
-  $('#riskRows').innerHTML = rows.map((risk) => `<tr data-risk-id="${attr(risk.risk_id)}" class="risk-row-${riskClass(risk.type)} ${state.riskId === risk.risk_id ? 'selected' : ''}"><td><b>${escapeHtml(risk.title)}</b></td><td><span class="risk-pill ${riskClass(risk.type)}">${escapeHtml(risk.type)}</span></td><td>${escapeHtml(risk.object)}</td><td>${risk.sprint ? `Sprint ${risk.sprint}` : '—'}</td><td>${escapeHtml(risk.cause)}</td><td>${escapeHtml(risk.effect || 'Не рассчитано')}</td></tr>`).join('');
-  if (!rows.length) $('#riskRows').innerHTML = '<tr><td colspan="6">Рисков этого типа нет.</td></tr>';
-  const risk = data.risks.find((item) => item.risk_id === state.riskId);
-  const detail = $('#riskDetail');
-  detail.className = `panel risk-detail${risk ? ` risk-accent-${riskClass(risk.type)}` : ''}`;
-  detail.innerHTML = risk ? `<div class="eyebrow">ДЕТАЛИЗАЦИЯ</div><h2>${escapeHtml(risk.title)}</h2><span class="risk-pill ${riskClass(risk.type)}">${escapeHtml(risk.type)}</span><div class="detail-row"><strong>Связанный объект</strong>${escapeHtml(risk.object)}${risk.sprint ? ` · Sprint ${risk.sprint}` : ''}</div><div class="detail-row"><strong>Причина</strong>${escapeHtml(risk.cause)}</div><div class="detail-row"><strong>Возможное последствие</strong>${escapeHtml(risk.effect || 'Backend пока не рассчитывает отдельное последствие.')}</div><div><button class="btn btn-blue" type="button" data-open-task="${attr(risk.task_id)}">Открыть ${escapeHtml(risk.task_id)} ↗</button>${risk.team_id ? `<button class="btn btn-outline" type="button" data-open-team="${attr(risk.team_id)}">Команда ${escapeHtml(risk.team_id)} ↗</button>` : ''}</div>` : '<p>Риски данного типа отсутствуют.</p>';
+  $('#riskRows').innerHTML = rows.map((risk) => {
+    const accent = severityClass(risk.severity);
+    const selected = state.riskModalOpen && state.riskId === risk.risk_id;
+    return `<tr data-risk-id="${attr(risk.risk_id)}" class="risk-row-${accent} ${selected ? 'selected' : ''}"><td><span class="alert-pill ${accent}">${escapeHtml(risk.severity_label)}</span></td><td><b>${escapeHtml(risk.title)}</b></td><td><span class="risk-pill ${riskClass(risk.type)}">${escapeHtml(risk.type)}</span></td><td>${escapeHtml(risk.object)}</td><td>${risk.sprint ? `Sprint ${risk.sprint}` : '—'}</td><td><span class="risk-table-copy">${escapeHtml(risk.cause)}</span></td><td><span class="risk-table-copy">${escapeHtml(risk.effect)}</span></td></tr>`;
+  }).join('');
+  if (!rows.length) {
+    $('#riskRows').innerHTML = '<tr><td colspan="7">Рисков этого типа нет.</td></tr>';
+    closeRiskModal();
+    return;
+  }
+  if (state.riskModalOpen && state.riskId) openRiskModal(state.riskId);
 }
 
 function renderRecalc() {
@@ -592,27 +702,30 @@ function bindEvents() {
   $('#archiveReason').addEventListener('change', updateArchiveConfirmation);
   $('#archiveReasonText').addEventListener('input', updateArchiveConfirmation);
   $('#archiveDialog').addEventListener('click', (event) => { if (event.target === $('#archiveDialog')) closeArchiveModal(); });
+  $('#riskDialog')?.addEventListener('click', (event) => { if (event.target === $('#riskDialog')) closeRiskModal(); });
+  $('#riskDialog')?.addEventListener('close', () => { state.riskModalOpen = false; renderRisks(); });
+  $('#riskSearch')?.addEventListener('input', (event) => { state.riskSearch = event.target.value; renderRisks(); });
   document.addEventListener('click', (event) => {
     if (event.target.closest('[data-close-archive]')) { closeArchiveModal(); return; }
     const archive = event.target.closest('[data-archive-entity]');
     if (archive) { openArchiveModal(archive.dataset.archiveEntity, archive.dataset.archiveId, archive.dataset.currentPlanReference === 'true'); return; }
     if (event.target.closest('[data-close-drawer]')) { closeEmployee(); return; }
     if (event.target.closest('[data-task-back]')) { show(state.taskReturnPage || 'current-plan'); return; }
-    const nav = event.target.closest('button[data-page]'); if (nav) { show(nav.dataset.page); return; }
+    const nav = event.target.closest('button[data-page]'); if (nav) { closeRiskModal(); show(nav.dataset.page); return; }
     const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('current-plan'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
-    const planTask = event.target.closest('[data-plan-task]'); if (planTask) { gotoTask(planTask.dataset.planTask); return; }
-    const task = event.target.closest('[data-open-task]'); if (task) { gotoTask(task.dataset.openTask); return; }
-    const risk = event.target.closest('[data-open-risk]'); if (risk) { state.riskId = risk.dataset.openRisk; state.riskFilter = 'Все'; show('risks'); return; }
+    const planTask = event.target.closest('[data-plan-task]'); if (planTask) { closeRiskModal(); gotoTask(planTask.dataset.planTask); return; }
+    const task = event.target.closest('[data-open-task]'); if (task) { closeRiskModal(); gotoTask(task.dataset.openTask); return; }
+    const risk = event.target.closest('[data-open-risk]'); if (risk) { state.riskId = risk.dataset.openRisk; state.riskFilter = 'Все'; state.riskSearch = ''; state.riskModalOpen = true; show('risks'); return; }
     const filter = event.target.closest('[data-risk-filter]'); if (filter) { state.riskFilter = filter.dataset.riskFilter; renderRisks(); return; }
-    const riskRow = event.target.closest('[data-risk-id]'); if (riskRow) { state.riskId = riskRow.dataset.riskId; renderRisks(); return; }
+    const riskRow = event.target.closest('[data-risk-id]'); if (riskRow) { state.riskId = riskRow.dataset.riskId; openRiskModal(riskRow.dataset.riskId); renderRisks(); return; }
     const competency = event.target.closest('[data-star-competency]'); if (competency) { state.competency = competency.dataset.starCompetency; renderStarTeams(); $('#competencyDetail')?.scrollIntoView({behavior: 'smooth', block: 'nearest'}); return; }
-    const team = event.target.closest('[data-open-team]'); if (team) { gotoTeam(team.dataset.openTeam); return; }
+    const team = event.target.closest('[data-open-team]'); if (team) { closeRiskModal(); gotoTeam(team.dataset.openTeam); return; }
     const employee = event.target.closest('[data-open-employee]'); if (employee) { gotoEmployee(employee.dataset.openEmployee); return; }
     const backToTeam = event.target.closest('[data-employee-team]'); if (backToTeam) { closeEmployee(); gotoTeam(backToTeam.dataset.employeeTeam); return; }
     const starTab = event.target.closest('[data-star-tab]'); if (starTab) { state.starTab = starTab.dataset.starTab; renderStar(); return; }
   });
   document.addEventListener('change', (event) => { if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTasks(); } });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeArchiveModal(); closeEmployee(); } });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeArchiveModal(); closeRiskModal(); closeEmployee(); } });
 }
 
 function hydrate(payload) {
@@ -632,6 +745,8 @@ function hydrate(payload) {
   state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
   state.teamId = data.starMap.teams?.[0]?.team_id || data.teams[0]?.team_id || null;
   state.competency = null;
+  state.riskSearch = '';
+  state.riskModalOpen = false;
   state.riskId = data.risks[0]?.risk_id || null;
 }
 
