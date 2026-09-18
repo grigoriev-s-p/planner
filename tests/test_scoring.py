@@ -99,19 +99,16 @@ class ScoringTests(unittest.TestCase):
         self.assertGreater(active.total_score, high.total_score)
         self.assertEqual(sort_tasks_for_planning(tasks, [])[0]["task_id"], "ACTIVE")
 
-    def test_rung_direction_is_configurable(self) -> None:
+    def test_superseded_lower_rung_direction_is_rejected(self) -> None:
         tasks = [task("HIGH", rung=100), task("LOW", rung=10)]
         context = scoring_context(tasks)
         higher = ScoringConfig(rung_direction="higher_is_better")
-        lower = ScoringConfig(rung_direction="lower_is_better")
         self.assertGreater(
             calculate_task_score(tasks[0], context, higher).components["rung_score"],
             calculate_task_score(tasks[1], context, higher).components["rung_score"],
         )
-        self.assertLess(
-            calculate_task_score(tasks[0], context, lower).components["rung_score"],
-            calculate_task_score(tasks[1], context, lower).components["rung_score"],
-        )
+        with self.assertRaisesRegex(ValueError, "higher_is_better"):
+            ScoringConfig(rung_direction="lower_is_better")  # type: ignore[arg-type]
 
     def test_missing_rung_is_zero_and_does_not_break_scoring(self) -> None:
         tasks = [task("KNOWN", rung=10), task("MISSING")]
@@ -120,15 +117,19 @@ class ScoringTests(unittest.TestCase):
         self.assertTrue(score.eligible)
         self.assertEqual(score.components["rung_score"], 0)
 
-    def test_earlier_planned_end_receives_higher_deadline_score(self) -> None:
+    def test_planned_end_is_metadata_and_does_not_change_score_or_order(self) -> None:
         tasks = [
-            task("EARLY", planned_end="2026-01-15"),
-            task("LATE", planned_end="2026-03-15"),
+            task("Z-EARLY", planned_end="2026-01-15"),
+            task("A-LATE", planned_end="2026-03-15"),
         ]
         context = scoring_context(tasks)
-        self.assertGreater(
-            calculate_task_score(tasks[0], context).components["deadline_score"],
-            calculate_task_score(tasks[1], context).components["deadline_score"],
+        early = calculate_task_score(tasks[0], context)
+        late = calculate_task_score(tasks[1], context)
+        self.assertEqual(early.components["deadline_score"], 0)
+        self.assertEqual(early.total_score, late.total_score)
+        self.assertEqual(
+            [row["task_id"] for row in sort_tasks_for_planning(tasks, [])],
+            ["A-LATE", "Z-EARLY"],
         )
 
     def test_planned_end_is_not_an_eligibility_constraint(self) -> None:

@@ -5,7 +5,7 @@ Scoring v1 — объяснимая формула бизнес-приорите
 разместить задачу с учётом Story Points, ролей, инженеров и зависимостей.
 
 ```text
-base_score = rung_score + status_score + deadline_score
+base_score = rung_score + status_score
 dynamic_score = initiative_completion_score + dependency_unlock_score
 total_score = base_score + dynamic_score
 ```
@@ -14,15 +14,15 @@ total_score = base_score + dynamic_score
 
 - `rung_weight = 40`;
 - `in_progress_bonus = 25`;
-- `deadline_weight = 5`;
+- `deadline_weight = 0` (поле совместимости, в scoring не участвует);
 - `initiative_completion_weight = 20`;
 - `dependency_unlock_weight = 10`;
 - `dependency_unlock_saturation_count = 4`.
 
 Организаторы подтвердили: **чем выше `rung`, тем выше приоритет задачи**.
-`rung` нормализуется среди планируемых задач. Production/default configuration
-использует `ScoringConfig.rung_direction = "higher_is_better"`. Техническая
-настройка направления сохранена для совместимости API; бизнес-правило определено.
+`rung` нормализуется среди планируемых задач. `ScoringConfig.rung_direction`
+принимает только подтверждённое значение `"higher_is_better"`; прежний режим
+`"lower_is_better"` отклоняется как противоречащий бизнес-правилу.
 Вес rung (40) — наибольший отдельный вес. Остальные компоненты дополняют его:
 их сумма может поднять задачу с меньшим rung выше по total score.
 
@@ -33,13 +33,13 @@ total_score = base_score + dynamic_score
 ```text
 total_score = rung_score                         # 0..40
             + 25 * is_in_progress
-            + deadline_score                    # 0..5, мягкая срочность
             + 20 / (unfinished_after_task + 1)   # известная инициатива, иначе 0
             + 10 * min(downstream_count / 4, 1)
 ```
 
-`planned_end` является мягким относительным сигналом срочности и не блокирует
-задачу. Бонус завершения инициативы равен максимальному весу, делённому на
+`planned_end` сохраняется только как baseline metadata: оно не является hard
+constraint, objective, score component или tie-break. Бонус завершения
+инициативы равен максимальному весу, делённому на
 количество незавершённых после этой задачи работ плюс один. Он не применяется
 при неизвестном составе инициативы. Бонус зависимостей линейно растёт по числу
 уникальных достижимых незавершённых задач и достигает максимума на четырёх.
