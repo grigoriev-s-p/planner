@@ -552,6 +552,8 @@ def build_data_preflight(
         "show_dialog": sum(counts.values()) > 0,
         "summary": counts,
         "groups": groups,
+        "archived_entities": [dict(item) for item in merge_preview.archived_entities],
+        "import_summary": dict(merge_preview.summary or {}),
     }
 
 
@@ -566,6 +568,8 @@ def structural_preflight(message: str) -> dict[str, Any]:
         "can_continue": False,
         "show_dialog": True,
         "summary": {"critical": 1, "warning": 0, "info": 0},
+        "archived_entities": [],
+        "import_summary": {},
         "groups": [{
             "category": "structure", "title": CATEGORY_TITLES["structure"],
             "count": 1, "counts": {"critical": 1, "warning": 0, "info": 0},

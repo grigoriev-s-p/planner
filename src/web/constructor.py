@@ -102,6 +102,61 @@ class PreparedConstructorUpload:
     audit: dict[str, Any]
 
 
+ARCHIVE_DECISIONS = {"KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"}
+
+
+def _validated_archive_decisions(
+    prepared: PreparedConstructorUpload,
+    decisions: dict[str, str] | None,
+) -> dict[str, str]:
+    """Normalize explicit archive choices and reject dangling references."""
+
+    records = prepared.audit.get("archived_entities") or []
+    known = {str(item.get("decision_key")) for item in records}
+    supplied = {str(key): str(value).upper() for key, value in (decisions or {}).items()}
+    if set(supplied) - known:
+        raise ConstructorDatasetUploadError("Решение относится к неизвестной архивной записи.")
+    if any(value not in ARCHIVE_DECISIONS for value in supplied.values()):
+        raise ConstructorDatasetUploadError("Выберите допустимое действие для архивной записи.")
+    result = {key: supplied.get(key, "KEEP_ARCHIVED") for key in known}
+    kept_teams = {
+        key.split(":", 1)[1]
+        for key, value in result.items()
+        if key.startswith("team:") and value == "KEEP_ARCHIVED"
+    }
+    kept_tasks = {
+        key.split(":", 1)[1]
+        for key, value in result.items()
+        if key.startswith("task:") and value == "KEEP_ARCHIVED"
+    }
+    for row in prepared.tables.get("tasks", []):
+        if _clean_text(row.get("team_id")) in kept_teams and not is_historical_done(row):
+            raise ConstructorDatasetUploadError(
+                f"Задача {_clean_text(row.get('task_id'))} ссылается на архивную команду "
+                f"{_clean_text(row.get('team_id'))}. Восстановите команду или измените команду задачи."
+            )
+    for row in prepared.tables.get("engineers", []):
+        if _clean_text(row.get("team_id")) in kept_teams:
+            raise ConstructorDatasetUploadError(
+                f"Инженер {_clean_text(row.get('engineer_id'))} ссылается на архивную команду "
+                f"{_clean_text(row.get('team_id'))}. Восстановите команду или измените команду инженера."
+            )
+    active_tasks = {
+        _clean_text(row.get("task_id"))
+        for row in prepared.tables.get("tasks", [])
+        if not is_historical_done(row)
+    }
+    for row in prepared.tables.get("task_dependencies", []):
+        blocking = _clean_text(row.get("blocking_task_id"))
+        blocked = _clean_text(row.get("blocked_task_id"))
+        if blocking in kept_tasks and blocked in active_tasks:
+            raise ConstructorDatasetUploadError(
+                f"Задача {blocked} зависит от архивной задачи {blocking}, оставленной в архиве. "
+                "Восстановите задачу или исправьте зависимость."
+            )
+    return result
+
+
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -595,6 +650,7 @@ def prepare_constructor_workbook(
 def build_constructor_plan_from_prepared(
     prepared: PreparedConstructorUpload,
     repository: CatalogRepository,
+    archive_decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Merge an accepted audited snapshot and build its Base Plan once."""
 
@@ -604,7 +660,10 @@ def build_constructor_plan_from_prepared(
         )
 
     try:
-        merge_result = repository.merge_tables(prepared.tables)
+        decisions = _validated_archive_decisions(prepared, archive_decisions)
+        merge_result = repository.merge_tables(
+            prepared.tables, archive_decisions=decisions
+        )
         planning_tables = _include_archived_done_blocker_context(
             repository.active_planning_tables(), repository
         )
