@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from src.bus_factor import BusFactorService
+from src.star_map import StarMapService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
 from src.planning.ownership import evaluate_ownership_rows
@@ -808,6 +809,161 @@ class PlanningAPIService:
     def bus_factor_payload(self) -> dict[str, Any]:
         return build_bus_factor_payload(self.tables)
 
+    @staticmethod
+    def _star_zone_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+        return {
+            "critical": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) <= 1),
+            "limited": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) == 2),
+            "stable": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) >= 3),
+            "total": len(entries),
+        }
+
+    def _star_competency_modes(
+        self,
+        team_id: str,
+        bus_team: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adapt the existing Bus Factor DTO to the Star Map graph contract.
+
+        The Star Map service supplies stable team/allocation geometry while the
+        existing BusFactorService remains the only source of BF values.
+        """
+
+        technologies: list[dict[str, Any]] = []
+        for item in bus_team.get("competencies", []):
+            holders = [engineer.get("engineer_id") for engineer in item.get("engineers", [])]
+            technologies.append(
+                {
+                    "technology": item.get("skill"),
+                    "team_bus_factor": int(item.get("bus_factor") or 0),
+                    "organization_bus_factor": int(item.get("organization_bus_factor") or 0),
+                    "engineer_ids": sorted({value for value in holders if value}),
+                    "engineer_count": len({value for value in holders if value}),
+                    "coverage_status": item.get("coverage_status"),
+                    "quarter_relevance": item.get("quarter_relevance"),
+                    "quarter_relevant": item.get("quarter_relevance") == "required",
+                    "quarter_engineer_ids": sorted({value for value in holders if value}),
+                    "helpers": [
+                        {
+                            "engineer_id": helper.get("engineer_id"),
+                            "source_team_id": ", ".join(helper.get("source_team_ids") or []),
+                        }
+                        for helper in item.get("external_engineers", [])
+                    ],
+                }
+            )
+
+        role_entries: list[dict[str, Any]] = []
+        try:
+            role_rows = self._risk_bus_factor_service.role_coverage(team_id)
+        except KeyError:
+            role_rows = pd.DataFrame()
+        for row in role_rows.to_dict("records"):
+            team_bf = int(row.get("team_bus_factor") or 0)
+            if team_bf <= 0:
+                continue
+            role = _text(row.get("competency")) or ""
+            holders = self._risk_bus_factor_service.competency_engineers(team_id, "role", role)
+            role_entries.append(
+                {
+                    "competency": role,
+                    "role": role,
+                    "team_bus_factor": team_bf,
+                    "organization_bus_factor": int(row.get("organization_bus_factor") or 0),
+                    "engineer_ids": holders,
+                    "engineer_count": len(holders),
+                    "quarter_relevance": row.get("quarter_relevance"),
+                    "quarter_relevant": row.get("quarter_relevance") == "required",
+                    "quarter_engineer_ids": holders,
+                    "helpers": [],
+                }
+            )
+
+        technologies.sort(key=lambda item: str(item.get("technology") or "").casefold())
+        role_entries.sort(key=lambda item: str(item.get("competency") or "").casefold())
+        all_entries = [*role_entries, *technologies]
+        quarter_roles = [item for item in role_entries if item.get("quarter_relevant")]
+        quarter_technologies = [item for item in technologies if item.get("quarter_relevant")]
+
+        def mode(roles: list[dict[str, Any]], skills: list[dict[str, Any]]) -> dict[str, Any]:
+            entries = [*roles, *skills]
+            return {
+                "roles": roles,
+                "technologies": skills,
+                "entries": entries,
+                "zone_counts": self._star_zone_counts(entries),
+            }
+
+        return {
+            "all": mode(role_entries, technologies),
+            "quarter": mode(quarter_roles, quarter_technologies),
+            "graph_competencies": quarter_technologies or technologies,
+            "entries": all_entries,
+        }
+
+    @cached_property
+    def star_map_payload(self) -> dict[str, Any]:
+        base = StarMapService(
+            engineers=self.tables.get("engineers", []),
+            engineer_skills=self.tables.get("engineer_skills", []),
+            tasks=self.tasks,
+            current_sprint=1,
+        ).payload()
+        bus = self.bus_factor_payload
+        bus_by_team = {item.get("team_id"): item for item in bus.get("teams", [])}
+        bus_engineers = {item.get("engineer_id"): item for item in bus.get("engineers", [])}
+        profiles = self.engineer_by_id
+        for engineer in base.get("engineers", []):
+            engineer_id = engineer.get("engineer_id")
+            profile = profiles.get(engineer_id, {})
+            bf_profile = bus_engineers.get(engineer_id, {})
+            engineer["name"] = profile.get("name") or engineer.get("engineer_id")
+            engineer["team_criticality"] = bf_profile.get("team_criticality", [])
+            engineer["memberships"] = bf_profile.get("memberships", [])
+            engineer["archived"] = bool(profile.get("archived"))
+        for team in base.get("teams", []):
+            team_id = team.get("team_id")
+            bus_team = bus_by_team.get(team_id, {})
+            modes = self._star_competency_modes(team_id, bus_team)
+            team["team_name"] = next(
+                (
+                    name
+                    for row in self.tables.get("team_history", [])
+                    if _text(row.get("team_id")) == team_id
+                    for name in (_text(row.get("team_name")) or _text(row.get("name")),)
+                    if name
+                ),
+                team_id,
+            )
+            team["engineer_count"] = team.get("member_count", 0)
+            team["competencies"] = bus_team.get("competencies", [])
+            team["competency_count"] = bus_team.get("competency_count", len(modes["all"]["entries"]))
+            team["bus_factor_available"] = bool(modes["all"]["entries"])
+            team["summary"] = bus_team.get("summary", {
+                "single_owner_count": modes["quarter"]["zone_counts"]["critical"],
+                "warning_count": modes["quarter"]["zone_counts"]["limited"],
+                "healthy_count": modes["quarter"]["zone_counts"]["stable"],
+            })
+            team["status"] = bus_team.get("status", "AVAILABLE")
+            team["message"] = bus_team.get("message")
+            team["competency_modes"] = modes
+            team["graph_competencies"] = modes["graph_competencies"]
+            team["bus_factor"] = {
+                "risks": modes["quarter"]["entries"],
+                "critical_count": modes["quarter"]["zone_counts"]["critical"],
+                "limited_count": modes["quarter"]["zone_counts"]["limited"],
+                "sufficient_count": modes["quarter"]["zone_counts"]["stable"],
+                "modes": modes,
+            }
+        base["bus_factor"] = {
+            "available": bus.get("status") == "AVAILABLE",
+            "method": bus.get("method"),
+        }
+        base["status"] = bus.get("status", "INSUFFICIENT_DATA")
+        base["method"] = bus.get("method", "existing_bus_factor_service")
+        base["bus_factor_status"] = "AVAILABLE" if bus.get("status") == "AVAILABLE" else "INSUFFICIENT_DATA"
+        return _clean(base)
+
     @cached_property
     def teams(self) -> list[dict[str, Any]]:
         team_ids = sorted(
@@ -1480,7 +1636,7 @@ class PlanningAPIService:
 
     @cached_property
     def star_map(self) -> dict[str, Any]:
-        return self.bus_factor_payload
+        return self.star_map_payload
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:

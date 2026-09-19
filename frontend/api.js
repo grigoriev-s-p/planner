@@ -33,6 +33,7 @@ window.postcodeApi = (() => {
     getTeam: (teamId) => request(`/api/teams/${encodeURIComponent(teamId)}`),
     getEngineers: () => request('/api/engineers'),
     getEngineer: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}`),
+    getEngineerWorkspace: (engineerId) => request(`/api/engineer-workspace/${encodeURIComponent(engineerId)}`),
     getStarMap: () => request('/api/star-map'),
     getConstructorCatalog: () => request('/api/plan-constructor/catalog'),
     getArchiveReasons: () => request('/api/catalog/archive-reasons'),

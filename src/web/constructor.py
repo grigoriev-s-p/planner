@@ -560,7 +560,7 @@ def build_constructor_plan(
     }
     service = PlanningAPIService.from_tables(
         tables,
-        plan_version="constructor-base-draft",
+        plan_version="constructor-draft",
         planner_options={
             "allow_team_reassignment": False,
             "allow_cross_team": False,
