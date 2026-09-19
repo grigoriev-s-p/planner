@@ -289,16 +289,19 @@ def parse_workbook(raw_file: Path) -> ParsedDataset:
     except Exception as error:  # openpyxl has several format-specific exception classes.
         raise DatasetParsingError(f"Could not open raw workbook {raw_file}: {error}") from error
 
-    if not workbook.worksheets:
-        raise DatasetParsingError(f"Raw workbook {raw_file} has no worksheets.")
-    blocks = detect_blocks(workbook.worksheets[0])
-    return ParsedDataset(
-        tasks=blocks["tasks"],
-        effort=blocks["effort"],
-        dependencies=blocks["dependencies"],
-        engineers=blocks["engineers"],
-        team_history=blocks["team_history"],
-        planning_results=blocks["planning_results"],
-        plan_mismatch_reasons=blocks["plan_mismatch_reasons"],
-        task_closure_results=blocks["task_closure_results"],
-    )
+    try:
+        if not workbook.worksheets:
+            raise DatasetParsingError(f"Raw workbook {raw_file} has no worksheets.")
+        blocks = detect_blocks(workbook.worksheets[0])
+        return ParsedDataset(
+            tasks=blocks["tasks"],
+            effort=blocks["effort"],
+            dependencies=blocks["dependencies"],
+            engineers=blocks["engineers"],
+            team_history=blocks["team_history"],
+            planning_results=blocks["planning_results"],
+            plan_mismatch_reasons=blocks["plan_mismatch_reasons"],
+            task_closure_results=blocks["task_closure_results"],
+        )
+    finally:
+        workbook.close()

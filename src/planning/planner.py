@@ -23,6 +23,7 @@ from .plan_models import (
     TaskAllocation,
     TaskPlanResult,
 )
+from .ownership import evaluate_task_ownership
 from .planning_calendar import PlanningCalendar, shift_days, shift_direction
 from .reasons import ReasonCode
 from .scoring import (
@@ -38,6 +39,7 @@ from .story_points import (
     StoryPointDistribution,
     distribute_capacity_sp_load,
 )
+from .task_states import is_historical_done
 
 
 SPRINT_COUNT = 6
@@ -235,11 +237,20 @@ class BaselineQuarterPlanner:
         context: FeasibilityContext,
         quarter_start_date: Any = None,
         scoring_config: ScoringConfig | None = None,
+        *,
+        allow_team_reassignment: bool = True,
+        allow_cross_team: bool = True,
+        cross_team_task_ids: set[str] | None = None,
     ):
         self.context = context
         self.feasibility = FeasibilityService(context)
         self.calendar = PlanningCalendar.from_value(quarter_start_date)
         self.scoring_config = scoring_config or ScoringConfig()
+        self.allow_team_reassignment = allow_team_reassignment
+        self.allow_cross_team = allow_cross_team
+        # Recommendation simulations may open external help only for explicitly
+        # accepted tasks.  The regular plan keeps its former all-or-nothing API.
+        self.cross_team_task_ids = frozenset(cross_team_task_ids or ())
         self.tasks = {
             task_id: dict(task)
             for task in context.tasks
@@ -542,6 +553,9 @@ class BaselineQuarterPlanner:
                 role_hours_override={},
                 story_points_override=0.0 if story_points is not None else None,
                 team_id_override=team_id,
+                allow_cross_team=(self.allow_cross_team and (
+                    not self.cross_team_task_ids or task_id in self.cross_team_task_ids
+                )),
             )
             if not feasibility.can_complete or team_id is None:
                 attempts.append(
@@ -587,9 +601,12 @@ class BaselineQuarterPlanner:
                 feasibility = self.feasibility.check(
                     task_id,
                     state,
-                    role_hours_override=remaining,
-                    story_points_override=0.0 if story_points is not None else None,
-                    team_id_override=team_id,
+                role_hours_override=remaining,
+                story_points_override=0.0 if story_points is not None else None,
+                team_id_override=team_id,
+                allow_cross_team=(self.allow_cross_team and (
+                    not self.cross_team_task_ids or task_id in self.cross_team_task_ids
+                )),
                 )
                 if not feasibility.can_start:
                     attempts.append(
@@ -615,6 +632,8 @@ class BaselineQuarterPlanner:
                     remaining,
                     feasibility,
                     max_total_hours=max_task_hours,
+                    prior_ownership=evaluate_task_ownership(team_id, allocations),
+                    enforce_owner_majority=True,
                 )
                 if outcome.total_hours <= 1e-9:
                     attempts.append(
@@ -839,7 +858,6 @@ class BaselineQuarterPlanner:
                     is_completed=completes_now,
                     check_reasons=(previous.check_reasons if previous else ()),
                 )
-                trial_ledgers[sprint_number].add_allocation(team_id, allocation)
                 finalized_allocations.append(allocation)
                 previous_attempt = attempts_by_sprint.get(sprint_number)
                 updated_attempt = PlacementAttempt(
@@ -856,6 +874,43 @@ class BaselineQuarterPlanner:
                 else:
                     attempts[attempts.index(previous_attempt)] = updated_attempt
             allocations = finalized_allocations
+            ownership = evaluate_task_ownership(team_id, allocations)
+            if not ownership.valid:
+                ownership_reason = FeasibilityReason(
+                    ReasonCode.INVALID_TASK_OWNERSHIP,
+                    ownership.to_dict(),
+                )
+                tentative_indexes = [
+                    index
+                    for index, attempt in enumerate(attempts)
+                    if attempt.outcome == PlacementOutcome.TENTATIVE
+                ]
+                if tentative_indexes:
+                    index = tentative_indexes[-1]
+                    attempt = attempts[index]
+                    attempts[index] = PlacementAttempt(
+                        attempt.sprint_number,
+                        attempt.outcome,
+                        allocated_hours=attempt.allocated_hours,
+                        capacity_sp_load=attempt.capacity_sp_load,
+                        planned_completion_sp=attempt.planned_completion_sp,
+                        completed_sp=attempt.completed_sp,
+                        reasons=attempt.reasons + (ownership_reason,),
+                    )
+                else:
+                    attempts.append(
+                        PlacementAttempt(
+                            completion_sprint,
+                            PlacementOutcome.REJECTED,
+                            reasons=(ownership_reason,),
+                        )
+                    )
+                success = False
+            else:
+                for allocation in allocations:
+                    trial_ledgers[allocation.sprint_number].add_allocation(
+                        team_id, allocation
+                    )
 
         final_outcome = PlacementOutcome.COMMITTED if success else PlacementOutcome.ROLLED_BACK
         finalized_attempts = tuple(
@@ -885,7 +940,11 @@ class BaselineQuarterPlanner:
         """Simulate existing teams and prefer the source team on equal finish."""
 
         original_team_id = _text(task.get("team_id"))
-        candidate_team_ids = list(self.team_ids)
+        candidate_team_ids = (
+            list(self.team_ids)
+            if self.allow_team_reassignment or original_team_id is None
+            else [original_team_id]
+        )
         if original_team_id in candidate_team_ids:
             candidate_team_ids.remove(original_team_id)
             candidate_team_ids.insert(0, original_team_id)
@@ -1129,7 +1188,7 @@ class BaselineQuarterPlanner:
                     task, status=PlanStatus.UNKNOWN, final_reasons=(reason,)
                 )
                 quarter_warnings.append(reason)
-            elif (_text(task.get("status")) or "").casefold() == COMPLETED_SOURCE_STATUS:
+            elif is_historical_done(task):
                 completed_tasks[task_id] = 0
                 results[task_id] = self._task_result(
                     task,
@@ -1278,6 +1337,7 @@ class BaselineQuarterPlanner:
                                 "team_sp",
                                 "roles",
                                 "engineer_hours",
+                                "task_ownership",
                                 "dependencies",
                                 "quarter_horizon",
                             ],
@@ -1461,6 +1521,10 @@ def build_quarter_plan(
     context: FeasibilityContext,
     quarter_start_date: Any = None,
     scoring_config: ScoringConfig | None = None,
+    *,
+    allow_team_reassignment: bool = True,
+    allow_cross_team: bool = True,
+    cross_team_task_ids: set[str] | None = None,
 ) -> QuarterPlan:
     """Build the scored plan; resource state and atomic rollback are automatic."""
 
@@ -1468,4 +1532,7 @@ def build_quarter_plan(
         context,
         quarter_start_date=quarter_start_date,
         scoring_config=scoring_config,
+        allow_team_reassignment=allow_team_reassignment,
+        allow_cross_team=allow_cross_team,
+        cross_team_task_ids=cross_team_task_ids,
     ).plan()

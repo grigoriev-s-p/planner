@@ -12,7 +12,7 @@ const state = {
 };
 
 const data = {
-  plan: null, summary: {}, tasks: [], initiatives: [], risks: [], teams: [],
+  plan: null, summary: {}, tasks: [], historicalTasks: [], initiatives: [], risks: [], teams: [],
   engineers: [], starMap: {teams: [], engineers: []}, kpis: null, features: {}, archiveReasons: {}, ready: false,
 };
 
@@ -28,7 +28,22 @@ const teamBy = (id) => data.teams.find((team) => team.team_id === id) || {team_i
 const engineerBy = (id) => data.engineers.find((engineer) => engineer.engineer_id === id);
 const starTeamBy = (id) => data.starMap?.teams?.find((team) => team.team_id === id);
 const starEngineerBy = (id) => data.starMap?.engineers?.find((engineer) => engineer.engineer_id === id);
-const taskBy = (id) => data.tasks.find((task) => task.task_id === id);
+const taskBy = (id) => data.tasks.find((task) => task.task_id === id)
+  || data.historicalTasks.find((task) => task.task_id === id);
+const historicalTaskFromCatalog = (task) => ({
+  task_id: task.task_id, title: task.title, description: task.title,
+  initiative_id: task.initiative_id, status: 'DONE',
+  status_label: 'Завершена до начала планирования', source_status: task.status,
+  rung: task.rung,
+  priority_label: Number.isFinite(Number(task.rung)) ? `Rung ${task.rung}` : 'Rung не указан',
+  story_points: task.story_points, original_team_id: task.team_id, assigned_team_id: task.team_id,
+  team_reassigned: false, planned_sprints: [], completion_sprint: 0, multi_sprint: false,
+  sp_load_by_sprint: {}, hours_by_sprint: {}, role_hours_by_sprint: {},
+  role_requirements: Object.fromEntries((task.role_requirements || []).map((item) => [item.role, item.required_hours])),
+  dependencies: {incoming: [], outgoing: []}, allocations: [], ownership: null,
+  reasons: [], reason_blocks: [], risks: [], recommendations: [],
+  summary: 'Завершена до начала планирования.', outside_quarter: false, is_placeholder: false,
+});
 const currentSprint = () => Number(data.plan?.quarter?.current_sprint || 1);
 const sprintBy = (sprint) => data.plan?.sprints?.find((item) => item.sprint_number === sprint);
 const taskSprints = (task) => task?.planned_sprints || [];
@@ -37,7 +52,7 @@ const portion = (task, sprint) => Number(task?.sp_load_by_sprint?.[String(sprint
 const sprintHours = (task, sprint) => task?.role_hours_by_sprint?.[String(sprint)] || null;
 const sprintLabel = (task) => {
   const sprints = taskSprints(task);
-  if (!sprints.length) return task.status === 'DONE' ? 'Завершена до квартала' : 'Не включена в квартальный план';
+  if (!sprints.length) return task.status === 'DONE' ? 'Завершена до начала планирования' : 'Не включена в квартальный план';
   return sprints.length === 1 ? `Sprint ${sprints[0]}` : `Sprint ${sprints[0]}–${sprints.at(-1)}`;
 };
 const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Выполнен'}[sprintBy(sprint)?.status] || 'Запланирован');
@@ -375,7 +390,6 @@ function gotoTask(taskId) {
 function gotoTeam(teamId) {
   if (!teamBy(teamId).team_id) return;
   state.teamId = teamId;
-  state.competency = null;
   state.starTab = 'teams';
   show('star');
 }
@@ -671,8 +685,20 @@ function renderTaskDetail() {
     const crossTeam = Boolean(item.cross_team) || Boolean(item.source_team_id && task.assigned_team_id && item.source_team_id !== task.assigned_team_id);
     return `<tr class="${crossTeam ? 'cross-team-row' : ''}"><td><button class="table-button" type="button" data-open-employee="${attr(item.engineer_id)}">${escapeHtml(item.engineer_id)} ↗</button></td><td>${escapeHtml(item.role || '—')}</td><td>${escapeHtml(item.source_team_id || '—')}${crossTeam ? '<span class="cross-team-badge" title="Сотрудник привлечён из другой команды">⚠ Другая команда</span>' : ''}</td><td>${number(item.allocated_hours)} ч</td></tr>`;
   });
+  const localAllocations = allocations.filter((item) => !item.cross_team);
+  const externalAllocations = allocations.filter((item) => item.cross_team);
+  const ownership = task.ownership || {};
+  const performerRows = (rows, external) => [...new Set(rows.map((item) => item.engineer_id))].map((engineerId) => {
+    const rowsForEngineer = rows.filter((item) => item.engineer_id === engineerId);
+    const hours = rowsForEngineer.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0);
+    const source = external ? ` · ${escapeHtml(rowsForEngineer[0].source_team_id)}` : '';
+    return `<button type="button" class="person-link" data-open-employee="${attr(engineerId)}"><b>${escapeHtml(engineerId)}${source}</b><span>${number(hours)} ч ↗</span></button>`;
+  }).join('');
+  const ownershipSummary = ownership.total_hours > 0
+    ? `<div class="ownership-summary"><b>Команда выполняет ${number(ownership.owner_share_percent)}% трудозатрат</b><span>${number(ownership.owner_engineer_count)} инженера команды + ${number(ownership.external_engineer_count)} внешних специалиста</span><small>${escapeHtml(ownership.status_message || '')}</small></div>`
+    : '';
   const sprintPicker = task.multi_sprint && selectedSprint ? `<label class="task-sprint-picker">Показать спринт<select id="taskSprintSelect">${sprints.map((sprint) => `<option value="${sprint}" ${sprint === selectedSprint ? 'selected' : ''}>Sprint ${sprint}</option>`).join('')}</select></label>` : '';
-  $('#taskHours').innerHTML = `<div class="panel-heading"><div><h2>Распределение ресурсов</h2><p class="hint">Фактические назначения planner-а${selectedSprint ? ` для Sprint ${selectedSprint}` : ''}.</p></div>${sprintPicker}</div>${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено'], allocationRows) : empty('Распределения ресурсов отсутствуют.')}`;
+  $('#taskHours').innerHTML = `<div class="panel-heading"><div><h2>Распределение ресурсов</h2><p class="hint">Фактические назначения planner-а${selectedSprint ? ` для Sprint ${selectedSprint}` : ''}.</p></div>${sprintPicker}</div>${ownershipSummary}<h3 class="needs-title">Основная команда — ${escapeHtml(task.assigned_team_id || '—')}</h3>${localAllocations.length ? performerRows(localAllocations, false) : empty('У основной команды нет назначенных часов.')}<h3 class="needs-title">Помощь других команд</h3>${externalAllocations.length ? performerRows(externalAllocations, true) : empty('Внешняя помощь не требуется.')}${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено'], allocationRows) : empty('Распределения ресурсов отсутствуют.')}`;
 }
 
 function riskEvidenceValue(item) {
@@ -825,12 +851,12 @@ function busRiskTag(competency) {
 function renderCompetencyMap(team, selected) {
   if (!team.bus_factor_available) {
     $('#competencyMap').innerHTML = empty(team.message || 'Для этой команды пока нет данных о компетенциях.');
-    $('#competencyDetail').innerHTML = '';
-    $('#busRiskList').innerHTML = empty(team.message || 'Недостаточно данных для расчёта Bus Factor.');
+    $('#competencyDetail').innerHTML = empty(team.message || 'Недостаточно данных для расчёта Bus Factor.');
+    $('#busRiskList').innerHTML = empty('Критичных рисков Bus Factor не обнаружено.');
     return;
   }
   const nodes = team.competencies.map((competency) => `<button type="button" class="competency-node ${attr(competency.risk_level)} ${competency.skill === selected?.skill ? 'selected' : ''}" data-star-competency="${attr(competency.skill)}" aria-pressed="${competency.skill === selected?.skill}"><span>${escapeHtml(competency.skill)}</span><b>BF ${number(competency.bus_factor)}</b></button>`).join('');
-  $('#competencyMap').innerHTML = `<div class="map-team-core"><span>Команда</span><b>${escapeHtml(team.team_name)}</b><small>${team.engineer_count} инженеров · ${team.competency_count} компетенций</small></div><div class="competency-node-grid">${nodes}</div>`;
+  $('#competencyMap').innerHTML = `<div class="map-team-core"><span>Команда</span><b>${escapeHtml(team.team_name)}</b><small>${number(team.engineer_count)} инженеров · ${number(team.competency_count)} компетенций</small></div><div class="competency-node-grid">${nodes}</div>`;
   $('#busRiskList').innerHTML = team.competencies.map((competency, index) => `<button type="button" class="bus-risk-item ${competency.skill === selected?.skill ? 'selected' : ''}" data-star-competency="${attr(competency.skill)}"><span class="risk-position">${index + 1}</span><span class="risk-copy"><b>${escapeHtml(competency.skill)}</b><small>${escapeHtml(competency.reason)}</small></span><span class="risk-value">BF ${number(competency.bus_factor)}${busRiskTag(competency)}</span></button>`).join('');
   if (!selected) {
     $('#competencyDetail').innerHTML = empty('Выберите компетенцию на карте.');
@@ -852,7 +878,7 @@ function renderStarTeams() {
     $('#teamMetrics').innerHTML = '';
     $('#teamLifecycleActions').innerHTML = '';
     $('#competencyMap').innerHTML = empty(data.starMap?.message || 'Недостаточно данных для расчёта Bus Factor.');
-    $('#competencyDetail').innerHTML = '';
+    $('#competencyDetail').innerHTML = empty('Для этой команды пока нет данных о компетенциях.');
     $('#busRiskList').innerHTML = empty('Критичных рисков Bus Factor не обнаружено.');
     $('#teamMembers').innerHTML = empty('В команде нет инженеров.');
     $('#teamWorkload').innerHTML = empty('Нет данных о доступности.');
@@ -1062,11 +1088,18 @@ async function initialize() {
       window.postcodeApi.getConstructorCatalog(),
       window.postcodeApi.getArchiveReasons(),
     ]);
+    data.historicalTasks = (constructorCatalog.tasks || [])
+      .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
+      .map(historicalTaskFromCatalog);
     hydrate(dashboard);
     data.archiveReasons = archiveReasons;
     window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
       hydrate(plannerResult);
       show('current-plan');
+    }, (updatedCatalog) => {
+      data.historicalTasks = (updatedCatalog.tasks || [])
+        .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
+        .map(historicalTaskFromCatalog);
     });
     renderPage(state.page);
   } catch (error) {

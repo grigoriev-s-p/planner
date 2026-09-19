@@ -12,6 +12,7 @@ import tempfile
 from copy import deepcopy
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from zipfile import BadZipFile
@@ -21,10 +22,12 @@ from pydantic import BaseModel, Field
 
 from src.data.normalization import normalize
 from src.data.parser import DatasetParsingError, parse_workbook
-from src.data.validation import DataValidationError, validate
+from src.data.validation import validate
 
 from .service import TABLE_FILES, PlanningAPIService, ServiceDataError
 from .catalog import CatalogRepository
+from .data_preflight import build_data_preflight
+from src.planning.task_states import dependency_is_satisfied, is_historical_done
 
 
 MAX_CONSTRUCTOR_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -65,7 +68,7 @@ class ConstructorTask(BaseModel):
     status: Literal["ToDo", "InProgress", "Done"] = "ToDo"
     rung: float = 0
     story_points: float = Field(ge=0)
-    role_requirements: list[ConstructorRoleRequirement] = Field(min_length=1)
+    role_requirements: list[ConstructorRoleRequirement] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
 
 
@@ -87,6 +90,18 @@ class ConstructorDatasetUploadError(ValueError):
     """An uploaded workbook cannot be used as a constructor catalog."""
 
 
+@dataclass(frozen=True)
+class PreparedConstructorUpload:
+    """Parsed and audited upload retained until the user accepts warnings."""
+
+    filename: str
+    size_bytes: int
+    fingerprint: str
+    tables: dict[str, list[dict[str, Any]]]
+    validation_warnings: tuple[str, ...]
+    audit: dict[str, Any]
+
+
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -101,10 +116,23 @@ def _duplicates(values: Iterable[str]) -> set[str]:
     return duplicates
 
 
-def _cycle_nodes(tasks: list[ConstructorTask]) -> tuple[str, ...]:
+def _cycle_nodes(
+    tasks: list[ConstructorTask],
+    effective_task_rows: dict[str, dict[str, Any]] | None = None,
+) -> tuple[str, ...]:
     """Return a deterministic dependency cycle witness, if one exists."""
 
-    graph = {task.task_id: tuple(task.depends_on) for task in tasks}
+    rows = effective_task_rows or {}
+    active_ids = {
+        task.task_id
+        for task in tasks
+        if not is_historical_done(rows.get(task.task_id, {"status": task.status}))
+    }
+    graph = {
+        task.task_id: tuple(dependency for dependency in task.depends_on if dependency in active_ids)
+        for task in tasks
+        if task.task_id in active_ids
+    }
     visiting: set[str] = set()
     visited: set[str] = set()
     path: list[str] = []
@@ -167,6 +195,20 @@ def validate_constructor_scenario(
         for row in (catalog_tables or {}).get("tasks", [])
         if _clean_text(row.get("task_id"))
     }
+    effective_task_rows = dict(catalog_task_rows)
+    for item in scenario.tasks:
+        existing = catalog_task_rows.get(item.task_id, {})
+        # A historical completion is a fact: neither a stale active catalog
+        # row nor a conflicting scenario edit may reactivate it.
+        status = "Done" if (
+            item.status == "Done" or is_historical_done(existing)
+        ) else item.status
+        effective_task_rows[item.task_id] = {**existing, "status": status}
+    active_scenario_task_ids = {
+        task_id
+        for task_id in selected_tasks
+        if not is_historical_done(effective_task_rows.get(task_id, {}))
+    }
     for team in scenario.teams:
         if abs(team.focus_factor - 0.8) > 1e-9:
             errors.append(
@@ -206,12 +248,19 @@ def validate_constructor_scenario(
     for task in scenario.tasks:
         if not _clean_text(task.title):
             errors.append(f"Задача {task.task_id}: название не может быть пустым.")
+        historical_done = is_historical_done(
+            effective_task_rows.get(task.task_id, {"status": task.status})
+        )
+        if historical_done:
+            continue
         if task.team_id is not None and task.team_id not in known_teams:
             errors.append(
                 f"Задача {task.task_id}: команда {task.team_id} "
                 "не добавлена в сценарий."
             )
         role_names = [_clean_text(item.role) for item in task.role_requirements]
+        if not role_names:
+            errors.append(f"Задача {task.task_id}: укажите хотя бы одну требуемую роль.")
         if any(not role for role in role_names):
             errors.append(f"Задача {task.task_id}: роль не может быть пустой.")
         for duplicate in sorted(_duplicates(role_names)):
@@ -222,20 +271,24 @@ def validate_constructor_scenario(
         for dependency_id in task.depends_on:
             if dependency_id == task.task_id:
                 errors.append(f"Задача {task.task_id} не может зависеть сама от себя.")
-            elif dependency_id in selected_tasks:
+            elif dependency_is_satisfied(
+                dependency_id,
+                known_tasks=effective_task_rows,
+                active_scenario_task_ids=active_scenario_task_ids,
+            ):
                 continue
             elif dependency_id not in catalog_task_rows:
                 errors.append(
                     f"Задача {task.task_id}: блокирующая задача "
-                    f"{dependency_id} неизвестна общему каталогу."
+                    f"{dependency_id} неизвестна общему каталогу; не найдена."
                 )
-            elif _clean_text(catalog_task_rows[dependency_id].get("status")).casefold() != "done":
+            else:
                 errors.append(
                     f"Задача {task.task_id}: активная блокирующая задача "
-                    f"{dependency_id} должна быть добавлена в сценарий."
+                    f"{dependency_id} не включена в сценарий планирования."
                 )
 
-    cycle = _cycle_nodes(scenario.tasks)
+    cycle = _cycle_nodes(scenario.tasks, effective_task_rows)
     if cycle:
         errors.append(f"Обнаружен цикл зависимостей: {' → '.join(cycle)}.")
     if errors:
@@ -262,14 +315,16 @@ def scenario_tables(
         for row in (catalog_tables or {}).get("tasks", [])
         if _clean_text(row.get("task_id"))
     }
+    # A browser draft contains work selected for the upcoming quarter, not the
+    # complete planning context.  Every catalogued Done task is historical
+    # context: it may satisfy a dependency and must be represented in the
+    # draft summary, but it can never become work in a sprint.  Keeping the
+    # whole set here makes a manual "select all" build equivalent to the
+    # matching Excel/catalog build, including historical totals.
     historical_done_ids = {
-        dependency_id
-        for task in scenario.tasks
-        for dependency_id in task.depends_on
-        if dependency_id not in selected_task_ids
-        and dependency_id in catalog_task_rows
-        and _clean_text(catalog_task_rows[dependency_id].get("status")).casefold()
-        == "done"
+        task_id
+        for task_id, row in catalog_task_rows.items()
+        if task_id not in selected_task_ids and is_historical_done(row)
     }
 
     for team in scenario.teams:
@@ -301,6 +356,12 @@ def scenario_tables(
 
     for task in scenario.tasks:
         task_id = _clean_text(task.task_id)
+        source_row = catalog_task_rows.get(task_id, {})
+        effective_status = (
+            "Done"
+            if task.status == "Done" or is_historical_done(source_row)
+            else task.status
+        )
         tasks.append(
             {
                 "task_id": task_id,
@@ -309,7 +370,7 @@ def scenario_tables(
                 # No source team means the planner evaluates every selected team
                 # and chooses the earliest feasible assignment deterministically.
                 "team_id": _clean_text(task.team_id) or None,
-                "status": task.status,
+                "status": effective_status,
                 "rung": task.rung,
                 "story_points": task.story_points,
                 "is_placeholder": False,
@@ -340,8 +401,9 @@ def scenario_tables(
                 }
             )
 
-    # Done-before-quarter blockers are planning facts, not selected work. They
-    # are injected only into the planner context and removed from the result.
+    # Done-before-quarter tasks are planning facts, not selected work. They are
+    # present in the preview as historical context and removed from Current
+    # Plan only when a draft is approved.
     for task_id in sorted(historical_done_ids):
         source = catalog_task_rows[task_id]
         tasks.append(
@@ -391,6 +453,39 @@ def _without_support_tasks(
     return payload
 
 
+def _include_archived_done_blocker_context(
+    tables: dict[str, list[dict[str, Any]]], repository: CatalogRepository
+) -> dict[str, list[dict[str, Any]]]:
+    """Keep archived Done blockers in planner context without reviving work."""
+
+    result = deepcopy(tables)
+    active_task_ids = {
+        _clean_text(row.get("task_id")) for row in result.get("tasks", [])
+    }
+    archived_ids = repository.archived_ids("task")
+    source_tables = repository.tables()
+    source_tasks = {
+        _clean_text(row.get("task_id")): row
+        for row in source_tables.get("tasks", [])
+        if _clean_text(row.get("task_id"))
+    }
+    referenced_done_ids = {
+        blocker_id
+        for dependency in result.get("task_dependencies", [])
+        if _clean_text(dependency.get("blocked_task_id")) in active_task_ids
+        and (blocker_id := _clean_text(dependency.get("blocking_task_id"))) in archived_ids
+        and is_historical_done(source_tasks.get(blocker_id, {}))
+    }
+    present_ids = {
+        _clean_text(row.get("task_id")) for row in result.get("tasks", [])
+    }
+    result.setdefault("tasks", []).extend(
+        dict(source_tasks[task_id])
+        for task_id in sorted(referenced_done_ids - present_ids)
+    )
+    return result
+
+
 def build_constructor_plan(
     scenario: ConstructorScenario,
     catalog_tables: dict[str, list[dict[str, Any]]] | None = None,
@@ -399,14 +494,29 @@ def build_constructor_plan(
 
     selected_ids = {task.task_id for task in scenario.tasks}
     tables = scenario_tables(scenario, catalog_tables)
+    # Historical Done rows belong to the Base Plan summary.  There are no
+    # non-historical support rows in a manual scenario, but retain the filter
+    # for any future support-only entity type.
     support_ids = {
         _clean_text(row.get("task_id"))
         for row in tables["tasks"]
         if _clean_text(row.get("task_id")) not in selected_ids
+        and not is_historical_done(row)
     }
-    service = PlanningAPIService.from_tables(tables, plan_version="constructor-draft")
+    service = PlanningAPIService.from_tables(
+        tables,
+        plan_version="constructor-base-draft",
+        planner_options={
+            "allow_team_reassignment": False,
+            "allow_cross_team": False,
+        },
+    )
     return {
         **_without_support_tasks(service.dashboard, support_ids),
+        "_recommendation_context": {
+            "tables": tables,
+            "support_task_ids": sorted(support_ids),
+        },
         "draft": {
             "storage": "browser_local_storage",
             "server_persisted": False,
@@ -418,12 +528,12 @@ def build_constructor_plan(
     }
 
 
-def build_constructor_plan_from_workbook(
+def prepare_constructor_workbook(
     filename: str,
     content: bytes,
     repository: CatalogRepository,
-) -> dict[str, Any]:
-    """Validate, atomically merge, then plan from the accumulated catalog."""
+) -> PreparedConstructorUpload:
+    """Parse, normalize and audit an upload without merge or planner calls."""
 
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
@@ -442,9 +552,9 @@ def build_constructor_plan_from_workbook(
         with tempfile.TemporaryDirectory(prefix="plan-constructor-upload-") as directory:
             workbook = Path(directory) / safe_name
             workbook.write_bytes(content)
-            normalized = normalize(parse_workbook(workbook))
+            parsed = parse_workbook(workbook)
+            normalized = normalize(parsed)
             validation = validate(normalized)
-            validation.require_success()
             imported_tables = {
                 table_name: normalized.tables[csv_name]
                 for table_name, csv_name in TABLE_FILES.items()
@@ -457,22 +567,56 @@ def build_constructor_plan_from_workbook(
             }.items():
                 if csv_name in normalized.tables:
                     imported_tables[table_name] = normalized.tables[csv_name]
-            merge_result = repository.merge_tables(imported_tables)
             fingerprint = hashlib.sha256(content).hexdigest()[:8]
-            service = PlanningAPIService.from_tables(
-                repository.active_planning_tables(),
-                plan_version=f"constructor-upload-{fingerprint}",
+            merge_preview = repository.merge_tables(imported_tables, dry_run=True)
+            audit = build_data_preflight(
+                parsed, normalized, validation, merge_preview
             )
     except (
         DatasetParsingError,
-        DataValidationError,
         BadZipFile,
         InvalidFileException,
-        ServiceDataError,
         OSError,
         ValueError,
         KeyError,
     ) as error:
+        raise ConstructorDatasetUploadError(str(error)) from error
+
+    return PreparedConstructorUpload(
+        filename=safe_name,
+        size_bytes=len(content),
+        fingerprint=fingerprint,
+        tables=imported_tables,
+        validation_warnings=tuple(validation.warnings),
+        audit=audit,
+    )
+
+
+def build_constructor_plan_from_prepared(
+    prepared: PreparedConstructorUpload,
+    repository: CatalogRepository,
+) -> dict[str, Any]:
+    """Merge an accepted audited snapshot and build its Base Plan once."""
+
+    if prepared.audit.get("has_critical_errors"):
+        raise ConstructorDatasetUploadError(
+            "В данных есть ошибки, из-за которых план невозможно построить."
+        )
+
+    try:
+        merge_result = repository.merge_tables(prepared.tables)
+        planning_tables = _include_archived_done_blocker_context(
+            repository.active_planning_tables(), repository
+        )
+        service = PlanningAPIService.from_tables(
+            planning_tables,
+            plan_version=f"constructor-upload-{prepared.fingerprint}",
+            planner_options={
+                "allow_team_reassignment": False,
+                "allow_cross_team": False,
+            },
+        )
+    except (ServiceDataError, OSError, ValueError, KeyError) as error:
         raise ConstructorDatasetUploadError(str(error)) from error
 
     hidden_archived_tasks = repository.archived_ids("task")
@@ -481,17 +625,33 @@ def build_constructor_plan_from_workbook(
     )
     return {
         **_without_support_tasks(service.dashboard, hidden_archived_tasks),
+        "_recommendation_context": {
+            "tables": planning_tables,
+            "support_task_ids": sorted(hidden_archived_tasks),
+        },
         "catalog": catalog,
         "uploaded_dataset": {
-            "name": safe_name,
-            "size_bytes": len(content),
-            "fingerprint": fingerprint,
-            "warnings": [*validation.warnings, *merge_result.warnings],
+            "name": prepared.filename,
+            "size_bytes": prepared.size_bytes,
+            "fingerprint": prepared.fingerprint,
+            "warnings": [*prepared.validation_warnings, *merge_result.warnings],
             "catalog_merge": merge_result.to_dict(),
             "server_persisted": True,
             "source_dataset_modified": False,
+            "data_preflight": prepared.audit,
         },
     }
+
+
+def build_constructor_plan_from_workbook(
+    filename: str,
+    content: bytes,
+    repository: CatalogRepository,
+) -> dict[str, Any]:
+    """Compatibility wrapper for trusted callers that need immediate build."""
+
+    prepared = prepare_constructor_workbook(filename, content, repository)
+    return build_constructor_plan_from_prepared(prepared, repository)
 
 
 def build_constructor_catalog(
@@ -598,20 +758,20 @@ def build_constructor_catalog(
         task_id = task["task_id"]
         raw = raw_tasks[task_id]
         team_id = _clean_text(raw.get("team_id")) or task["original_team_id"]
-        if not team_id or not role_requirements[task_id]:
-            continue
         status = _clean_text(raw.get("status")) or "ToDo"
         if status.casefold() not in {"todo", "inprogress", "done"}:
             status = "ToDo"
         status = {"todo": "ToDo", "inprogress": "InProgress", "done": "Done"}[
             status.casefold()
         ]
+        if status != "Done" and (not team_id or not role_requirements[task_id]):
+            continue
         catalog_tasks.append(
             {
                 "task_id": task_id,
                 "title": task["title"],
                 "initiative_id": task["initiative_id"],
-                "team_id": team_id,
+                "team_id": team_id or None,
                 "status": status,
                 "rung": task["rung"] or 0,
                 "story_points": task["story_points"] or 0,

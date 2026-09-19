@@ -197,6 +197,10 @@ _REASON_META = {
     ReasonCode.MULTI_SPRINT: (ExplanationSeverity.WARNING, "Задача выполняется в нескольких спринтах"),
     ReasonCode.CROSS_TEAM_HELP: (ExplanationSeverity.INFO, "Привлечён специалист другой команды"),
     ReasonCode.TEAM_REASSIGNED: (ExplanationSeverity.INFO, "Задача назначена другой команде"),
+    ReasonCode.INVALID_TASK_OWNERSHIP: (
+        ExplanationSeverity.ERROR,
+        "Команда не может быть основным исполнителем",
+    ),
     ReasonCode.DEPENDENCY_DELAY: (ExplanationSeverity.WARNING, "Старт отложен зависимостью"),
     ReasonCode.INSUFFICIENT_SP_CAPACITY: (ExplanationSeverity.WARNING, "Не хватает SP capacity команды"),
     ReasonCode.INSUFFICIENT_ROLE_CAPACITY: (ExplanationSeverity.WARNING, "Не хватает часов специалистов нужной роли"),
@@ -245,6 +249,11 @@ def _message(code: ReasonCode, task_id: str, details: dict[str, Any]) -> str:
         return f"Задача {task_id} не может быть завершена в пределах шести спринтов."
     if code == ReasonCode.MISSING_SPECIALIST:
         return f"Для задачи {task_id} нет специалиста роли {details.get('role', '')}."
+    if code == ReasonCode.INVALID_TASK_OWNERSHIP:
+        return str(
+            details.get("status_message")
+            or "Основную часть работы пришлось бы выполнять другой команде."
+        )
     title = _REASON_META.get(code, (ExplanationSeverity.WARNING, code.value))[1]
     return f"{title}: {task_id}."
 
@@ -335,7 +344,7 @@ def build_task_explanation(
     bottlenecks = [reason.to_dict() for reason in reasons if reason.code in {
         ReasonCode.INSUFFICIENT_SP_CAPACITY, ReasonCode.INSUFFICIENT_ROLE_CAPACITY,
         ReasonCode.INSUFFICIENT_ENGINEER_CAPACITY, ReasonCode.INSUFFICIENT_SKILL_CAPACITY,
-        ReasonCode.MISSING_SPECIALIST,
+        ReasonCode.MISSING_SPECIALIST, ReasonCode.INVALID_TASK_OWNERSHIP,
     }]
     if bottlenecks:
         risks.append(PlanningRisk(RiskCode.RESOURCE_BOTTLENECK, ExplanationSeverity.WARNING,

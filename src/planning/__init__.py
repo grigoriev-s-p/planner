@@ -29,6 +29,12 @@ from .plan_models import (
     SprintPlan,
     TaskPlanResult,
 )
+from .ownership import (
+    SprintOwnership,
+    TaskOwnership,
+    evaluate_ownership_rows,
+    evaluate_task_ownership,
+)
 from .planner import (
     BaselineQuarterPlanner,
     build_quarter_plan,
@@ -69,6 +75,8 @@ __all__ = [
     "SprintPlan",
     "SprintState",
     "TaskPlanResult",
+    "TaskOwnership",
+    "SprintOwnership",
     "TaskPlanningExplanation",
     "TaskRecommendation",
     "InitiativePlanningExplanation",
@@ -79,4 +87,6 @@ __all__ = [
     "check_task_feasibility",
     "compare_priority_profiles",
     "initiative_priority_profile",
+    "evaluate_ownership_rows",
+    "evaluate_task_ownership",
 ]

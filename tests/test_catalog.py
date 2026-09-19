@@ -190,8 +190,10 @@ class CatalogMergeTests(unittest.TestCase):
 class HistoricalDependencyTests(unittest.TestCase):
     def test_done_catalog_blocker_is_not_required_in_selection(self) -> None:
         result = build_constructor_plan(selected_b(), catalog_tables())
-        self.assertEqual([task["task_id"] for task in result["tasks"]], ["TASK-B"])
-        task = result["tasks"][0]
+        by_id = {task["task_id"]: task for task in result["tasks"]}
+        self.assertEqual(by_id["TASK-A"]["status"], "DONE")
+        self.assertEqual(by_id["TASK-A"]["allocations"], [])
+        task = by_id["TASK-B"]
         self.assertEqual(task["status"], "PLANNED")
         self.assertEqual(task["start_sprint"], 1)
         dependency = task["dependencies"]["incoming"][0]
@@ -270,7 +272,9 @@ class ArchiveTests(unittest.TestCase):
         planning = self.repo.active_planning_tables()
         self.assertIn("TASK-A", {row["task_id"] for row in planning["tasks"]})
         result = build_constructor_plan(selected_b(), self.repo.tables())
-        self.assertEqual(result["tasks"][0]["start_sprint"], 1)
+        by_id = {task["task_id"]: task for task in result["tasks"]}
+        self.assertEqual(by_id["TASK-A"]["status"], "DONE")
+        self.assertEqual(by_id["TASK-B"]["start_sprint"], 1)
 
     def test_team_archive_is_blocked_while_active_references_exist(self) -> None:
         with self.assertRaises(ArchiveConflictError):
