@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from threading import RLock
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
@@ -44,6 +45,12 @@ app = FastAPI(title="PostCode Quarter Planning API", version="1.0.0")
 class ArchiveRequest(BaseModel):
     reason_code: str
     reason_text: str | None = None
+    confirm_replan: bool = False
+    team_engineer_action: Literal["UNASSIGN", "DEACTIVATE"] | None = None
+    team_task_action: Literal["REMOVE", "REDISTRIBUTE"] | None = None
+    engineer_allocation_action: Literal[
+        "APPLY_PLANNER", "REPLAN_WITHOUT_REPLACEMENT"
+    ] | None = None
 
 
 class DraftApprovalRequest(BaseModel):
@@ -94,6 +101,11 @@ class PlanDraftStore:
             self._drafts = {}
             self._approved = None
 
+    def replace_approved(self, payload: dict) -> dict:
+        with self._lock:
+            self._approved = deepcopy(payload)
+            return deepcopy(self._approved)
+
 
 plan_drafts = PlanDraftStore()
 
@@ -117,7 +129,9 @@ def _with_lifecycle(payload: dict, entity_type: str, entity_id: str) -> dict:
 
 
 def _current_dashboard() -> dict:
-    return plan_drafts.approved() or deepcopy(_service().dashboard)
+    # The persistent working catalog is the source of the current plan after a
+    # restart as well; an approved in-memory draft still takes precedence.
+    return plan_drafts.approved() or deepcopy(_catalog_service().dashboard)
 
 
 def _dashboard_with_lifecycle() -> dict:
@@ -345,23 +359,360 @@ def _current_plan_reference_count(entity_type: str, entity_id: str) -> int:
         return sum(
             1
             for task_payload in current_tasks
-            if task_payload.get("assigned_team_id") == entity_id
-            and task_payload.get("status") == "PLANNED"
+            if task_payload.get("status") == "PLANNED"
+            and (
+                task_payload.get("assigned_team_id") == entity_id
+                or any(
+                    allocation.get("source_team_id") == entity_id
+                    for allocation in task_payload.get("allocations", [])
+                )
+            )
         )
     return 0
+
+
+def _tables_after_deletion(
+    entity_type: str,
+    entity_id: str,
+    *,
+    team_engineer_action: str | None = None,
+    team_task_action: str | None = None,
+) -> dict[str, list[dict]]:
+    """Prepare an in-memory catalog snapshot for the existing planner."""
+
+    tables = deepcopy(get_catalog_repository().active_planning_tables())
+    if entity_type == "task":
+        removed_tasks = {entity_id}
+    elif entity_type == "team" and team_task_action == "REMOVE":
+        removed_tasks = {
+            str(row.get("task_id") or "").strip()
+            for row in tables["tasks"]
+            if str(row.get("team_id") or "").strip() == entity_id
+            and str(row.get("status") or "").strip().casefold() != "done"
+        }
+    else:
+        removed_tasks = set()
+
+    if removed_tasks:
+        tables["tasks"] = [
+            row for row in tables["tasks"]
+            if str(row.get("task_id") or "").strip() not in removed_tasks
+        ]
+        for table_name in ("task_role_effort", "task_skill_requirements"):
+            tables[table_name] = [
+                row for row in tables[table_name]
+                if str(row.get("task_id") or "").strip() not in removed_tasks
+            ]
+        tables["task_dependencies"] = [
+            row for row in tables["task_dependencies"]
+            if str(row.get("blocking_task_id") or "").strip() not in removed_tasks
+            and str(row.get("blocked_task_id") or "").strip() not in removed_tasks
+        ]
+
+    if entity_type == "engineer":
+        removed_engineers = {entity_id}
+    elif entity_type == "team" and team_engineer_action == "DEACTIVATE":
+        removed_engineers = {
+            str(row.get("engineer_id") or "").strip()
+            for row in tables["engineers"]
+            if str(row.get("team_id") or "").strip() == entity_id
+        }
+    else:
+        removed_engineers = set()
+    if removed_engineers:
+        tables["engineers"] = [
+            row for row in tables["engineers"]
+            if str(row.get("engineer_id") or "").strip() not in removed_engineers
+        ]
+        tables["engineer_skills"] = [
+            row for row in tables["engineer_skills"]
+            if str(row.get("engineer_id") or "").strip() not in removed_engineers
+        ]
+
+    if entity_type == "team":
+        tables["team_history"] = [
+            row for row in tables["team_history"]
+            if str(row.get("team_id") or "").strip() != entity_id
+        ]
+        if team_engineer_action == "UNASSIGN":
+            tables["engineers"] = [
+                ({**row, "team_id": None}
+                 if str(row.get("team_id") or "").strip() == entity_id else row)
+                for row in tables["engineers"]
+            ]
+        if team_task_action == "REDISTRIBUTE":
+            tables["tasks"] = [
+                ({**row, "team_id": None}
+                 if str(row.get("team_id") or "").strip() == entity_id
+                 and str(row.get("status") or "").strip().casefold() != "done"
+                 else row)
+                for row in tables["tasks"]
+            ]
+    return tables
+
+
+def _preserve_kpi_baseline(candidate: dict, current: dict) -> None:
+    current_kpis = current.get("kpis") or {}
+    candidate_kpis = candidate.get("kpis") or {}
+    expected = candidate_kpis.get("expected_kpi") or {}
+    old_expected = current_kpis.get("expected_kpi") or {}
+    baseline = old_expected.get("baseline_initiatives")
+    completed = expected.get("completed_initiatives")
+    if baseline is not None and completed is not None:
+        expected["baseline_initiatives"] = baseline
+        expected["incomplete_initiatives"] = max(float(baseline) - float(completed), 0.0)
+        expected["completion_percent"] = (
+            float(completed) / float(baseline) * 100 if float(baseline) else None
+        )
+    if "quarter_kpi" in current_kpis:
+        candidate_kpis["quarter_kpi"] = deepcopy(current_kpis["quarter_kpi"])
+    if "sprint_kpis" in current_kpis:
+        candidate_kpis["sprint_kpis"] = deepcopy(current_kpis["sprint_kpis"])
+
+
+def _build_deletion_candidate(
+    entity_type: str,
+    entity_id: str,
+    *,
+    team_engineer_action: str | None = None,
+    team_task_action: str | None = None,
+) -> dict:
+    current = _current_dashboard()
+    tables = _tables_after_deletion(
+        entity_type,
+        entity_id,
+        team_engineer_action=team_engineer_action,
+        team_task_action=team_task_action,
+    )
+    candidate = deepcopy(
+        PlanningAPIService.from_tables(
+            tables, plan_version="catalog-after-deletion"
+        ).dashboard
+    )
+    _preserve_kpi_baseline(candidate, current)
+    return candidate
+
+
+def _deletion_impact(entity_type: str, entity_id: str) -> dict:
+    repository = get_catalog_repository()
+    try:
+        catalog_impact = repository.deletion_impact(entity_type, entity_id)
+    except CatalogNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    current = _current_dashboard()
+    affected_allocations = [
+        {"task_id": task["task_id"], **allocation}
+        for task in current.get("tasks", [])
+        for allocation in task.get("allocations", [])
+        if (
+            entity_type == "task" and task["task_id"] == entity_id
+        ) or (
+            entity_type == "engineer" and allocation.get("engineer_id") == entity_id
+        ) or (
+            entity_type == "team"
+            and (
+                task.get("assigned_team_id") == entity_id
+                or allocation.get("source_team_id") == entity_id
+            )
+        )
+    ]
+    impact = {
+        **catalog_impact,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "allocation_count": len(affected_allocations),
+        "allocations": affected_allocations,
+        "requires_replan": bool(affected_allocations),
+    }
+    simulation_engineer_action = "UNASSIGN" if entity_type == "team" else None
+    simulation_task_action = "REDISTRIBUTE" if entity_type == "team" else None
+    try:
+        candidate = _build_deletion_candidate(
+            entity_type,
+            entity_id,
+            team_engineer_action=simulation_engineer_action,
+            team_task_action=simulation_task_action,
+        )
+        old_tasks = {item["task_id"]: item for item in current.get("tasks", [])}
+        new_tasks = {item["task_id"]: item for item in candidate.get("tasks", [])}
+        improved = sorted(
+            task_id for task_id, task in new_tasks.items()
+            if task.get("status") == "PLANNED"
+            and (
+                old_tasks.get(task_id, {}).get("status") != "PLANNED"
+                or (task.get("start_sprint") or 99)
+                < (old_tasks.get(task_id, {}).get("start_sprint") or 99)
+            )
+        )
+        affected_task_ids = {
+            row["task_id"] for row in affected_allocations
+            if row.get("task_id")
+        }
+        replacements = []
+        if entity_type == "engineer":
+            for task_id in sorted(affected_task_ids):
+                old_rows = [
+                    row for row in affected_allocations if row["task_id"] == task_id
+                ]
+                affected_roles = {
+                    row.get("role") for row in old_rows if row.get("role")
+                }
+                replacement_ids = sorted({
+                    row.get("engineer_id")
+                    for row in new_tasks.get(task_id, {}).get("allocations", [])
+                    if row.get("engineer_id") and row.get("engineer_id") != entity_id
+                    and row.get("role") in affected_roles
+                })
+                replacements.append({
+                    "task_id": task_id,
+                    "roles": sorted(affected_roles),
+                    "engineer_ids": replacement_ids,
+                    "possible": bool(replacement_ids)
+                    and new_tasks.get(task_id, {}).get("status") == "PLANNED",
+                })
+        impact.update({
+            "optimization_available": bool(improved),
+            "improved_task_ids": improved,
+            "replacement_options": replacements,
+            "unplannable_task_ids": sorted(
+                task_id for task_id in affected_task_ids
+                if not (entity_type == "task" and task_id == entity_id)
+                if new_tasks.get(task_id, {}).get("status") != "PLANNED"
+            ),
+        })
+    except (ServiceDataError, ValueError) as error:
+        impact.update({
+            "simulation_error": str(error),
+            "optimization_available": False,
+            "replacement_options": [],
+            "unplannable_task_ids": [],
+        })
+    return impact
+
+
+@app.get("/api/tasks/{task_id}/deletion-impact")
+def task_deletion_impact(task_id: str) -> dict:
+    return _deletion_impact("task", task_id)
+
+
+@app.get("/api/engineers/{engineer_id}/deletion-impact")
+def engineer_deletion_impact(engineer_id: str) -> dict:
+    return _deletion_impact("engineer", engineer_id)
+
+
+@app.get("/api/teams/{team_id}/deletion-impact")
+def team_deletion_impact(team_id: str) -> dict:
+    return _deletion_impact("team", team_id)
 
 
 def _archive_entity(
     entity_type: str, entity_id: str, request: ArchiveRequest
 ) -> dict:
     references = _current_plan_reference_count(entity_type, entity_id)
+    current_dashboard = _current_dashboard()
+    current_affected_task_ids = {
+        task["task_id"]
+        for task in current_dashboard.get("tasks", [])
+        if (
+            entity_type == "task" and task["task_id"] == entity_id
+        ) or (
+            entity_type == "engineer"
+            and any(
+                allocation.get("engineer_id") == entity_id
+                for allocation in task.get("allocations", [])
+            )
+        ) or (
+            entity_type == "team"
+            and (
+                task.get("assigned_team_id") == entity_id
+                or any(
+                    allocation.get("source_team_id") == entity_id
+                    for allocation in task.get("allocations", [])
+                )
+            )
+        )
+    }
+    repository = get_catalog_repository()
+    allowed_reasons = ARCHIVE_REASON_LABELS.get(entity_type, {})
+    if request.reason_code not in allowed_reasons:
+        raise HTTPException(status_code=422, detail="Выберите допустимую причину удаления.")
+    if request.reason_code == "OTHER" and not str(request.reason_text or "").strip():
+        raise HTTPException(status_code=422, detail="Для другой причины укажите пояснение.")
     try:
-        lifecycle = get_catalog_repository().archive(
+        impact = repository.deletion_impact(entity_type, entity_id)
+    except CatalogNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if entity_type == "team":
+        if impact.get("engineer_ids") and request.team_engineer_action is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Выберите действие для сотрудников удаляемой команды.",
+            )
+        if impact.get("task_ids") and request.team_task_action is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Выберите действие для задач удаляемой команды.",
+            )
+    if entity_type == "engineer" and references and request.engineer_allocation_action is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Выберите предложенную замену или пересчёт без замены.",
+        )
+    # The planner runs before the transaction. A planning failure therefore
+    # cannot leave the catalog changed while the current plan is stale.
+    try:
+        candidate = _build_deletion_candidate(
+            entity_type,
+            entity_id,
+            team_engineer_action=request.team_engineer_action,
+            team_task_action=request.team_task_action,
+        )
+    except (ServiceDataError, ValueError) as error:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Не удалось построить согласованный план после удаления: {error}",
+        ) from error
+    current_tasks = {
+        item["task_id"]: item for item in current_dashboard.get("tasks", [])
+    }
+    candidate_tasks = {
+        item["task_id"]: item for item in candidate.get("tasks", [])
+    }
+    optimization_available = any(
+        task.get("status") == "PLANNED"
+        and (
+            current_tasks.get(task_id, {}).get("status") != "PLANNED"
+            or (task.get("start_sprint") or 99)
+            < (current_tasks.get(task_id, {}).get("start_sprint") or 99)
+        )
+        for task_id, task in candidate_tasks.items()
+    )
+    collection_name = {"task": "tasks", "engineer": "engineers", "team": "teams"}[entity_type]
+    id_field = f"{entity_type}_id"
+    entity_is_in_current_dashboard = any(
+        item.get(id_field) == entity_id
+        for item in _current_dashboard().get(collection_name, [])
+    )
+    if (
+        references
+        or (entity_type in {"engineer", "team"} and entity_is_in_current_dashboard)
+        or optimization_available
+    ) and not request.confirm_replan:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Удаление требует согласованного пересчёта текущего плана. "
+                "Подтвердите пересчёт в окне удаления."
+            ),
+        )
+    try:
+        operation = repository.archive_with_relations(
             entity_type,
             entity_id,
             request.reason_code,
             request.reason_text,
-            current_plan_references=references,
+            team_engineer_action=request.team_engineer_action,
+            team_task_action=request.team_task_action,
         )
     except CatalogNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -369,19 +720,30 @@ def _archive_entity(
         raise HTTPException(status_code=422, detail=str(error)) from error
     except ArchiveConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    plan_drafts.replace_approved(candidate)
     messages = {
         "task": "Задача удалена из активного каталога.",
-        "engineer": "Инженер удалён из активного каталога.",
+        "engineer": "Инженер сделан неактивным и исключён из планирования.",
         "team": "Команда удалена из активного каталога.",
     }
+    affected_task_ids = set(operation.get("affected_task_ids", [])) | current_affected_task_ids
+    unplannable = sorted(
+        task_id for task_id in affected_task_ids
+        if not (entity_type == "task" and task_id == entity_id)
+        if candidate_tasks.get(task_id, {}).get("status") != "PLANNED"
+        and request.team_task_action != "REMOVE"
+    )
     return {
-        "entity": lifecycle,
+        **operation,
         "message": messages[entity_type],
-        "current_plan_unchanged": True,
+        "current_plan_unchanged": False,
+        "dashboard": _dashboard_with_lifecycle(),
+        "unplannable_task_ids": unplannable,
+        "requires_plan_change": bool(unplannable),
         "warning": (
-            "Объект участвует в текущем плане. Он исключён из будущих "
-            "построений, но текущий план автоматически не пересчитан."
-            if references
+            "Не удалось перераспределить задачи: " + ", ".join(unplannable)
+            + ". Измените состав или ограничения плана."
+            if unplannable
             else None
         ),
     }
