@@ -8,7 +8,7 @@ from threading import RLock
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -65,6 +65,10 @@ class AcceptedChangeRequest(BaseModel):
 
 class RecommendationRefreshRequest(BaseModel):
     revision: int
+
+
+class ConstructorUploadDecisionRequest(BaseModel):
+    decisions: dict[str, Literal["KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"]] = Field(default_factory=dict)
 
 
 class PlanDraftStore:
@@ -183,6 +187,17 @@ class PreparedUploadStore:
         if upload is None:
             raise KeyError(upload_id)
         return upload
+
+    def get(self, upload_id: str) -> PreparedConstructorUpload:
+        with self._lock:
+            upload = self._uploads.get(upload_id)
+        if upload is None:
+            raise KeyError(upload_id)
+        return upload
+
+    def discard(self, upload_id: str) -> None:
+        with self._lock:
+            self._uploads.pop(upload_id, None)
 
     def reset(self) -> None:
         with self._lock:
@@ -467,11 +482,14 @@ def plan_constructor_plan_upload(
 
 
 @app.post("/api/plan-constructor/plan/upload/{upload_id}/continue")
-def continue_constructor_plan_upload(upload_id: str) -> dict:
+def continue_constructor_plan_upload(
+    upload_id: str,
+    request: ConstructorUploadDecisionRequest | None = Body(default=None),
+) -> dict:
     """Build from the exact audited snapshot accepted by the user."""
 
     try:
-        prepared = prepared_uploads.take(upload_id)
+        prepared = prepared_uploads.get(upload_id)
     except KeyError as error:
         raise HTTPException(
             status_code=409,
@@ -480,7 +498,8 @@ def continue_constructor_plan_upload(upload_id: str) -> dict:
     try:
         result = plan_drafts.create(
             build_constructor_plan_from_prepared(
-                prepared, get_catalog_repository()
+                prepared, get_catalog_repository(),
+                archive_decisions=(request.decisions if request else None),
             )
         )
     except ConstructorDatasetUploadError as error:
@@ -491,6 +510,7 @@ def continue_constructor_plan_upload(upload_id: str) -> dict:
                 "errors": [str(error)],
             },
         ) from error
+    prepared_uploads.discard(upload_id)
     return {
         **result,
         "data_preflight": {

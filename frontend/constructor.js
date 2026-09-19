@@ -265,9 +265,90 @@ window.planConstructor = (() => {
     if (dialog?.open) dialog.close();
   }
 
+  function archiveDisplayValue(value) {
+    if (value == null || value === '') return '—';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function archiveComparison(item) {
+    const differences = item.differences || [];
+    if (!differences.length) return '<p class="archive-compare-empty">Данные в Excel совпадают с архивной записью.</p>';
+    return `<table class="archive-compare-table"><thead><tr><th>Поле</th><th>В каталоге</th><th>В Excel</th></tr></thead><tbody>${differences.map((difference) => `<tr><th>${esc(difference.label)}</th><td>${esc(archiveDisplayValue(difference.current))}</td><td>${esc(archiveDisplayValue(difference.incoming))}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  function archiveEntityRows(items) {
+    pendingDatasetUpload.archiveDecisions ||= Object.fromEntries(items.map((item) => [item.decision_key, 'KEEP_ARCHIVED']));
+    return items.map((item) => {
+      const decision = pendingDatasetUpload.archiveDecisions[item.decision_key] || 'KEEP_ARCHIVED';
+      const reason = [item.archived_at ? `Архивирована: ${item.archived_at}` : '', item.archive_reason_label, item.archive_reason_text].filter(Boolean).join(' · ');
+      return `<article class="archive-entity-row" data-archive-entity-row data-archive-type="${esc(item.entity_type)}" data-archive-search="${esc(`${item.entity_id} ${item.display_name}`.toLowerCase())}"><label class="archive-entity-select"><input type="checkbox" data-archive-select="${esc(item.decision_key)}"><span></span></label><div class="archive-entity-copy"><div class="archive-entity-heading"><b>${esc(item.entity_label)} · ${esc(item.entity_id)}</b><strong>${esc(item.display_name)}</strong></div>${reason ? `<small>${esc(reason)}</small>` : ''}<details class="archive-compare"><summary>Сравнить данные</summary>${archiveComparison(item)}</details></div><select data-archive-decision="${esc(item.decision_key)}"><option value="KEEP_ARCHIVED" ${decision === 'KEEP_ARCHIVED' ? 'selected' : ''}>Оставить в архиве</option><option value="RESTORE" ${decision === 'RESTORE' ? 'selected' : ''}>Восстановить</option><option value="RESTORE_UPDATE" ${decision === 'RESTORE_UPDATE' ? 'selected' : ''}>Восстановить и обновить</option></select></article>`;
+    }).join('');
+  }
+
+  function updateArchiveImportSummary() {
+    const items = pendingDatasetUpload?.audit?.archived_entities || [];
+    const decisions = pendingDatasetUpload?.archiveDecisions || {};
+    const counts = {KEEP_ARCHIVED: 0, RESTORE: 0, RESTORE_UPDATE: 0};
+    items.forEach((item) => { counts[decisions[item.decision_key] || 'KEEP_ARCHIVED'] += 1; });
+    const selected = $$c('[data-archive-select]:checked').length;
+    const summary = pendingDatasetUpload?.audit?.import_summary || {};
+    const target = $c('#archiveImportSummary');
+    if (target) target.innerHTML = `<span>Новые записи: <b>${number(summary.new)}</b></span><span>Активные записи: <b>${number(summary.active_existing)}</b></span><span>Архивные записи: <b>${number(items.length)}</b></span><span>Из архивных: <b>оставить ${counts.KEEP_ARCHIVED}</b> · <b>восстановить ${counts.RESTORE}</b> · <b>обновить ${counts.RESTORE_UPDATE}</b></span>`;
+    const selectedCount = $c('#archiveSelectedCount');
+    if (selectedCount) selectedCount.textContent = `Выбрано: ${selected}`;
+  }
+
+  function filterArchiveRows() {
+    const query = ($c('#archiveEntitySearch')?.value || '').trim().toLowerCase();
+    const type = $c('#archiveEntityTypeFilter')?.value || '';
+    $$c('[data-archive-entity-row]').forEach((row) => {
+      row.hidden = Boolean((query && !row.dataset.archiveSearch.includes(query)) || (type && row.dataset.archiveType !== type));
+    });
+  }
+
+  function applyArchiveBulk(decision) {
+    const selected = $$c('[data-archive-select]:checked').map((input) => input.dataset.archiveSelect);
+    if (decision === 'RESTORE_UPDATE' && selected.length > 1
+      && !confirm('Данные выбранных архивных записей будут обновлены значениями из Excel. Продолжить?')) return;
+    selected.forEach((key) => { pendingDatasetUpload.archiveDecisions[key] = decision; });
+    $$c('[data-archive-decision]').forEach((select) => {
+      if (selected.includes(select.dataset.archiveDecision)) select.value = decision;
+    });
+    updateArchiveImportSummary();
+  }
+
+  function renderArchivePreflight(preflight) {
+    const audit = preflight.audit || {};
+    const items = audit.archived_entities || [];
+    pendingDatasetUpload.archiveDecisions = Object.fromEntries(items.map((item) => [item.decision_key, 'KEEP_ARCHIVED']));
+    $c('#dataPreflightTitle').textContent = 'Обнаружены архивные записи';
+    $c('#dataPreflightSubtitle').textContent = 'Некоторые записи из Excel уже существуют в каталоге, но находятся в архиве. Выберите, как поступить с каждой из них.';
+    const critical = Number(audit.summary?.critical || 0);
+    const counters = [];
+    if (critical) counters.push(`<span class="preflight-counter critical">${issueCountLabel(critical, 'критическая ошибка', 'критические ошибки', 'критических ошибок')}</span>`);
+    $c('#dataPreflightSummary').innerHTML = counters.join('');
+    const types = [...new Set(items.map((item) => item.entity_type))];
+    const labels = {task: 'Задачи', team: 'Команды', engineer: 'Инженеры'};
+    const otherIssues = (audit.groups || []).flatMap((group) => group.items || []).filter((item) => item.code !== 'ARCHIVED_ENTITY_IN_UPLOAD');
+    const issueBlock = otherIssues.length ? `<details class="archive-other-issues"><summary>Другие результаты проверки (${otherIssues.length})</summary><div>${otherIssues.map((item) => `<p><b>${esc(item.title)}</b> — ${esc(item.message)}</p>`).join('')}</div></details>` : '';
+    $c('#dataPreflightGroups').innerHTML = `<div class="archive-import-toolbar"><input id="archiveEntitySearch" type="search" placeholder="Поиск по ID или названию"><select id="archiveEntityTypeFilter"><option value="">Все типы</option>${types.map((type) => `<option value="${esc(type)}">${labels[type] || esc(type)}</option>`).join('')}</select><span id="archiveSelectedCount">Выбрано: 0</span><div class="archive-bulk-actions"><button class="btn btn-outline" type="button" data-archive-bulk="KEEP_ARCHIVED">Оставить в архиве</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE">Восстановить</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE_UPDATE">Восстановить и обновить</button></div></div><div class="archive-entity-list">${archiveEntityRows(items)}</div><div class="archive-import-summary" id="archiveImportSummary"></div>${issueBlock}<div class="archive-import-error" id="archiveImportError" hidden></div>`;
+    $c('#dataPreflightActions').innerHTML = critical
+      ? '<button class="btn btn-outline" type="button" data-close-data-preflight>Закрыть</button><button class="btn btn-blue" type="button" data-replace-data-file>Загрузить исправленный файл</button>'
+      : '<button class="btn btn-outline" type="button" data-close-data-preflight>Отмена</button><button class="btn btn-blue" type="button" data-continue-data-preflight>Продолжить импорт</button>';
+    updateArchiveImportSummary();
+    const dialog = $c('#dataPreflightDialog');
+    document.body.classList.add('constructor-modal-open');
+    if (!dialog.open) dialog.showModal();
+  }
+
   function renderDataPreflight(preflight) {
     pendingDatasetUpload = preflight;
     const audit = preflight.audit || {summary: {}, groups: []};
+    if ((audit.archived_entities || []).length) {
+      renderArchivePreflight(preflight);
+      return;
+    }
     const critical = Number(audit.summary?.critical || 0);
     const warning = Number(audit.summary?.warning || 0);
     const info = Number(audit.summary?.info || 0);
@@ -297,7 +378,12 @@ window.planConstructor = (() => {
       onCatalogUpdated?.(catalog);
     }
     const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
-    setDatasetStatus(`${filename} · предварительный план готов · ${planned} задач вошли в квартал`, 'success');
+    const merge = planResult.uploaded_dataset?.catalog_merge || {};
+    const total = (values) => Object.values(values || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    const importResult = merge.archived_entities?.length
+      ? `Импорт завершён · добавлено ${Number(merge.summary?.new ?? total(merge.added))}, восстановлено ${total(merge.restored)}, обновлено ${total(merge.restored_updated)}, оставлено в архиве ${total(merge.kept_archived)}`
+      : `Предварительный план готов · ${planned} задач вошли в квартал`;
+    setDatasetStatus(`${filename} · ${importResult}`, 'success');
     previewPlan = planResult;
     pendingDatasetUpload = null;
     shownRecommendationGroups = 3;
@@ -313,12 +399,16 @@ window.planConstructor = (() => {
     if (button) { button.disabled = true; button.textContent = 'Строим план…'; }
     setDatasetStatus('Проверка принята. Строим предварительный план…');
     try {
-      const result = await api.continueConstructorDataset(pendingDatasetUpload.upload_id);
+      const decisions = pendingDatasetUpload.archiveDecisions || {};
+      const result = await api.continueConstructorDataset(pendingDatasetUpload.upload_id, decisions);
       const filename = pendingDatasetUpload.file?.name || 'Excel';
       closeDataPreflight();
       acceptUploadedPlan(result, filename);
     } catch (error) {
-      setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
+      const message = String(error?.message || error).replaceAll('\n', ' · ');
+      const errorBox = $c('#archiveImportError');
+      if (errorBox) { errorBox.textContent = message; errorBox.hidden = false; }
+      setDatasetStatus(message, 'error');
       if (button) { button.disabled = false; button.textContent = 'Продолжить с этими данными'; }
     }
   }
@@ -762,6 +852,13 @@ window.planConstructor = (() => {
     $c('#constructorDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
     $c('#dataPreflightDialog').addEventListener('close', () => document.body.classList.remove('constructor-modal-open'));
     document.addEventListener('change', (event) => {
+      const archiveDecision = event.target.closest('[data-archive-decision]');
+      if (archiveDecision && pendingDatasetUpload) {
+        pendingDatasetUpload.archiveDecisions[archiveDecision.dataset.archiveDecision] = archiveDecision.value;
+        updateArchiveImportSummary();
+        return;
+      }
+      if (event.target.id === 'archiveEntityTypeFilter') { filterArchiveRows(); return; }
       const selectAll = event.target.closest('[data-constructor-select-all]');
       if (selectAll) {
         const type = selectAll.dataset.constructorSelectAll;
@@ -779,11 +876,14 @@ window.planConstructor = (() => {
       }
     });
     document.addEventListener('input', (event) => {
+      if (event.target.id === 'archiveEntitySearch') { filterArchiveRows(); return; }
       if (event.target.id !== 'constructorDependencySearch') return;
       const query = event.target.value.trim().toLowerCase();
       $$c('[data-dependency-option]').forEach((option) => { option.hidden = !option.dataset.search.includes(query); });
     });
     document.addEventListener('click', (event) => {
+      const archiveBulk = event.target.closest('[data-archive-bulk]');
+      if (archiveBulk && pendingDatasetUpload) { applyArchiveBulk(archiveBulk.dataset.archiveBulk); return; }
       if (event.target.closest('[data-close-data-preflight]')) { closeDataPreflight(); return; }
       if (event.target.closest('[data-replace-data-file]')) {
         closeDataPreflight();
