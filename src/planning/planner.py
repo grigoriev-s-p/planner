@@ -23,7 +23,7 @@ from .plan_models import (
     TaskAllocation,
     TaskPlanResult,
 )
-from .ownership import evaluate_task_ownership
+from .ownership import evaluate_task_ownership, merge_task_ownership
 from .planning_calendar import PlanningCalendar, shift_days, shift_direction
 from .reasons import ReasonCode
 from .scoring import (
@@ -70,19 +70,10 @@ class _InitiativeWork:
 def initiative_priority_profile(
     tasks: Iterable[Mapping[str, Any]],
 ) -> tuple[float, ...]:
-    """Return descending task rung values without aggregating them.
+    """Return the official initiative priority: its maximum task rung."""
 
-    Missing rung follows the existing task-scoring fallback and contributes
-    zero. The profile deliberately retains each position so initiative size is
-    never converted into a sum or average.
-    """
-
-    return tuple(
-        sorted(
-            (_number(task.get("rung")) or 0.0 for task in tasks),
-            reverse=True,
-        )
-    )
+    rungs = tuple(_number(task.get("rung")) or 0.0 for task in tasks)
+    return (max(rungs),) if rungs else ()
 
 
 def compare_priority_profiles(
@@ -131,6 +122,7 @@ def _select_priority_task_id(
     candidate_ids: Iterable[str],
     tasks: Mapping[str, Mapping[str, Any]],
     scores: Mapping[str, TaskScore],
+    reference_plan: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> str:
     """Select by absolute rung, optional start date, then secondary scoring.
 
@@ -157,10 +149,19 @@ def _select_priority_task_id(
     use_planned_start = all(value is not None for value in planned_starts.values())
     return min(
         highest_rung_ids,
-        key=lambda task_id: score_sort_key(
-            tasks[task_id],
-            scores[task_id],
-            use_planned_start=use_planned_start,
+        key=lambda task_id: (
+            score_sort_key(tasks[task_id], scores[task_id], use_planned_start=use_planned_start)[0],
+            -scores[task_id].dynamic_score,
+            -scores[task_id].base_score,
+            (
+                tuple(reference_plan.get(task_id, {}).get("planned_sprints") or ())[:1]
+                or (999,)
+            ),
+            score_sort_key(tasks[task_id], scores[task_id], use_planned_start=use_planned_start)[1],
+            score_sort_key(tasks[task_id], scores[task_id], use_planned_start=use_planned_start)[3],
+            task_id,
+        ) if reference_plan is not None else score_sort_key(
+            tasks[task_id], scores[task_id], use_planned_start=use_planned_start
         ),
     )
 
@@ -241,6 +242,15 @@ class BaselineQuarterPlanner:
         allow_team_reassignment: bool = True,
         allow_cross_team: bool = True,
         cross_team_task_ids: set[str] | None = None,
+        start_sprint: int = 1,
+        actual_completed_tasks: dict[str, int] | None = None,
+        unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
+        carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+        prior_task_ownership_by_task: Mapping[str, Any] | None = None,
+        story_points_override_by_task: Mapping[str, float] | None = None,
+        original_total_required_hours_by_task: Mapping[str, float] | None = None,
+        preferred_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+        reference_plan_by_task: Mapping[str, Mapping[str, Any]] | None = None,
     ):
         self.context = context
         self.feasibility = FeasibilityService(context)
@@ -251,6 +261,45 @@ class BaselineQuarterPlanner:
         # Recommendation simulations may open external help only for explicitly
         # accepted tasks.  The regular plan keeps its former all-or-nothing API.
         self.cross_team_task_ids = frozenset(cross_team_task_ids or ())
+        if not 1 <= start_sprint <= SPRINT_COUNT:
+            raise ValueError(f"start_sprint must be between 1 and {SPRINT_COUNT}")
+        self.start_sprint = start_sprint
+        self.actual_completed_tasks = dict(actual_completed_tasks or {})
+        self.unavailable_engineer_ids_by_sprint = {
+            int(sprint): {str(engineer_id) for engineer_id in engineer_ids}
+            for sprint, engineer_ids in (unavailable_engineer_ids_by_sprint or {}).items()
+        }
+        self.carry_over_engineer_hours_by_task = {
+            str(task_id): {
+                str(engineer_id): max(float(hours), 0.0)
+                for engineer_id, hours in allocations.items()
+                if float(hours) > 0
+            }
+            for task_id, allocations in (carry_over_engineer_hours_by_task or {}).items()
+        }
+        self.prior_task_ownership_by_task = dict(prior_task_ownership_by_task or {})
+        self.story_points_override_by_task = {
+            str(task_id): max(float(value), 0.0)
+            for task_id, value in (story_points_override_by_task or {}).items()
+            if value is not None
+        }
+        self.original_total_required_hours_by_task = {
+            str(task_id): max(float(value), 0.0)
+            for task_id, value in (original_total_required_hours_by_task or {}).items()
+            if value is not None
+        }
+        self.preferred_engineer_hours_by_task = {
+            str(task_id): {
+                str(engineer_id): max(float(hours), 0.0)
+                for engineer_id, hours in allocations.items()
+                if float(hours) > 0
+            }
+            for task_id, allocations in (preferred_engineer_hours_by_task or {}).items()
+        }
+        self.reference_plan_by_task = {
+            str(task_id): dict(value)
+            for task_id, value in (reference_plan_by_task or {}).items()
+        }
         self.tasks = {
             task_id: dict(task)
             for task in context.tasks
@@ -319,6 +368,54 @@ class BaselineQuarterPlanner:
             )
         return keys
 
+    def _same_rung_initiative_choice(
+        self,
+        selectable_ids: Iterable[str],
+        pending: Mapping[str, Mapping[str, Any]],
+        ledgers: dict[int, SprintLedger],
+        completed_tasks: dict[str, int],
+        results: dict[str, TaskPlanResult],
+    ) -> str | None:
+        """Choose initiative completion only inside the highest task-rung tier.
+
+        An initiative participates only when all of its remaining tasks have
+        the current highest rung. This prevents initiative completion from
+        pulling a lower-rung task ahead of any feasible higher-rung task.
+        """
+
+        candidates = tuple(selectable_ids)
+        if len(candidates) < 2:
+            return None
+        highest_rung = max(
+            _number(pending[task_id].get("rung")) or 0.0
+            for task_id in candidates
+        )
+        highest_ids = {
+            task_id
+            for task_id in candidates
+            if (_number(pending[task_id].get("rung")) or 0.0) == highest_rung
+        }
+        initiative_ids = {
+            _text(pending[task_id].get("initiative_id")) for task_id in highest_ids
+        } - {None}
+        tie_pending: dict[str, Mapping[str, Any]] = {}
+        for initiative_id in initiative_ids:
+            remaining = {
+                task_id: task
+                for task_id, task in pending.items()
+                if _text(task.get("initiative_id")) == initiative_id
+            }
+            if remaining and all(
+                (_number(task.get("rung")) or 0.0) == highest_rung
+                for task in remaining.values()
+            ):
+                tie_pending.update(remaining)
+        if not tie_pending:
+            return None
+        return self._primary_initiative_choice(
+            tie_pending, ledgers, completed_tasks, results
+        )
+
     def _compare_initiative_orders(
         self,
         left: tuple[str, ...],
@@ -340,7 +437,7 @@ class BaselineQuarterPlanner:
         candidate: tuple[int, tuple[str, ...], tuple[int, ...]],
         current: tuple[int, tuple[str, ...], tuple[int, ...]],
     ) -> bool:
-        """Apply count, rung profile, completion, then stable ID ordering."""
+        """Apply count, max rung, planned date, completion, then stable ID."""
 
         if candidate[0] != current[0]:
             return candidate[0] > current[0]
@@ -349,6 +446,24 @@ class BaselineQuarterPlanner:
         )
         if profile_comparison:
             return profile_comparison > 0
+        for candidate_id, current_id in zip(candidate[1], current[1]):
+            candidate_dates = tuple(
+                date_ordinal(task.get("planned_start"))
+                for task in self.tasks.values()
+                if _text(task.get("initiative_id")) == candidate_id
+            )
+            current_dates = tuple(
+                date_ordinal(task.get("planned_start"))
+                for task in self.tasks.values()
+                if _text(task.get("initiative_id")) == current_id
+            )
+            if (
+                candidate_dates
+                and current_dates
+                and all(value is not None for value in (*candidate_dates, *current_dates))
+                and min(candidate_dates) != min(current_dates)
+            ):
+                return min(candidate_dates) < min(current_dates)
         if candidate[2] != current[2]:
             return candidate[2] < current[2]
         return candidate[1] < current[1]
@@ -459,10 +574,14 @@ class BaselineQuarterPlanner:
         completed_tasks: dict[str, int],
     ) -> tuple[int | None, tuple[FeasibilityReason, ...], tuple[str, ...]]:
         blockers = self._incoming_blockers(task_id)
-        earliest = 1
+        earliest = self.start_sprint
         reasons: list[FeasibilityReason] = []
         for blocker in blockers:
-            timing = dependency_timing(blocker, completed_tasks)
+            timing = dependency_timing(
+                blocker,
+                completed_tasks,
+                actual_completed_tasks=self.actual_completed_tasks,
+            )
             if timing is not None:
                 earliest = max(earliest, timing.earliest_start_sprint)
                 continue
@@ -522,10 +641,13 @@ class BaselineQuarterPlanner:
     ]:
         task_id = _text(task.get("task_id")) or ""
         team_id = assigned_team_id
-        story_points = _number(task.get("story_points"))
+        source_story_points = _number(task.get("story_points"))
+        story_points = self.story_points_override_by_task.get(task_id, source_story_points)
         original_requirements = self.feasibility.task_role_requirements(task_id)
         remaining = dict(original_requirements)
-        total_required_hours = sum(original_requirements.values())
+        total_required_hours = self.original_total_required_hours_by_task.get(
+            task_id, sum(original_requirements.values())
+        )
         trial_ledgers = self._clone_ledgers(ledgers)
         allocations: list[TaskAllocation] = []
         attempts: list[PlacementAttempt] = []
@@ -534,19 +656,30 @@ class BaselineQuarterPlanner:
         no_hours_warning = None
         assigned_capacity_sp = 0.0
         allocated_hours_total = 0.0
+        carry_over_remaining = dict(self.carry_over_engineer_hours_by_task.get(task_id, {}))
+        preferred_engineer_hours = dict(
+            self.preferred_engineer_hours_by_task.get(task_id, {})
+        )
+        for engineer_id, hours in carry_over_remaining.items():
+            preferred_engineer_hours[engineer_id] = max(
+                preferred_engineer_hours.get(engineer_id, 0.0), hours
+            )
 
         if story_points is not None and story_points > 0 and total_required_hours <= 0:
             no_hours_warning = FeasibilityReason(
                 ReasonCode.STORY_POINTS_WITHOUT_HOURS,
                 {
                     "task_id": task_id,
-                    "story_points": story_points,
+                    "story_points": source_story_points,
+                    "planning_story_points": story_points,
                     "fallback": "Distribute capacity SP load without inventing hours.",
                 },
             )
 
         if total_required_hours <= 0:
-            state = trial_ledgers[earliest_sprint].feasibility_state(completed_tasks)
+            state = trial_ledgers[earliest_sprint].feasibility_state(
+                completed_tasks, self.actual_completed_tasks
+            )
             feasibility = self.feasibility.check(
                 task_id,
                 state,
@@ -597,7 +730,7 @@ class BaselineQuarterPlanner:
                                 "available_sp": available_sp,
                             },
                         )
-                state = ledger.feasibility_state(completed_tasks)
+                state = ledger.feasibility_state(completed_tasks, self.actual_completed_tasks)
                 feasibility = self.feasibility.check(
                     task_id,
                     state,
@@ -607,6 +740,10 @@ class BaselineQuarterPlanner:
                 allow_cross_team=(self.allow_cross_team and (
                     not self.cross_team_task_ids or task_id in self.cross_team_task_ids
                 )),
+                    unavailable_engineer_ids=self.unavailable_engineer_ids_by_sprint.get(
+                        sprint_number, set()
+                    ),
+                    preferred_engineer_ids=set(preferred_engineer_hours),
                 )
                 if not feasibility.can_start:
                     attempts.append(
@@ -632,8 +769,12 @@ class BaselineQuarterPlanner:
                     remaining,
                     feasibility,
                     max_total_hours=max_task_hours,
-                    prior_ownership=evaluate_task_ownership(team_id, allocations),
+                    prior_ownership=merge_task_ownership(
+                        self.prior_task_ownership_by_task.get(task_id),
+                        evaluate_task_ownership(team_id, allocations),
+                    ),
                     enforce_owner_majority=True,
+                    preferred_engineer_hours=preferred_engineer_hours,
                 )
                 if outcome.total_hours <= 1e-9:
                     attempts.append(
@@ -673,7 +814,7 @@ class BaselineQuarterPlanner:
                     sprint_number=sprint_number,
                     allocated_role_hours=dict(outcome.allocated_role_hours),
                     engineer_allocations=outcome.engineer_allocations,
-                    task_story_points=story_points or 0.0,
+                    task_story_points=source_story_points or 0.0,
                     capacity_sp_load=capacity_sp_load,
                     planned_completion_sp=0.0,
                     completed_sp=0.0,
@@ -694,6 +835,17 @@ class BaselineQuarterPlanner:
                     start_sprint = sprint_number
                 assigned_capacity_sp += capacity_sp_load
                 allocated_hours_total = next_allocated_hours
+                for engineer in outcome.engineer_allocations:
+                    if engineer.engineer_id in carry_over_remaining:
+                        carry_over_remaining[engineer.engineer_id] = max(
+                            carry_over_remaining[engineer.engineer_id] - engineer.hours,
+                            0.0,
+                        )
+                carry_over_remaining = {
+                    engineer_id: hours
+                    for engineer_id, hours in carry_over_remaining.items()
+                    if hours > 1e-9
+                }
                 remaining = next_remaining
                 if not remaining:
                     break
@@ -850,7 +1002,7 @@ class BaselineQuarterPlanner:
                     engineer_allocations=(
                         previous.engineer_allocations if previous else ()
                     ),
-                    task_story_points=story_points,
+                    task_story_points=source_story_points or 0.0,
                     capacity_sp_load=load,
                     planned_completion_sp=(story_points if completes_now else 0.0),
                     completed_sp=0.0,
@@ -874,7 +1026,10 @@ class BaselineQuarterPlanner:
                 else:
                     attempts[attempts.index(previous_attempt)] = updated_attempt
             allocations = finalized_allocations
-            ownership = evaluate_task_ownership(team_id, allocations)
+            ownership = merge_task_ownership(
+                self.prior_task_ownership_by_task.get(task_id),
+                evaluate_task_ownership(team_id, allocations),
+            )
             if not ownership.valid:
                 ownership_reason = FeasibilityReason(
                     ReasonCode.INVALID_TASK_OWNERSHIP,
@@ -1188,6 +1343,19 @@ class BaselineQuarterPlanner:
                     task, status=PlanStatus.UNKNOWN, final_reasons=(reason,)
                 )
                 quarter_warnings.append(reason)
+            elif task_id in self.actual_completed_tasks:
+                completed_tasks[task_id] = self.actual_completed_tasks[task_id]
+                results[task_id] = self._task_result(
+                    task,
+                    status=PlanStatus.COMPLETED,
+                    completion_sprint=self.actual_completed_tasks[task_id],
+                    final_reasons=(
+                        FeasibilityReason(
+                            ReasonCode.ALREADY_COMPLETED,
+                            {"task_id": task_id, "actual_completion": True},
+                        ),
+                    ),
+                )
             elif is_historical_done(task):
                 completed_tasks[task_id] = 0
                 results[task_id] = self._task_result(
@@ -1254,7 +1422,38 @@ class BaselineQuarterPlanner:
                 )
                 for task_id in selectable_ids
             }
-            task_id = _select_priority_task_id(selectable_ids, pending, scored)
+            highest_rung = max(
+                _number(pending[candidate_id].get("rung")) or 0.0
+                for candidate_id in selectable_ids
+            )
+            preferred_initiative = self._same_rung_initiative_choice(
+                selectable_ids, pending, ledgers, completed_tasks, results
+            )
+            if preferred_initiative:
+                preferred_ids = [
+                    candidate_id
+                    for candidate_id in selectable_ids
+                    if _text(pending[candidate_id].get("initiative_id"))
+                    == preferred_initiative
+                    and (_number(pending[candidate_id].get("rung")) or 0.0)
+                    == highest_rung
+                ]
+            else:
+                preferred_ids = selectable_ids
+            carryover_ids = [
+                candidate_id
+                for candidate_id in preferred_ids
+                if self.carry_over_engineer_hours_by_task.get(candidate_id)
+                and (_number(pending[candidate_id].get("rung")) or 0.0) == highest_rung
+            ]
+            # Employee-specific unfinished work is committed before new work
+            # can consume that employee's next-sprint availability.
+            task_id = _select_priority_task_id(
+                carryover_ids or preferred_ids,
+                pending,
+                scored,
+                self.reference_plan_by_task,
+            )
             task = pending.pop(task_id)
             task_score = scored[task_id]
             self.priority_order[task_id] = len(self.priority_order) + 1
@@ -1525,6 +1724,15 @@ def build_quarter_plan(
     allow_team_reassignment: bool = True,
     allow_cross_team: bool = True,
     cross_team_task_ids: set[str] | None = None,
+    start_sprint: int = 1,
+    actual_completed_tasks: dict[str, int] | None = None,
+    unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
+    carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+    prior_task_ownership_by_task: Mapping[str, Any] | None = None,
+    story_points_override_by_task: Mapping[str, float] | None = None,
+    original_total_required_hours_by_task: Mapping[str, float] | None = None,
+    preferred_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+    reference_plan_by_task: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> QuarterPlan:
     """Build the scored plan; resource state and atomic rollback are automatic."""
 
@@ -1535,4 +1743,13 @@ def build_quarter_plan(
         allow_team_reassignment=allow_team_reassignment,
         allow_cross_team=allow_cross_team,
         cross_team_task_ids=cross_team_task_ids,
+        start_sprint=start_sprint,
+        actual_completed_tasks=actual_completed_tasks,
+        unavailable_engineer_ids_by_sprint=unavailable_engineer_ids_by_sprint,
+        carry_over_engineer_hours_by_task=carry_over_engineer_hours_by_task,
+        prior_task_ownership_by_task=prior_task_ownership_by_task,
+        story_points_override_by_task=story_points_override_by_task,
+        original_total_required_hours_by_task=original_total_required_hours_by_task,
+        preferred_engineer_hours_by_task=preferred_engineer_hours_by_task,
+        reference_plan_by_task=reference_plan_by_task,
     ).plan()

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 from src.planning.capacity import calculate_engineer_capacity, calculate_team_capacity
 from src.planning.feasibility import FeasibilityContext, FeasibilityService
 from src.planning.models import SprintState
+from src.planning.planning_calendar import PlanningCalendar
 from src.planning.reasons import ReasonCode
 
 
@@ -71,6 +73,13 @@ def reason_codes(result) -> list[ReasonCode]:
 
 
 class CapacityTests(unittest.TestCase):
+    def test_quarter_calendar_is_six_two_week_sprints(self) -> None:
+        calendar = PlanningCalendar(date(2026, 1, 5))
+
+        self.assertEqual(calendar.sprint_start(1), date(2026, 1, 5))
+        self.assertEqual(calendar.sprint_start(6), date(2026, 3, 16))
+        self.assertEqual(calendar.quarter_end, date(2026, 3, 29))
+
     def test_full_time_engineer_has_80_hours(self) -> None:
         capacity = calculate_engineer_capacity({"engineer_id": "E-1", "capacity_rate": 1.0})
         self.assertEqual(capacity.nominal_hours, 80)
@@ -93,6 +102,26 @@ class CapacityTests(unittest.TestCase):
 
 
 class FeasibilityTests(unittest.TestCase):
+    def test_multirole_engineer_capacity_is_shared_between_roles(self) -> None:
+        context = context_for(
+            effort=[
+                {"task_id": "T-1", "role": "Backend", "required_hours": 60},
+                {"task_id": "T-1", "role": "QA", "required_hours": 60},
+            ],
+            engineers=[
+                {"engineer_id": "E-1", "team_id": "Team-A", "role": "Backend", "capacity_rate": 1},
+                {"engineer_id": "E-1", "team_id": "Team-A", "role": "QA", "capacity_rate": 1},
+            ],
+        )
+
+        result = FeasibilityService(context).check("T-1", SprintState(1))
+
+        self.assertFalse(result.can_complete)
+        self.assertTrue(any(
+            reason.code == ReasonCode.INSUFFICIENT_ENGINEER_CAPACITY
+            for reason in result.reasons
+        ))
+
     def test_task_story_points_fit_remaining_capacity(self) -> None:
         result = FeasibilityService(context_for()).check(
             "T-1", SprintState(1, team_sp_used={"Team-A": 3})

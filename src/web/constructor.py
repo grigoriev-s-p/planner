@@ -68,6 +68,8 @@ class ConstructorTask(BaseModel):
     status: Literal["ToDo", "InProgress", "Done"] = "ToDo"
     rung: float = 0
     story_points: float = Field(ge=0)
+    planned_start: str | None = Field(default=None, max_length=50)
+    deadline: str | None = Field(default=None, max_length=50)
     role_requirements: list[ConstructorRoleRequirement] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
 
@@ -428,6 +430,8 @@ def scenario_tables(
                 "status": effective_status,
                 "rung": task.rung,
                 "story_points": task.story_points,
+                "planned_start": _clean_text(task.planned_start) or None,
+                "deadline": _clean_text(task.deadline) or None,
                 "is_placeholder": False,
             }
         )
@@ -834,6 +838,8 @@ def build_constructor_catalog(
                 "status": status,
                 "rung": task["rung"] or 0,
                 "story_points": task["story_points"] or 0,
+                "planned_start": _clean_text(raw.get("planned_start")) or None,
+                "deadline": _clean_text(raw.get("deadline")) or None,
                 "role_requirements": sorted(
                     role_requirements[task_id], key=lambda item: item["role"]
                 ),

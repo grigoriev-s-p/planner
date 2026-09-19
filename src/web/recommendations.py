@@ -121,6 +121,29 @@ def _summary(plan: dict[str, Any], kpi: float | None = None) -> dict[str, Any]:
     }
 
 
+def _anchor_kpi_baseline(plan: dict[str, Any], baseline_plan: dict[str, Any]) -> None:
+    """Keep Week-0 KPI denominators stable across draft variants."""
+
+    current = plan.get("kpis") or {}
+    baseline = baseline_plan.get("kpis") or {}
+    expected = current.get("expected_kpi") or {}
+    baseline_expected = baseline.get("expected_kpi") or {}
+    denominator = baseline_expected.get("baseline_initiatives")
+    completed = expected.get("completed_initiatives")
+    if denominator is not None and completed is not None:
+        expected["baseline_initiatives"] = denominator
+        expected["incomplete_initiatives"] = max(float(denominator) - float(completed), 0.0)
+        expected["completion_percent"] = (
+            float(completed) / float(denominator) * 100 if float(denominator) else None
+        )
+    baseline_sprints = baseline.get("sprint_kpis") or []
+    current_sprints = current.get("sprint_kpis") or []
+    for current_row, baseline_row in zip(current_sprints, baseline_sprints):
+        current_row["baseline_sp"] = baseline_row.get("baseline_sp")
+    if "quarter_kpi" in baseline:
+        current["quarter_kpi"] = deepcopy(baseline["quarter_kpi"])
+
+
 class RecommendationDraft:
     """Mutable review state with immutable Base and Best plans."""
 
@@ -187,6 +210,7 @@ class RecommendationDraft:
         )
         self.timings_ms["planner_run"] = round((perf_counter() - started) * 1000, 2)
         result = _without_support_tasks(service.dashboard, self.support_task_ids)
+        _anchor_kpi_baseline(result, self.base_plan)
         self._plan_cache[cache_key] = deepcopy(result)
         return result
 
@@ -681,7 +705,8 @@ class RecommendationDraft:
         ]
         available.sort(key=lambda item: (
             TYPE_ORDER.get(item.get("type"), 99), -_number(item.get("rung")),
-            item.get("effect", {}).get("before_sprint") or 99, item.get("task_id") or "",
+            _task(self.base_plan, item.get("task_id") or "").get("baseline_start_date") or "9999-12-31",
+            item.get("task_id") or "",
         ))
         self.recommendations = {item["recommendation_id"]: item for item in available}
 
