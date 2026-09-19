@@ -279,14 +279,66 @@ class FrontendRefinementTests(unittest.TestCase):
     def test_top_navigation_includes_task_catalog(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('data-page="constructor"', navigation)
-        for page in ("home", "planning", "current-plan", "tasks", "risks", "recalc", "star"):
+        for page in ("home", "planning", "current-plan", "tasks", "engineers", "teams", "risks", "recalc", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
         self.assertIn('data-page="tasks">Задачи</button>', navigation)
+        self.assertIn('data-page="engineers">Инженеры</button>', navigation)
+        self.assertIn('data-page="teams">Команды</button>', navigation)
         self.assertIn('data-page="planning">Планирование</button>', navigation)
         self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
         self.assertIn('id="addTaskFromTasks"', self.html)
         self.assertIn("window.planConstructor.openTaskForm()", self.app)
         self.assertIn("postcode:constructor-task-added", self.app)
+
+    def test_engineer_and_team_catalogs_use_backend_collections(self) -> None:
+        self.assertIn('id="page-engineers"', self.html)
+        self.assertIn('id="engineersTableBody"', self.html)
+        self.assertIn('id="page-teams"', self.html)
+        self.assertIn('id="teamsTableBody"', self.html)
+        self.assertIn("function renderEngineers()", self.app)
+        self.assertIn("function renderTeams()", self.app)
+        self.assertIn("data.engineers", self.app)
+        self.assertIn("data.teams", self.app)
+        self.assertIn('data-open-employee=', self.app)
+        self.assertIn('data-open-team=', self.app)
+        self.assertIn('id="addEngineerFromEngineers"', self.html)
+        self.assertIn('id="addTeamFromTeams"', self.html)
+        self.assertIn("window.planConstructor.openEngineerForm()", self.app)
+        self.assertIn("window.planConstructor.openTeamForm()", self.app)
+
+    def test_engineer_catalog_opens_inline_profile_and_explains_hidden_skills(self) -> None:
+        self.assertIn("if (state.page === 'engineers')", self.app)
+        self.assertIn("openEmployee(engineerId);", self.app)
+        self.assertIn('class="catalog-skill-more"', self.app)
+        self.assertIn('data-tooltip=', self.app)
+        self.assertIn('data-engineer-sort="current_task"', self.html)
+        self.assertNotIn('data-engineer-sort="free_hours"', self.html)
+        self.assertIn("Нет активной задачи", self.app)
+
+    def test_team_roles_show_plain_role_badges(self) -> None:
+        self.assertIn('class="team-role-badge"', self.app)
+        self.assertNotIn("BF ${number(busFactor)}", self.app)
+        self.assertIn(".team-role-badge", self.styles)
+
+    def test_engineer_catalog_fits_without_horizontal_scrolling(self) -> None:
+        self.assertIn("#engineersTableWrap{overflow-x:hidden}", self.styles)
+        self.assertIn(".engineers-table{width:100%;min-width:0;table-layout:fixed", self.styles)
+
+    def test_new_engineers_are_kept_in_scenario_draft(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("engineers: []", constructor_source)
+        self.assertIn("data-form-type=\"engineers\"", constructor_source)
+        self.assertIn("draft.engineers.forEach", constructor_source)
+        self.assertIn("postcode:constructor-engineer-added", constructor_source)
+        self.assertIn("openEngineerForm", constructor_source)
+        self.assertIn("openTeamForm", constructor_source)
+
+    def test_engineer_and_team_catalogs_sort_every_column(self) -> None:
+        self.assertEqual(self.html.count('data-engineer-sort='), 8)
+        self.assertEqual(self.html.count('data-team-sort='), 8)
+        self.assertIn("state.engineerSortDirection", self.app)
+        self.assertIn("state.teamSortDirection", self.app)
+        self.assertIn("catalogSort(", self.app)
 
     def test_constructor_approves_preview_before_replacing_current_plan(self) -> None:
         self.assertIn("planning: window.planConstructor.render", self.app)
@@ -485,6 +537,13 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("reason_code: reasonCode", self.app)
         self.assertIn("archiveEntity:", api)
         self.assertIn("/archive`,", api)
+        self.assertIn("getDeletionImpact:", api)
+        self.assertIn('id="archiveImpact"', self.html)
+        self.assertIn('id="archiveReplanConfirm"', self.html)
+        self.assertIn('name="teamEngineerAction"', self.app)
+        self.assertIn('name="teamTaskAction"', self.app)
+        self.assertIn('name="engineerAllocationAction"', self.app)
+        self.assertIn("hydrate(result.dashboard)", self.app)
 
     def test_entity_cards_offer_archive_and_show_lifecycle(self) -> None:
         for entity_type in ("task", "engineer", "team"):
@@ -492,7 +551,7 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("archiveState(task)", self.app)
         self.assertIn("archiveState(engineer)", self.app)
         self.assertIn("archiveState(team)", self.app)
-        self.assertIn("текущий план останется без изменений", self.app.lower())
+        self.assertIn("новый вариант будет рассчитан существующим planner", self.app.lower())
 
     def test_historical_done_dependency_is_rendered_as_satisfied(self) -> None:
         self.assertIn("item.state === 'HISTORICAL_DONE'", self.app)

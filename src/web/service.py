@@ -273,13 +273,14 @@ def build_bus_factor_payload(
     for row in tables.get("engineers", []):
         engineer_id = _text(row.get("engineer_id"))
         team_id = _text(row.get("team_id"))
-        if not engineer_id or not team_id:
+        if not engineer_id:
             continue
         profile = raw_profiles.setdefault(
             engineer_id,
             {"names": set(), "roles": set(), "grades": set(), "team_ids": set()},
         )
-        profile["team_ids"].add(team_id)
+        if team_id:
+            profile["team_ids"].add(team_id)
         if name := _text(row.get("name")):
             profile["names"].add(name)
         if role := _text(row.get("role")):
@@ -287,10 +288,11 @@ def build_bus_factor_payload(
         if grade := _text(row.get("grade")):
             profile["grades"].add(grade)
         rate = _number(row.get("capacity_rate"))
-        current = memberships[engineer_id].get(team_id)
-        memberships[engineer_id][team_id] = (
-            rate if current is None else max(current, rate or 0.0)
-        )
+        if team_id:
+            current = memberships[engineer_id].get(team_id)
+            memberships[engineer_id][team_id] = (
+                rate if current is None else max(current, rate or 0.0)
+            )
 
     skill_sets: dict[str, set[str]] = defaultdict(set)
     for row in service.engineer_skills.itertuples(index=False):
@@ -916,11 +918,11 @@ class PlanningAPIService:
     @cached_property
     def engineers(self) -> list[dict[str, Any]]:
         profiles: dict[str, dict[str, Any]] = {}
-        bucket_rates: dict[tuple[str, str], float] = {}
+        bucket_rates: dict[tuple[str, str | None], float] = {}
         for row in self.tables["engineers"]:
             engineer_id = _text(row.get("engineer_id"))
             team_id = _text(row.get("team_id"))
-            if not engineer_id or not team_id:
+            if not engineer_id:
                 continue
             target = profiles.setdefault(
                 engineer_id,
@@ -932,7 +934,8 @@ class PlanningAPIService:
                     "skills": set(),
                 },
             )
-            target["team_ids"].add(team_id)
+            if team_id:
+                target["team_ids"].add(team_id)
             if name := _text(row.get("name")):
                 target["names"].add(name)
             if role := _text(row.get("role")):
@@ -941,7 +944,7 @@ class PlanningAPIService:
                 target["grades"].add(grade)
             rate = _number(row.get("capacity_rate"))
             if rate is not None and 0 < rate <= 1:
-                key = (engineer_id, team_id)
+                key = (engineer_id, team_id or None)
                 bucket_rates[key] = min(bucket_rates.get(key, rate), rate)
         for row in self.tables["engineer_skills"]:
             engineer_id = _text(row.get("engineer_id"))
@@ -962,7 +965,10 @@ class PlanningAPIService:
                     "capacity_rate": bucket_rates[(engineer_id, team_id)],
                     "capacity_hours": 80.0 * bucket_rates[(engineer_id, team_id)],
                 }
-                for team_id in sorted(profile["team_ids"])
+                for _, team_id in sorted(
+                    (key for key in bucket_rates if key[0] == engineer_id),
+                    key=lambda key: key[1] or "",
+                )
             ]
             allocations = [
                 item for item in all_allocations if item["engineer_id"] == engineer_id
@@ -1092,9 +1098,12 @@ class PlanningAPIService:
         if matches.empty:
             return None
         row = matches.iloc[0]
-        helpers = self._risk_bus_factor_service.get_potential_helpers(
-            team_id, "role", role
-        )
+        try:
+            helpers = self._risk_bus_factor_service.get_potential_helpers(
+                team_id, "role", role
+            )
+        except KeyError:
+            helpers = pd.DataFrame()
         helper_rows = []
         if not helpers.empty:
             for item in helpers.head(5).to_dict("records"):

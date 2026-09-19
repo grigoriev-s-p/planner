@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.web.api import app
+from src.web.api import app, plan_drafts
 from src.web.catalog import (
     ArchiveConflictError,
     ArchiveValidationError,
@@ -112,12 +112,14 @@ def selected_b(*, blocker_id: str = "TASK-A") -> ConstructorScenario:
 
 class CatalogMergeTests(unittest.TestCase):
     def setUp(self) -> None:
+        plan_drafts.reset()
         self.temp = tempfile.TemporaryDirectory()
         self.repo = CatalogRepository(
             Path(self.temp.name) / "catalog.sqlite3", seed_tables=catalog_tables()
         )
 
     def tearDown(self) -> None:
+        plan_drafts.reset()
         self.temp.cleanup()
 
     def test_insert_only_merge_is_additive_idempotent_and_reports_conflicts(self) -> None:
@@ -213,12 +215,14 @@ class HistoricalDependencyTests(unittest.TestCase):
 
 class ArchiveTests(unittest.TestCase):
     def setUp(self) -> None:
+        plan_drafts.reset()
         self.temp = tempfile.TemporaryDirectory()
         self.repo = CatalogRepository(
             Path(self.temp.name) / "catalog.sqlite3", seed_tables=catalog_tables()
         )
 
     def tearDown(self) -> None:
+        plan_drafts.reset()
         self.temp.cleanup()
 
     def test_reason_is_required_and_other_requires_text(self) -> None:
@@ -275,6 +279,198 @@ class ArchiveTests(unittest.TestCase):
     def test_team_archive_is_blocked_while_active_references_exist(self) -> None:
         with self.assertRaises(ArchiveConflictError):
             self.repo.archive("team", "Team-A", "TEAM_DISBANDED")
+
+    def test_team_delete_can_keep_engineers_active_without_team_and_redistribute_tasks(self) -> None:
+        result = self.repo.archive_with_relations(
+            "team",
+            "Team-A",
+            "TEAM_DISBANDED",
+            team_engineer_action="UNASSIGN",
+            team_task_action="REDISTRIBUTE",
+        )
+
+        tables = self.repo.tables()
+        engineer_rows = [row for row in tables["engineers"] if row["engineer_id"] == "E-1"]
+        active = self.repo.active_planning_tables()
+        task_old = next(row for row in tables["tasks"] if row["task_id"] == "TASK-OLD")
+        self.assertTrue(result["entity"]["archived"])
+        self.assertEqual(engineer_rows[0].get("team_id"), None)
+        self.assertFalse(self.repo.lifecycle("engineer", "E-1")["archived"])
+        self.assertIn("E-1", {row["engineer_id"] for row in active["engineers"]})
+        self.assertIsNone(task_old.get("team_id"))
+        self.assertNotIn("Team-A", {row["team_id"] for row in active["team_history"]})
+        service = PlanningAPIService.from_tables(active)
+        engineer = next(row for row in service.engineers if row["engineer_id"] == "E-1")
+        self.assertEqual(engineer["team_ids"], [])
+        self.assertIsNone(engineer["capacity_buckets"][0]["team_id"])
+
+    def test_team_delete_can_deactivate_engineers_and_remove_tasks(self) -> None:
+        result = self.repo.archive_with_relations(
+            "team",
+            "Team-A",
+            "TEAM_DISBANDED",
+            team_engineer_action="DEACTIVATE",
+            team_task_action="REMOVE",
+        )
+
+        active = self.repo.active_planning_tables()
+        self.assertEqual(result["affected_engineer_ids"], ["E-1"])
+        self.assertIn("TASK-OLD", result["affected_task_ids"])
+        self.assertTrue(self.repo.lifecycle("engineer", "E-1")["archived"])
+        self.assertTrue(self.repo.lifecycle("task", "TASK-OLD")["archived"])
+        self.assertNotIn("E-1", {row["engineer_id"] for row in active["engineers"]})
+        self.assertNotIn("TASK-OLD", {row["task_id"] for row in active["tasks"]})
+
+    def test_team_delete_is_atomic_when_removed_task_blocks_external_task(self) -> None:
+        self.repo.merge_tables(
+            {
+                "tasks": [{
+                    "task_id": "TASK-EXT", "initiative_id": "INIT-EXT",
+                    "summary": "External", "team_id": "Team-B", "status": "ToDo",
+                    "rung": 1, "story_points": 1,
+                }],
+                "task_role_effort": [],
+                "task_dependencies": [{
+                    "blocking_task_id": "TASK-OLD", "blocked_task_id": "TASK-EXT",
+                    "dependency_type": "depends on",
+                }],
+                "engineers": [], "engineer_skills": [], "team_history": [],
+                "task_skill_requirements": [],
+            }
+        )
+        before = self.repo.tables()
+
+        with self.assertRaises(ArchiveConflictError):
+            self.repo.archive_with_relations(
+                "team", "Team-A", "TEAM_DISBANDED",
+                team_engineer_action="DEACTIVATE", team_task_action="REMOVE",
+            )
+
+        self.assertFalse(self.repo.lifecycle("team", "Team-A")["archived"])
+        self.assertEqual(self.repo.tables(), before)
+
+    def test_task_delete_rebuilds_plan_and_releases_allocations(self) -> None:
+        client = TestClient(app)
+        before = PlanningAPIService.from_tables(self.repo.active_planning_tables()).dashboard
+        plan_drafts.replace_approved(before)
+        with patch("src.web.api.get_catalog_repository", return_value=self.repo):
+            response = client.post(
+                "/api/tasks/TASK-OLD/archive",
+                json={"reason_code": "TASK_CANCELLED", "confirm_replan": True},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        dashboard = response.json()["dashboard"]
+        self.assertNotIn("TASK-OLD", {row["task_id"] for row in dashboard["tasks"]})
+        self.assertFalse(any(
+            allocation["task_id"] == "TASK-OLD"
+            for allocation in dashboard["plan"]["allocations"]
+        ))
+        before_engineer = next(row for row in before["engineers"] if row["engineer_id"] == "E-1")
+        after_engineer = next(row for row in dashboard["engineers"] if row["engineer_id"] == "E-1")
+        self.assertGreater(
+            sum(before_engineer["used_hours_by_sprint"].values()),
+            sum(after_engineer["used_hours_by_sprint"].values()),
+        )
+        before_team = next(row for row in before["teams"] if row["team_id"] == "Team-A")
+        after_team = next(row for row in dashboard["teams"] if row["team_id"] == "Team-A")
+        self.assertGreater(
+            sum(item["used"] for item in before_team["sp_by_sprint"].values()),
+            sum(item["used"] for item in after_team["sp_by_sprint"].values()),
+        )
+
+    def test_engineer_delete_uses_existing_planner_for_replacement(self) -> None:
+        tables = catalog_tables()
+        tables["engineers"].append({
+            "engineer_id": "E-2", "name": "Engineer Two", "team_id": "Team-A",
+            "role": "Backend", "capacity_rate": 1,
+        })
+        tables["engineer_skills"].append({"engineer_id": "E-2", "technology": "Python"})
+        repo = CatalogRepository(Path(self.temp.name) / "replacement.sqlite3", seed_tables=tables)
+        client = TestClient(app)
+        plan_drafts.replace_approved(
+            PlanningAPIService.from_tables(repo.active_planning_tables()).dashboard
+        )
+        with patch("src.web.api.get_catalog_repository", return_value=repo):
+            impact = client.get("/api/engineers/E-1/deletion-impact")
+            response = client.post(
+                "/api/engineers/E-1/archive",
+                json={
+                    "reason_code": "EMPLOYEE_LEFT", "confirm_replan": True,
+                    "engineer_allocation_action": "APPLY_PLANNER",
+                },
+            )
+
+        self.assertEqual(impact.status_code, 200, impact.text)
+        self.assertTrue(impact.json()["replacement_options"])
+        self.assertEqual(response.status_code, 200, response.text)
+        dashboard = response.json()["dashboard"]
+        self.assertNotIn("E-1", {row["engineer_id"] for row in dashboard["engineers"]})
+        self.assertFalse(any(
+            allocation["engineer_id"] == "E-1"
+            for task in dashboard["tasks"]
+            for allocation in task["allocations"]
+        ))
+        self.assertTrue(any(
+            allocation["engineer_id"] == "E-2"
+            for task in dashboard["tasks"]
+            for allocation in task["allocations"]
+        ))
+
+    def test_engineer_delete_reports_when_no_replacement_exists(self) -> None:
+        client = TestClient(app)
+        plan_drafts.replace_approved(
+            PlanningAPIService.from_tables(self.repo.active_planning_tables()).dashboard
+        )
+        with patch("src.web.api.get_catalog_repository", return_value=self.repo):
+            impact = client.get("/api/engineers/E-1/deletion-impact")
+            response = client.post(
+                "/api/engineers/E-1/archive",
+                json={
+                    "reason_code": "EMPLOYEE_LEFT", "confirm_replan": True,
+                    "engineer_allocation_action": "REPLAN_WITHOUT_REPLACEMENT",
+                },
+            )
+
+        self.assertEqual(impact.status_code, 200, impact.text)
+        self.assertTrue(any(
+            not item["possible"] for item in impact.json()["replacement_options"]
+        ))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["requires_plan_change"])
+        self.assertIn("TASK-OLD", response.json()["unplannable_task_ids"])
+
+    def test_team_redistribution_reports_tasks_that_cannot_be_replanned(self) -> None:
+        tables = catalog_tables()
+        tables["team_history"].append(
+            {"team_id": "Team-B", "team_name": "Team B", "velocity_achieved": 10}
+        )
+        tables["engineers"].append({
+            "engineer_id": "E-2", "team_id": "Team-B", "role": "QA",
+            "capacity_rate": 1,
+        })
+        repo = CatalogRepository(Path(self.temp.name) / "unplannable.sqlite3", seed_tables=tables)
+        client = TestClient(app)
+        plan_drafts.replace_approved(
+            PlanningAPIService.from_tables(repo.active_planning_tables()).dashboard
+        )
+        with patch("src.web.api.get_catalog_repository", return_value=repo):
+            response = client.post(
+                "/api/teams/Team-A/archive",
+                json={
+                    "reason_code": "TEAM_DISBANDED",
+                    "confirm_replan": True,
+                    "team_engineer_action": "UNASSIGN",
+                    "team_task_action": "REDISTRIBUTE",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["requires_plan_change"])
+        self.assertIn("TASK-OLD", payload["unplannable_task_ids"])
+        engineer = next(row for row in payload["dashboard"]["engineers"] if row["engineer_id"] == "E-1")
+        self.assertEqual(engineer["team_ids"], [])
 
     def test_archived_team_is_not_reactivated_by_later_import(self) -> None:
         tables = catalog_tables()
@@ -334,7 +530,11 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(other.status_code, 422)
             archived = client.post(
                 "/api/engineers/E-1/archive",
-                json={"reason_code": "EMPLOYEE_LEFT"},
+                json={
+                    "reason_code": "EMPLOYEE_LEFT",
+                    "confirm_replan": True,
+                    "engineer_allocation_action": "REPLAN_WITHOUT_REPLACEMENT",
+                },
             )
             self.assertEqual(archived.status_code, 200, archived.text)
             self.assertTrue(archived.json()["entity"]["archived"])

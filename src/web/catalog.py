@@ -184,6 +184,15 @@ class CatalogRepository:
                     archive_reason_text TEXT,
                     PRIMARY KEY (entity_type, entity_id)
                 );
+                CREATE TABLE IF NOT EXISTS catalog_row_overrides (
+                    table_name TEXT NOT NULL,
+                    row_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (table_name, row_key),
+                    FOREIGN KEY (table_name, row_key)
+                        REFERENCES catalog_rows(table_name, row_key)
+                );
                 """
             )
 
@@ -217,7 +226,10 @@ class CatalogRepository:
         result: dict[str, list[dict[str, Any]]] = {}
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT table_name,payload FROM catalog_rows ORDER BY table_name,row_key"
+                "SELECT source.table_name,COALESCE(changes.payload,source.payload) payload "
+                "FROM catalog_rows source LEFT JOIN catalog_row_overrides changes "
+                "ON changes.table_name=source.table_name AND changes.row_key=source.row_key "
+                "ORDER BY source.table_name,source.row_key"
             ).fetchall()
         for row in rows:
             result.setdefault(row["table_name"], []).append(json.loads(row["payload"]))
@@ -232,6 +244,247 @@ class CatalogRepository:
         ):
             result.setdefault(required, [])
         return result
+
+    @staticmethod
+    def _write_lifecycle(
+        connection: sqlite3.Connection,
+        entity_type: str,
+        entity_id: str,
+        reason_code: str,
+        reason_text: str | None,
+        archived_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO entity_lifecycle(
+                entity_type,entity_id,archived,archived_at,
+                archive_reason_code,archive_reason_text
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(entity_type,entity_id) DO UPDATE SET
+                archived=excluded.archived,
+                archived_at=excluded.archived_at,
+                archive_reason_code=excluded.archive_reason_code,
+                archive_reason_text=excluded.archive_reason_text
+            """,
+            (entity_type, entity_id, 1, archived_at, reason_code, reason_text),
+        )
+
+    @staticmethod
+    def _override_rows(
+        connection: sqlite3.Connection,
+        table_name: str,
+        predicate,
+        transform,
+        updated_at: str,
+    ) -> int:
+        rows = connection.execute(
+            "SELECT source.row_key,COALESCE(changes.payload,source.payload) payload "
+            "FROM catalog_rows source LEFT JOIN catalog_row_overrides changes "
+            "ON changes.table_name=source.table_name AND changes.row_key=source.row_key "
+            "WHERE source.table_name=? ORDER BY source.row_key",
+            (table_name,),
+        ).fetchall()
+        changed = 0
+        for source in rows:
+            payload = json.loads(source["payload"])
+            if not predicate(payload):
+                continue
+            replacement = transform(dict(payload))
+            connection.execute(
+                "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                "payload=excluded.payload,updated_at=excluded.updated_at",
+                (table_name, source["row_key"], _json_payload(replacement), updated_at),
+            )
+            changed += 1
+        return changed
+
+    @staticmethod
+    def _validate_reason(
+        entity_type: str, reason_code: str, reason_text: str | None
+    ) -> tuple[str, str | None]:
+        if entity_type not in ENTITY_TABLES:
+            raise ArchiveValidationError(f"Unsupported entity type: {entity_type}")
+        normalized_code = _text(reason_code).upper()
+        normalized_text = _text(reason_text) or None
+        if normalized_code not in ARCHIVE_REASON_LABELS[entity_type]:
+            raise ArchiveValidationError("Выберите допустимую причину удаления.")
+        if normalized_code == "OTHER" and not normalized_text:
+            raise ArchiveValidationError("Для другой причины укажите пояснение.")
+        return normalized_code, normalized_text
+
+    def deletion_impact(self, entity_type: str, entity_id: str) -> dict[str, Any]:
+        tables = self.tables()
+        if entity_type not in ENTITY_TABLES:
+            raise ArchiveValidationError(f"Unsupported entity type: {entity_type}")
+        if not self._entity_exists(tables, entity_type, entity_id):
+            raise CatalogNotFoundError(f"Unknown {entity_type}_id: {entity_id}")
+        archived_tasks = self.archived_ids("task")
+        archived_engineers = self.archived_ids("engineer")
+        if entity_type == "team":
+            engineer_ids = sorted({
+                _text(row.get("engineer_id"))
+                for row in tables["engineers"]
+                if _text(row.get("team_id")) == entity_id
+                and _text(row.get("engineer_id")) not in archived_engineers
+            })
+            task_ids = sorted({
+                _text(row.get("task_id"))
+                for row in tables["tasks"]
+                if _text(row.get("team_id")) == entity_id
+                and _text(row.get("task_id")) not in archived_tasks
+                and _text(row.get("status")).casefold() != "done"
+            })
+            removed = set(task_ids)
+            tasks_by_id = {
+                _text(row.get("task_id")): row for row in tables["tasks"]
+            }
+            external_blocked = sorted({
+                blocked_id
+                for row in tables["task_dependencies"]
+                if _text(row.get("blocking_task_id")) in removed
+                and (blocked_id := _text(row.get("blocked_task_id"))) not in removed
+                and blocked_id not in archived_tasks
+                and _text(tasks_by_id.get(blocked_id, {}).get("status")).casefold() != "done"
+            })
+            return {
+                "engineer_ids": engineer_ids,
+                "task_ids": task_ids,
+                "external_blocked_task_ids": external_blocked,
+            }
+        if entity_type == "task":
+            task_row = next(
+                row for row in tables["tasks"]
+                if _text(row.get("task_id")) == entity_id
+            )
+            blocked = [] if _text(task_row.get("status")).casefold() == "done" else sorted({
+                    _text(row.get("blocked_task_id"))
+                    for row in tables["task_dependencies"]
+                    if _text(row.get("blocking_task_id")) == entity_id
+                    and _text(row.get("blocked_task_id")) not in archived_tasks
+                })
+            return {"task_ids": [entity_id], "blocked_task_ids": blocked}
+        return {"engineer_ids": [entity_id]}
+
+    def archive_with_relations(
+        self,
+        entity_type: str,
+        entity_id: str,
+        reason_code: str,
+        reason_text: str | None = None,
+        *,
+        team_engineer_action: str | None = None,
+        team_task_action: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically soft-delete an entity and resolve direct team relations."""
+
+        reason_code, reason_text = self._validate_reason(
+            entity_type, reason_code, reason_text
+        )
+        tables = self.tables()
+        if not self._entity_exists(tables, entity_type, entity_id):
+            raise CatalogNotFoundError(f"Unknown {entity_type}_id: {entity_id}")
+        impact = self.deletion_impact(entity_type, entity_id)
+        affected_engineers: list[str] = []
+        affected_tasks: list[str] = []
+
+        if entity_type == "task":
+            active_blocked = impact.get("blocked_task_ids", [])
+            task_row = next(
+                row for row in tables["tasks"] if _text(row.get("task_id")) == entity_id
+            )
+            if active_blocked and _text(task_row.get("status")).casefold() != "done":
+                raise ArchiveConflictError(
+                    "Задача является активным blocker для: "
+                    + ", ".join(active_blocked)
+                    + ". Сначала измените зависимости."
+                )
+            affected_tasks = [entity_id]
+
+        if entity_type == "engineer":
+            affected_engineers = [entity_id]
+
+        if entity_type == "team":
+            affected_engineers = impact["engineer_ids"]
+            affected_tasks = impact["task_ids"]
+            if affected_engineers and team_engineer_action not in {"UNASSIGN", "DEACTIVATE"}:
+                raise ArchiveValidationError(
+                    "Выберите, оставить сотрудников без команды или сделать неактивными."
+                )
+            if affected_tasks and team_task_action not in {"REMOVE", "REDISTRIBUTE"}:
+                raise ArchiveValidationError(
+                    "Выберите, убрать задачи из плана или перераспределить."
+                )
+            if team_task_action == "REMOVE":
+                removed = set(affected_tasks)
+                archived_tasks = self.archived_ids("task")
+                tasks_by_id = {
+                    _text(row.get("task_id")): row for row in tables["tasks"]
+                }
+                external_blocked = sorted({
+                    blocked_id
+                    for row in tables["task_dependencies"]
+                    if _text(row.get("blocking_task_id")) in removed
+                    and (blocked_id := _text(row.get("blocked_task_id"))) not in removed
+                    and blocked_id not in archived_tasks
+                    and _text(tasks_by_id.get(blocked_id, {}).get("status")).casefold() != "done"
+                })
+                if external_blocked:
+                    raise ArchiveConflictError(
+                        "Задачи команды блокируют активные задачи: "
+                        + ", ".join(external_blocked)
+                        + ". Сначала измените зависимости или выберите перераспределение."
+                    )
+
+        archived_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if entity_type == "team":
+                if team_engineer_action == "UNASSIGN":
+                    self._override_rows(
+                        connection,
+                        "engineers",
+                        lambda row: _text(row.get("team_id")) == entity_id,
+                        lambda row: {**row, "team_id": None},
+                        archived_at,
+                    )
+                elif team_engineer_action == "DEACTIVATE":
+                    for engineer_id in affected_engineers:
+                        self._write_lifecycle(
+                            connection, "engineer", engineer_id,
+                            "NO_LONGER_PLANNED", f"Деактивирован вместе с командой {entity_id}",
+                            archived_at,
+                        )
+                if team_task_action == "REDISTRIBUTE":
+                    active_task_ids = set(affected_tasks)
+                    self._override_rows(
+                        connection,
+                        "tasks",
+                        lambda row: _text(row.get("task_id")) in active_task_ids,
+                        lambda row: {**row, "team_id": None},
+                        archived_at,
+                    )
+                elif team_task_action == "REMOVE":
+                    for task_id in affected_tasks:
+                        self._write_lifecycle(
+                            connection, "task", task_id,
+                            "NO_LONGER_RELEVANT", f"Убрана вместе с командой {entity_id}",
+                            archived_at,
+                        )
+            self._write_lifecycle(
+                connection, entity_type, entity_id,
+                reason_code, reason_text, archived_at,
+            )
+
+        lifecycle = self.lifecycle(entity_type, entity_id)
+        lifecycle.update({"entity_type": entity_type, "entity_id": entity_id})
+        return {
+            "entity": lifecycle,
+            "affected_engineer_ids": affected_engineers,
+            "affected_task_ids": affected_tasks,
+            "team_engineer_action": team_engineer_action,
+            "team_task_action": team_task_action,
+        }
 
     def lifecycle(self, entity_type: str, entity_id: str) -> dict[str, Any]:
         with self._connect() as connection:

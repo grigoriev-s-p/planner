@@ -2,7 +2,7 @@
 
 window.planConstructor = (() => {
   const STORAGE_KEY = 'postcode.plan-constructor.v2';
-  const emptyDraft = () => ({teams: [], tasks: []});
+  const emptyDraft = () => ({teams: [], engineers: [], tasks: []});
   let catalog = {teams: [], engineers: [], tasks: [], options: {roles: [], skills: [], grades: []}};
   let draft = emptyDraft();
   let mode = 'manual';
@@ -179,6 +179,7 @@ window.planConstructor = (() => {
       if (stored && Array.isArray(stored.teams) && Array.isArray(stored.tasks)) {
         draft = {
           teams: stored.teams,
+          engineers: Array.isArray(stored.engineers) ? stored.engineers : [],
           tasks: stored.tasks.map((task) => ({...task, team_id: null})),
         };
       }
@@ -431,6 +432,15 @@ window.planConstructor = (() => {
       assignments: engineer.assignments.filter((assignment) => selectedTeams.has(assignment.team_id)),
     })).filter((engineer) => engineer.assignments.length > 0);
     const usedIds = new Set(engineers.map((engineer) => engineer.engineer_id));
+    draft.engineers.forEach((engineer) => {
+      const scenarioAssignments = (engineer.assignments || []).filter((assignment) => selectedTeams.has(assignment.team_id));
+      if (!scenarioAssignments.length) return;
+      const scenarioEngineer = {...clone(engineer), assignments: scenarioAssignments};
+      const existingIndex = engineers.findIndex((item) => item.engineer_id === engineer.engineer_id);
+      if (existingIndex >= 0) engineers[existingIndex] = scenarioEngineer;
+      else engineers.push(scenarioEngineer);
+      usedIds.add(engineer.engineer_id);
+    });
     draft.teams.forEach((team) => (team.engineer_ids || []).forEach((engineerId) => {
       if (usedIds.has(engineerId)) return;
       const source = findCatalog('engineers', engineerId);
@@ -503,7 +513,12 @@ window.planConstructor = (() => {
 
   function sharedDataLists() {
     const initiatives = [...new Set([...catalog.tasks, ...draft.tasks].map((task) => task.initiative_id).filter(Boolean))].sort();
-    return `<datalist id="constructorRoleOptions">${catalog.options.roles.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist><datalist id="constructorInitiativeOptions">${initiatives.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>`;
+    return `<datalist id="constructorRoleOptions">${(catalog.options.roles || []).map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist><datalist id="constructorGradeOptions">${(catalog.options.grades || []).map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist><datalist id="constructorInitiativeOptions">${initiatives.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>`;
+  }
+
+  function engineerTeamOptions(selectedTeamId = '') {
+    const teams = catalogWithDraft('teams').sort((left, right) => String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru'));
+    return teams.map((team) => `<option value="${esc(team.team_id)}" ${team.team_id === selectedTeamId ? 'selected' : ''}>${esc(team.name || team.team_id)}</option>`).join('');
   }
 
   function freeEngineerCandidates(currentTeamId = null) {
@@ -544,6 +559,11 @@ window.planConstructor = (() => {
       const team = item || {team_id: '', name: '', expected_velocity_sp: 20, engineer_ids: []};
       content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label>${freeEngineerPicker(team)}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
+    if (type === 'engineers') {
+      const engineer = item || {engineer_id: '', name: '', assignments: [{team_id: '', role: '', grade: '', capacity_rate: 1}], skills: []};
+      const assignment = engineer.assignments?.[0] || {team_id: '', role: '', grade: '', capacity_rate: 1};
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.05" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+    }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], depends_on: []};
       content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты и обязательные навыки</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
@@ -571,6 +591,25 @@ window.planConstructor = (() => {
     if (type === 'teams') {
       entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: Number(values.get('expected_velocity_sp')), engineer_ids: values.getAll('team_engineer_id').map(String), source: existing?.source || 'draft'};
     }
+    if (type === 'engineers') {
+      const teamId = String(values.get('team_id') || '').trim();
+      entity = {
+        engineer_id: id,
+        name: String(values.get('name') || '').trim(),
+        assignments: [{
+          team_id: teamId,
+          role: String(values.get('role') || '').trim(),
+          grade: String(values.get('grade') || '').trim(),
+          capacity_rate: Number(values.get('capacity_rate')),
+        }],
+        skills: csvValues(values.get('skills')),
+        source: existing?.source || 'draft',
+      };
+      if (!findDraft('teams', teamId)) {
+        const sourceTeam = findCatalog('teams', teamId);
+        if (sourceTeam) draft.teams.push(clone(sourceTeam));
+      }
+    }
     if (type === 'tasks') {
       const storyPoints = Number(String(values.get('story_points')).replace(',', '.'));
       const requirements = $$c('.constructor-requirement-row', form).map((row) => ({
@@ -595,6 +634,12 @@ window.planConstructor = (() => {
     render();
     if (type === 'tasks' && !editing) {
       window.dispatchEvent(new CustomEvent('postcode:constructor-task-added', {detail: {taskId: id}}));
+    }
+    if (type === 'engineers' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-engineer-added', {detail: {engineerId: id}}));
+    }
+    if (type === 'teams' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-team-added', {detail: {teamId: id}}));
     }
   }
 
@@ -815,5 +860,13 @@ window.planConstructor = (() => {
     openForm('tasks');
   }
 
-  return Object.freeze({initialize, updateCatalog, render, openTaskForm});
+  function openEngineerForm() {
+    openForm('engineers');
+  }
+
+  function openTeamForm() {
+    openForm('teams');
+  }
+
+  return Object.freeze({initialize, updateCatalog, render, openTaskForm, openEngineerForm, openTeamForm});
 })();

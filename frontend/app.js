@@ -7,6 +7,8 @@ const state = {
   competency: null, criticalOnly: false,
   taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
   taskSortKey: 'task_id', taskSortDirection: 'asc',
+  engineerSortKey: 'engineer_id', engineerSortDirection: 'asc',
+  teamSortKey: 'name', teamSortDirection: 'asc',
 };
 
 const data = {
@@ -201,14 +203,50 @@ function archiveEntityLabel(entityType) {
   return ({task: 'задачу', engineer: 'инженера', team: 'команду'})[entityType] || 'объект';
 }
 
-function openArchiveModal(entityType, entityId, hasCurrentPlanReferences = false) {
+function renderArchiveImpact(impact) {
+  if (!state.archive) return;
+  const engineerCount = (impact.engineer_ids || []).length;
+  const taskCount = (impact.task_ids || []).length;
+  const allocationCount = Number(impact.allocation_count || 0);
+  const decisions = [];
+  if (state.archive.entityType === 'team' && engineerCount) {
+    decisions.push(`<fieldset class="archive-decision"><legend>Сотрудники команды</legend><label><input type="radio" name="teamEngineerAction" value="UNASSIGN"><span>Оставить активными без команды</span></label><label><input type="radio" name="teamEngineerAction" value="DEACTIVATE"><span>Сделать неактивными</span></label></fieldset>`);
+  }
+  if (state.archive.entityType === 'team' && taskCount) {
+    decisions.push(`<fieldset class="archive-decision"><legend>Задачи команды</legend><label><input type="radio" name="teamTaskAction" value="REMOVE"><span>Убрать задачи из плана</span></label><label><input type="radio" name="teamTaskAction" value="REDISTRIBUTE"><span>Попытаться перераспределить между оставшимися командами</span></label></fieldset>`);
+  }
+  const replacementOptions = impact.replacement_options || [];
+  const replacementRows = replacementOptions.map((item) => `<div class="archive-impact-note ${item.possible ? '' : 'danger'}"><b>${escapeHtml(item.task_id)}</b>: ${item.possible ? `планировщик может назначить ${escapeHtml(item.engineer_ids.join(', '))}` : 'подходящая замена не найдена'}</div>`).join('');
+  if (state.archive.entityType === 'engineer' && replacementOptions.length) {
+    const allReplaceable = replacementOptions.every((item) => item.possible);
+    decisions.push(`<fieldset class="archive-decision"><legend>Текущие allocations инженера</legend><label><input type="radio" name="engineerAllocationAction" value="${allReplaceable ? 'APPLY_PLANNER' : 'REPLAN_WITHOUT_REPLACEMENT'}"><span>${allReplaceable ? 'Применить предложенные planner замены' : 'Деактивировать инженера и пересчитать план без замены'}</span></label></fieldset>`);
+  }
+  const blocked = (impact.blocked_task_ids || []).length ? `<div class="archive-impact-note danger">Задача блокирует: ${escapeHtml(impact.blocked_task_ids.join(', '))}. Сначала измените зависимости.</div>` : '';
+  const teamBlocked = (impact.external_blocked_task_ids || []).length ? `<div class="archive-impact-note danger">При варианте «Убрать задачи» останутся зависимые задачи: ${escapeHtml(impact.external_blocked_task_ids.join(', '))}. Выберите перераспределение или измените зависимости.</div>` : '';
+  const unplannable = (impact.unplannable_task_ids || []).length ? `<div class="archive-impact-note danger">После пересчёта могут не войти в план: ${escapeHtml(impact.unplannable_task_ids.join(', '))}.</div>` : '';
+  const optimization = impact.optimization_available ? `<div class="archive-impact-note">После удаления план можно оптимизировать: раньше поставить ${escapeHtml((impact.improved_task_ids || []).join(', '))}.</div>` : '';
+  const simulationError = impact.simulation_error ? `<div class="archive-impact-note danger">Не удалось проверить новый план: ${escapeHtml(impact.simulation_error)}</div>` : '';
+  $('#archiveImpact').innerHTML = `<div class="archive-impact-summary"><div><b>${engineerCount}</b><span>сотрудников</span></div><div><b>${taskCount}</b><span>задач</span></div><div><b>${allocationCount}</b><span>allocations</span></div></div>${decisions.join('')}${replacementRows}${blocked}${teamBlocked}${unplannable}${optimization}${simulationError}`;
+  const requiresReplan = state.archive.entityType !== 'task' || impact.requires_replan || impact.optimization_available;
+  state.archive = {...state.archive, impact, impactLoaded: true, requiresReplan};
+  $('#archiveReplanField').hidden = !requiresReplan;
+  $('#archiveCurrentPlanWarning').hidden = !requiresReplan;
+  $('#archiveCurrentPlanWarning').textContent = requiresReplan
+    ? 'Изменение затрагивает текущий план. Новый вариант будет рассчитан существующим planner и применён только после вашего подтверждения.'
+    : 'Исторические данные сохранятся; физического удаления из БД не будет.';
+  updateArchiveConfirmation();
+}
+
+async function openArchiveModal(entityType, entityId, hasCurrentPlanReferences = false) {
   const dialog = $('#archiveDialog');
   const labels = data.archiveReasons[entityType] || {};
-  state.archive = {entityType, entityId, hasCurrentPlanReferences};
+  state.archive = {entityType, entityId, hasCurrentPlanReferences, impactLoaded: false, requiresReplan: false};
   $('#archiveDialogTitle').textContent = `Удалить ${archiveEntityLabel(entityType)}`;
-  $('#archiveDialogDescription').textContent = 'Объект будет исключён из новых планов. Исторические данные сохранятся.';
-  $('#archiveCurrentPlanWarning').hidden = !hasCurrentPlanReferences;
-  $('#archiveCurrentPlanWarning').textContent = 'Объект участвует в текущем плане. После удаления текущий план останется без изменений и не будет пересчитан автоматически.';
+  $('#archiveDialogDescription').textContent = 'Сначала проверяем сотрудников, задачи, allocations, зависимости и последствия для capacity.';
+  $('#archiveImpact').innerHTML = '<div class="archive-impact-note">Проверяем последствия удаления…</div>';
+  $('#archiveCurrentPlanWarning').hidden = true;
+  $('#archiveReplanField').hidden = true;
+  $('#archiveReplanConfirm').checked = false;
   $('#archiveReason').innerHTML = `<option value="">Выберите причину</option>${Object.entries(labels).map(([code, label]) => `<option value="${attr(code)}">${escapeHtml(label)}</option>`).join('')}`;
   $('#archiveReasonText').value = '';
   $('#archiveOtherField').hidden = true;
@@ -216,6 +254,15 @@ function openArchiveModal(entityType, entityId, hasCurrentPlanReferences = false
   $('#archiveError').textContent = '';
   updateArchiveConfirmation();
   dialog.showModal();
+  try {
+    const impact = await window.postcodeApi.getDeletionImpact(entityType, entityId);
+    if (state.archive?.entityType === entityType && state.archive?.entityId === entityId) renderArchiveImpact(impact);
+  } catch (error) {
+    if (!state.archive) return;
+    $('#archiveImpact').innerHTML = `<div class="archive-impact-note danger">${escapeHtml(error?.message || 'Не удалось проверить последствия удаления.')}</div>`;
+    $('#archiveError').textContent = error?.message || 'Не удалось проверить последствия удаления.';
+    $('#archiveError').hidden = false;
+  }
 }
 
 function closeArchiveModal() {
@@ -228,7 +275,18 @@ function updateArchiveConfirmation() {
   const reasonCode = $('#archiveReason').value;
   const isOther = reasonCode === 'OTHER';
   $('#archiveOtherField').hidden = !isOther;
-  $('#confirmArchive').disabled = !reasonCode || (isOther && !$('#archiveReasonText').value.trim());
+  const archive = state.archive;
+  const teamEngineerRequired = archive?.entityType === 'team' && (archive.impact?.engineer_ids || []).length > 0;
+  const teamTaskRequired = archive?.entityType === 'team' && (archive.impact?.task_ids || []).length > 0;
+  const engineerChoice = document.querySelector('[name="teamEngineerAction"]:checked');
+  const taskChoice = document.querySelector('[name="teamTaskAction"]:checked');
+  const replacementRequired = archive?.entityType === 'engineer' && (archive.impact?.replacement_options || []).length > 0;
+  const replacementChoice = document.querySelector('[name="engineerAllocationAction"]:checked');
+  const blockedByDependency = (archive?.impact?.blocked_task_ids || []).length > 0
+    || (taskChoice?.value === 'REMOVE' && (archive?.impact?.external_blocked_task_ids || []).length > 0);
+  const choicesReady = (!teamEngineerRequired || engineerChoice) && (!teamTaskRequired || taskChoice) && (!replacementRequired || replacementChoice) && !blockedByDependency;
+  const replanReady = !archive?.requiresReplan || $('#archiveReplanConfirm').checked;
+  $('#confirmArchive').disabled = !archive?.impactLoaded || !reasonCode || (isOther && !$('#archiveReasonText').value.trim()) || !choicesReady || !replanReady;
 }
 
 async function submitArchive() {
@@ -247,15 +305,16 @@ async function submitArchive() {
     const result = await window.postcodeApi.archiveEntity(entityType, entityId, {
       reason_code: reasonCode,
       reason_text: reasonCode === 'OTHER' ? reasonText : null,
+      confirm_replan: $('#archiveReplanConfirm').checked,
+      team_engineer_action: document.querySelector('[name="teamEngineerAction"]:checked')?.value || null,
+      team_task_action: document.querySelector('[name="teamTaskAction"]:checked')?.value || null,
+      engineer_allocation_action: document.querySelector('[name="engineerAllocationAction"]:checked')?.value || null,
     });
-    const collection = {task: data.tasks, engineer: data.engineers, team: data.teams}[entityType];
-    const idField = `${entityType}_id`;
-    const entity = collection.find((item) => item[idField] === entityId);
-    if (entity) Object.assign(entity, result.entity);
+    hydrate(result.dashboard);
     closeArchiveModal();
-    if (entityType === 'task') { renderTasks(); if (state.page === 'task-detail') renderTaskDetail(); }
-    if (entityType === 'engineer') openEmployee(entityId);
-    if (entityType === 'team') renderStarTeams();
+    closeEmployee();
+    const destination = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];
+    show(destination);
     showToast([result.message, result.warning].filter(Boolean).join(' '));
     try {
       const catalog = await window.postcodeApi.getConstructorCatalog();
@@ -283,7 +342,7 @@ function routeFromLocation() {
   if (match) return {page: 'task-detail', taskId: decodeURIComponent(match[1])};
   if (window.location.pathname === '/tasks' || window.location.pathname === '/tasks/') return {page: 'tasks', taskId: null};
   const hashPage = window.location.hash.replace(/^#/, '');
-  const knownPages = new Set(['home', 'planning', 'current-plan', 'tasks', 'risks', 'recalc', 'star']);
+  const knownPages = new Set(['home', 'planning', 'current-plan', 'tasks', 'engineers', 'teams', 'risks', 'recalc', 'star']);
   return {page: knownPages.has(hashPage) ? hashPage : 'home', taskId: null};
 }
 
@@ -302,7 +361,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
+  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
 }
 
 function renderUnavailable() {
@@ -312,6 +371,10 @@ function renderUnavailable() {
   if ($('#homeRisks')) $('#homeRisks').innerHTML = empty(message);
   if ($('#tasksListState')) $('#tasksListState').innerHTML = empty(message);
   if ($('#tasksTableWrap')) $('#tasksTableWrap').hidden = true;
+  if ($('#engineersListState')) $('#engineersListState').innerHTML = empty(message);
+  if ($('#engineersTableWrap')) $('#engineersTableWrap').hidden = true;
+  if ($('#teamsListState')) $('#teamsListState').innerHTML = empty(message);
+  if ($('#teamsTableWrap')) $('#teamsTableWrap').hidden = true;
   if ($('#taskDetailState')) $('#taskDetailState').innerHTML = empty(message);
   if ($('#taskDetailContent')) $('#taskDetailContent').hidden = true;
 }
@@ -334,6 +397,10 @@ function gotoTeam(teamId) {
 function gotoEmployee(engineerId) {
   if (!engineerBy(engineerId)) return;
   state.engineerId = engineerId;
+  if (state.page === 'engineers') {
+    openEmployee(engineerId);
+    return;
+  }
   state.starTab = 'teams';
   show('star');
   openEmployee(engineerId);
@@ -467,6 +534,110 @@ function renderTasks() {
     return;
   }
   body.innerHTML = sorted.map((task) => `<tr data-open-task="${attr(task.task_id)}" data-task-row tabindex="0"><td>${tButton(task)}</td><td>${escapeHtml(task.title)}</td><td>${number(task.story_points)}</td><td>${rungBadge(task)}</td><td>${escapeHtml(task.assigned_team_id || '—')}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${task.start_sprint ? `Sprint ${number(task.start_sprint)}` : '—'}</td><td class="task-status-cell">${taskStatusIndicator(task)}</td></tr>`).join('');
+}
+
+function catalogSort(items, key, direction, valueFor, numericKeys = new Set()) {
+  return [...items].sort((left, right) => {
+    const leftValue = valueFor(left, key);
+    const rightValue = valueFor(right, key);
+    const leftMissing = leftValue == null || leftValue === '';
+    const rightMissing = rightValue == null || rightValue === '';
+    if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : (leftMissing ? 1 : -1);
+    const comparison = numericKeys.has(key)
+      ? Number(leftValue) - Number(rightValue)
+      : String(leftValue).localeCompare(String(rightValue), 'ru', {numeric: true, sensitivity: 'base'});
+    return direction === 'asc' ? comparison : -comparison;
+  });
+}
+
+function updateCatalogSortButtons(selector, activeKey, direction) {
+  $$(selector).forEach((button) => {
+    const key = button.dataset.engineerSort || button.dataset.teamSort;
+    const active = key === activeKey;
+    button.classList.toggle('active', active);
+    button.parentElement.setAttribute('aria-sort', active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    $('span', button).textContent = active ? (direction === 'asc' ? '↑' : '↓') : '↕';
+  });
+}
+
+function renderEngineers() {
+  const sprint = currentSprint();
+  const body = $('#engineersTableBody');
+  const wrap = $('#engineersTableWrap');
+  $('#engineersListCount').textContent = `${data.engineers.length}`;
+  $('#engineersListState').innerHTML = '';
+  wrap.hidden = false;
+  const currentAllocations = (engineer) => (engineer.allocations || []).filter((item) => Number(item.sprint) === sprint);
+  const valueFor = (engineer, key) => ({
+    roles: (engineer.roles || []).join(', '),
+    team_ids: (engineer.team_ids || []).join(', '),
+    used_hours: Number(engineer.used_hours_by_sprint?.[String(sprint)] || 0),
+    current_task: currentAllocations(engineer).map((item) => item.task_id).sort().join(', '),
+    skills: (engineer.skills || []).join(', '),
+  }[key] ?? engineer[key]);
+  const sorted = catalogSort(
+    data.engineers,
+    state.engineerSortKey,
+    state.engineerSortDirection,
+    valueFor,
+    new Set(['capacity_hours', 'used_hours']),
+  );
+  updateCatalogSortButtons('[data-engineer-sort]', state.engineerSortKey, state.engineerSortDirection);
+  if (!sorted.length) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty-state">Инженеров пока нет.</div></td></tr>';
+    return;
+  }
+  body.innerHTML = sorted.map((engineer) => {
+    const used = Number(engineer.used_hours_by_sprint?.[String(sprint)] || 0);
+    const activeTasks = [...new Set(currentAllocations(engineer).map((item) => item.task_id))];
+    const skillPreview = (engineer.skills || []).slice(0, 3).join(', ');
+    const remainingSkills = (engineer.skills || []).slice(3);
+    const moreSkills = remainingSkills.length;
+    const taskLinks = activeTasks.length
+      ? activeTasks.map((taskId) => {
+        const title = taskBy(taskId)?.title;
+        return `<button class="table-button current-task-link" type="button" data-open-task="${attr(taskId)}">${escapeHtml(title ? `${taskId} · ${title}` : taskId)} ↗</button>`;
+      }).join('')
+      : '<span class="engineer-idle">Нет активной задачи</span>';
+    const skillMore = moreSkills ? ` <button type="button" class="catalog-skill-more" tabindex="0" aria-label="Остальные навыки: ${attr(remainingSkills.join(', '))}" data-tooltip="${attr(remainingSkills.join(', '))}">+${moreSkills}</button>` : '';
+    return `<tr data-open-employee="${attr(engineer.engineer_id)}" data-engineer-row tabindex="0"><td><button class="table-button" type="button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.name || engineer.engineer_id)} ↗</button></td><td>${escapeHtml((engineer.roles || []).join(', ') || '—')}</td><td>${escapeHtml(engineer.grade || '—')}</td><td>${escapeHtml((engineer.team_ids || []).join(', ') || 'Без команды')}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(used)} ч</td><td><div class="engineer-current-tasks">${taskLinks}</div></td><td><span class="catalog-skills">${escapeHtml(skillPreview || '—')}${skillMore}</span></td></tr>`;
+  }).join('');
+}
+
+function renderTeams() {
+  const sprint = currentSprint();
+  const body = $('#teamsTableBody');
+  const wrap = $('#teamsTableWrap');
+  $('#teamsListCount').textContent = `${data.teams.length}`;
+  $('#teamsListState').innerHTML = '';
+  wrap.hidden = false;
+  const resource = (team) => team.sp_by_sprint?.[String(sprint)] || {used: 0, remaining: 0};
+  const valueFor = (team, key) => ({
+    members: (team.member_ids || []).length,
+    roles: (team.roles || []).join(', '),
+    used_sp: Number(resource(team).used || 0),
+    remaining_sp: Number(resource(team).remaining || 0),
+    bus_factor: Number(team.bus_factor?.critical_count || 0),
+  }[key] ?? team[key]);
+  const sorted = catalogSort(
+    data.teams,
+    state.teamSortKey,
+    state.teamSortDirection,
+    valueFor,
+    new Set(['members', 'average_velocity_sp', 'capacity_sp', 'used_sp', 'remaining_sp', 'bus_factor']),
+  );
+  updateCatalogSortButtons('[data-team-sort]', state.teamSortKey, state.teamSortDirection);
+  if (!sorted.length) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty-state">Команд пока нет.</div></td></tr>';
+    return;
+  }
+  body.innerHTML = sorted.map((team) => {
+    const sprintResource = resource(team);
+    const critical = Number(team.bus_factor?.critical_count || 0);
+    const riskLabel = team.bus_factor_status === 'AVAILABLE' ? `${critical} крит.` : 'Нет данных';
+    const roleBadges = (team.roles || []).map((role) => `<span class="team-role-badge">${escapeHtml(role)}</span>`).join('') || '<span class="muted">Нет данных</span>';
+    return `<tr data-open-team="${attr(team.team_id)}" data-team-row tabindex="0"><td><button class="table-button" type="button" data-open-team="${attr(team.team_id)}">${escapeHtml(team.name || team.team_id)} ↗</button></td><td>${number((team.member_ids || []).length)}</td><td><div class="team-role-badges">${roleBadges}</div></td><td>${number(team.average_velocity_sp)} SP</td><td>${number(team.capacity_sp)} SP</td><td>${number(sprintResource.used)} SP</td><td>${number(sprintResource.remaining)} SP</td><td><span class="bf-catalog-status ${critical ? 'critical' : 'healthy'}">${escapeHtml(riskLabel)}</span></td></tr>`;
+  }).join('');
 }
 
 function renderTaskDetail() {
@@ -777,7 +948,10 @@ function openEmployee(engineerId) {
   const criticality = busProfile?.team_criticality || [];
   const displayedSkills = busProfile?.skills || engineer.skills;
   const impact = criticality.length ? criticality.map((item) => `<button type="button" class="engineer-impact ${attr(item.risk_level)}" data-employee-team="${attr(item.team_id)}"><span><b>${escapeHtml(item.team_name)} · ${escapeHtml(item.skill)}</b><small>${item.single_person_dependency ? 'Единственный специалист команды' : escapeHtml(item.risk_label)}</small></span><strong>BF ${number(item.bus_factor)}</strong></button>`).join('') : empty(engineer.archived ? 'Архивный инженер не входит в текущий Bus Factor.' : 'Нет данных о вкладе в компетенции команд.');
-  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${engineer.capacity_buckets.map((bucket) => `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч ↗</button>`).join('')}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
+  const memberships = engineer.capacity_buckets.map((bucket) => bucket.team_id
+    ? `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч ↗</button>`
+    : `<div class="profile-link">Без команды · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч</div>`).join('');
+  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${memberships || '<p>Без команды</p>'}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
   $('#employeeDrawer').classList.add('open');
   $('#employeeDrawer').setAttribute('aria-hidden', 'false');
 }
@@ -789,9 +963,19 @@ function closeEmployee() {
 
 function bindEvents() {
   $('#addTaskFromTasks')?.addEventListener('click', () => window.planConstructor.openTaskForm());
+  $('#addEngineerFromEngineers')?.addEventListener('click', () => window.planConstructor.openEngineerForm());
+  $('#addTeamFromTeams')?.addEventListener('click', () => window.planConstructor.openTeamForm());
   window.addEventListener('postcode:constructor-task-added', (event) => {
     show('planning');
     showToast(`Задача ${event.detail?.taskId || ''} добавлена в черновик сценария и выбрана.`);
+  });
+  window.addEventListener('postcode:constructor-engineer-added', (event) => {
+    show('planning');
+    showToast(`Инженер ${event.detail?.engineerId || ''} добавлен в черновик сценария.`);
+  });
+  window.addEventListener('postcode:constructor-team-added', (event) => {
+    show('planning');
+    showToast(`Команда ${event.detail?.teamId || ''} добавлена в черновик сценария и выбрана.`);
   });
   $('#starTeamSelect').addEventListener('change', (event) => { state.teamId = event.target.value; state.competency = null; renderStarTeams(); });
   $('#skillTeam').addEventListener('change', (event) => { state.skillTeam = event.target.value; renderStarSkills(); });
@@ -803,11 +987,14 @@ function bindEvents() {
   $('#archiveForm').addEventListener('submit', (event) => { event.preventDefault(); submitArchive(); });
   $('#archiveReason').addEventListener('change', updateArchiveConfirmation);
   $('#archiveReasonText').addEventListener('input', updateArchiveConfirmation);
+  $('#archiveImpact').addEventListener('change', updateArchiveConfirmation);
+  $('#archiveReplanConfirm').addEventListener('change', updateArchiveConfirmation);
   $('#archiveDialog').addEventListener('click', (event) => { if (event.target === $('#archiveDialog')) closeArchiveModal(); });
   $('#riskDialog')?.addEventListener('click', (event) => { if (event.target === $('#riskDialog')) closeRiskModal(); });
   $('#riskDialog')?.addEventListener('close', () => { state.riskModalOpen = false; renderRisks(); });
   $('#riskSearch')?.addEventListener('input', (event) => { state.riskSearch = event.target.value; renderRisks(); });
   document.addEventListener('click', (event) => {
+    if (event.target.closest('.catalog-skill-more')) return;
     if (event.target.closest('[data-close-archive]')) { closeArchiveModal(); return; }
     const archive = event.target.closest('[data-archive-entity]');
     if (archive) { openArchiveModal(archive.dataset.archiveEntity, archive.dataset.archiveId, archive.dataset.currentPlanReference === 'true'); return; }
@@ -820,6 +1007,22 @@ function bindEvents() {
       if (state.taskSortKey === key) state.taskSortDirection = state.taskSortDirection === 'asc' ? 'desc' : 'asc';
       else { state.taskSortKey = key; state.taskSortDirection = 'asc'; }
       renderTasks();
+      return;
+    }
+    const engineerSort = event.target.closest('[data-engineer-sort]');
+    if (engineerSort) {
+      const key = engineerSort.dataset.engineerSort;
+      if (state.engineerSortKey === key) state.engineerSortDirection = state.engineerSortDirection === 'asc' ? 'desc' : 'asc';
+      else { state.engineerSortKey = key; state.engineerSortDirection = 'asc'; }
+      renderEngineers();
+      return;
+    }
+    const teamSort = event.target.closest('[data-team-sort]');
+    if (teamSort) {
+      const key = teamSort.dataset.teamSort;
+      if (state.teamSortKey === key) state.teamSortDirection = state.teamSortDirection === 'asc' ? 'desc' : 'asc';
+      else { state.teamSortKey = key; state.teamSortDirection = 'asc'; }
+      renderTeams();
       return;
     }
     const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('current-plan'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
@@ -839,6 +1042,10 @@ function bindEvents() {
     if (event.key === 'Escape') { closeArchiveModal(); closeRiskModal(); closeEmployee(); }
     const taskRow = event.target.closest?.('[data-task-row]');
     if (taskRow && event.target === taskRow && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); gotoTask(taskRow.dataset.openTask); }
+    const engineerRow = event.target.closest?.('[data-engineer-row]');
+    if (engineerRow && event.target === engineerRow && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); gotoEmployee(engineerRow.dataset.openEmployee); }
+    const teamRow = event.target.closest?.('[data-team-row]');
+    if (teamRow && event.target === teamRow && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); gotoTeam(teamRow.dataset.openTeam); }
   });
   window.addEventListener('popstate', () => {
     const route = routeFromLocation();

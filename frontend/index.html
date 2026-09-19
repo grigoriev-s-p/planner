@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260919-3">
+  <link rel="stylesheet" href="/styles.css?v=20260919-7">
 </head>
 <body>
   <div class="shell">
@@ -16,6 +16,8 @@
         <button type="button" class="nav-link" data-page="planning">Планирование</button>
         <button type="button" class="nav-link" data-page="current-plan">Текущий план</button>
         <button type="button" class="nav-link" data-page="tasks">Задачи</button>
+        <button type="button" class="nav-link" data-page="engineers">Инженеры</button>
+        <button type="button" class="nav-link" data-page="teams">Команды</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
         <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
@@ -98,6 +100,42 @@
         </article>
       </section>
 
+      <section class="page" id="page-engineers" aria-labelledby="engineersListTitle">
+        <div class="page-intro entity-list-hero"><div><h1 id="engineersListTitle">Инженеры</h1><p>Состав команд, роли, грейды, навыки и доступность специалистов в текущем спринте.</p></div><div class="page-intro-icon" aria-hidden="true">◉</div></div>
+        <article class="panel entity-list-panel">
+          <div class="panel-heading"><div><h2>Список инженеров</h2><p class="hint">Нажмите на инженера, чтобы открыть его профиль.</p></div><div class="entity-list-controls"><button class="btn btn-blue" id="addEngineerFromEngineers" type="button">+ Добавить инженера</button><span class="tag" id="engineersListCount">0</span></div></div>
+          <div id="engineersListState" aria-live="polite"></div>
+          <div class="table-scroll" id="engineersTableWrap"><table class="data-table entity-catalog-table engineers-table"><thead><tr>
+            <th><button class="sort-button" type="button" data-engineer-sort="engineer_id">ID <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="roles">Роль <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="grade">Грейд <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="team_ids">Команда <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="capacity_hours">Capacity <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="used_hours">Занято <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="current_task">Текущая задача <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-engineer-sort="skills">Навыки <span aria-hidden="true"></span></button></th>
+          </tr></thead><tbody id="engineersTableBody"></tbody></table></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-teams" aria-labelledby="teamsListTitle">
+        <div class="page-intro entity-list-hero"><div><h1 id="teamsListTitle">Команды</h1><p>Состав, производительность, загрузка и устойчивость команд текущего плана.</p></div><div class="page-intro-icon" aria-hidden="true">◆</div></div>
+        <article class="panel entity-list-panel">
+          <div class="panel-heading"><div><h2>Список команд</h2><p class="hint">Нажмите на команду, чтобы открыть её профиль и карту компетенций.</p></div><div class="entity-list-controls"><button class="btn btn-blue" id="addTeamFromTeams" type="button">+ Добавить команду</button><span class="tag" id="teamsListCount">0</span></div></div>
+          <div id="teamsListState" aria-live="polite"></div>
+          <div class="table-scroll" id="teamsTableWrap"><table class="data-table entity-catalog-table teams-table"><thead><tr>
+            <th><button class="sort-button" type="button" data-team-sort="name">Команда <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="members">Участники <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="roles">Роли <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="average_velocity_sp">Velocity <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="capacity_sp">Capacity <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="used_sp">Занято <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="remaining_sp">Свободно <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-team-sort="bus_factor">Риски BF <span aria-hidden="true"></span></button></th>
+          </tr></thead><tbody id="teamsTableBody"></tbody></table></div>
+        </article>
+      </section>
+
       <section class="page" id="page-task-detail" aria-labelledby="taskDetailTitle">
         <div class="task-detail-toolbar"><button class="task-back" type="button" data-task-back>← Назад</button><div id="taskTopActions"></div></div>
         <div class="page-intro task-detail-hero"><div class="task-hero-title"><h1 id="taskDetailTitle">Карточка задачи</h1></div><div class="task-hero-meta"><div class="task-id-hero" id="taskHeroId" aria-label="ID задачи">—</div><div class="task-hero-status" id="taskHeroStatus"></div></div></div>
@@ -149,7 +187,9 @@
         <div class="eyebrow">ИСКЛЮЧЕНИЕ ИЗ АКТИВНОГО КАТАЛОГА</div>
         <h2 id="archiveDialogTitle">Удалить объект</h2>
         <p id="archiveDialogDescription"></p>
+        <div id="archiveImpact" class="archive-impact" aria-live="polite"></div>
         <div id="archiveCurrentPlanWarning" class="archive-warning" hidden></div>
+        <label class="archive-replan-confirm" id="archiveReplanField" hidden><input id="archiveReplanConfirm" type="checkbox"><span>Пересчитать и обновить текущий план после удаления</span></label>
         <label class="archive-field">Причина удаления<select id="archiveReason" required><option value="">Выберите причину</option></select></label>
         <label class="archive-field" id="archiveOtherField" hidden>Укажите причину<textarea id="archiveReasonText" rows="4" maxlength="500"></textarea></label>
         <div id="archiveError" class="constructor-errors" hidden></div>
@@ -159,8 +199,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260919-3"></script>
-  <script src="/constructor.js?v=20260919-3"></script>
-  <script src="/app.js?v=20260919-3"></script>
+  <script src="/api.js?v=20260919-7"></script>
+  <script src="/constructor.js?v=20260919-7"></script>
+  <script src="/app.js?v=20260919-7"></script>
 </body>
 </html>

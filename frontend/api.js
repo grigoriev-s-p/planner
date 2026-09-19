@@ -36,6 +36,10 @@ window.postcodeApi = (() => {
     getStarMap: () => request('/api/star-map'),
     getConstructorCatalog: () => request('/api/plan-constructor/catalog'),
     getArchiveReasons: () => request('/api/catalog/archive-reasons'),
+    getDeletionImpact: (entityType, entityId) => {
+      const collection = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];
+      return request(`/api/${collection}/${encodeURIComponent(entityId)}/deletion-impact`);
+    },
     archiveEntity: (entityType, entityId, reason) => {
       const collection = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];
       return request(`/api/${collection}/${encodeURIComponent(entityId)}/archive`, {
