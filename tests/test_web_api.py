@@ -8,6 +8,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from src.web.api import app
+from src.web.service import PlanningAPIService
+from tests.acceptance.builders import SyntheticQuarter
 
 
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
@@ -26,7 +28,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         for page_id in (
-            "home", "planning", "current-plan", "tasks", "risks", "recalc", "star"
+            "home", "planning", "current-plan", "tasks", "task-detail", "risks", "recalc", "star"
         ):
             self.assertIn(f'id="page-{page_id}"', page.text)
         for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
@@ -112,9 +114,24 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             json.dumps(response.json())
 
-        self.assertTrue(risks.json())
+        risk_rows = risks.json()
+        self.assertTrue(risk_rows)
         self.assertTrue(teams.json())
         self.assertTrue(engineers.json())
+        self.assertTrue({"ORANGE", "YELLOW"}.issubset({risk["severity"] for risk in risk_rows}))
+        self.assertTrue(all(risk["severity"] in {"RED", "ORANGE", "YELLOW"} for risk in risk_rows))
+        self.assertTrue(all(risk["effect"] for risk in risk_rows))
+        self.assertTrue(all(risk["recommendation"] for risk in risk_rows))
+        self.assertTrue(all(risk["evidence"] for risk in risk_rows))
+        self.assertFalse({"MULTI_SPRINT", "CROSS_TEAM_DEPENDENCY"} & {risk["code"] for risk in risk_rows})
+        orange = next(risk for risk in risk_rows if risk["severity"] == "ORANGE")
+        labels = {item["label"] for item in orange["evidence"]}
+        self.assertTrue({"Роль", "Требуется", "Доступно", "Дефицит"}.issubset(labels))
+        self.assertIn("bus_factor_context", orange)
+        yellow = next(risk for risk in risk_rows if risk["severity"] == "YELLOW")
+        self.assertIn("в исходном плане", yellow["cause"].lower())
+        self.assertIn("один спринт запаса", yellow["cause"].lower())
+        self.assertIn("при replanning", yellow["cause"].lower())
         self.assertEqual(
             len({engineer["engineer_id"] for engineer in engineers.json()}),
             len(engineers.json()),
@@ -175,6 +192,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         api_source = (frontend / "api.js").read_text(encoding="utf-8")
         app_source = (frontend / "app.js").read_text(encoding="utf-8")
         constructor_source = (frontend / "constructor.js").read_text(encoding="utf-8")
+        index_source = (frontend / "index.html").read_text(encoding="utf-8")
         self.assertEqual(api_source.count("fetch("), 1)
         self.assertNotIn("fetch(", app_source)
         self.assertNotIn("fetch(", constructor_source)
@@ -196,6 +214,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn('team_id: null', constructor_source)
         self.assertIn('list="constructorInitiativeOptions"', constructor_source)
         self.assertIn('name="dependency_id"', constructor_source)
+        self.assertIn('name="team_engineer_id"', constructor_source)
+        self.assertIn('Свободные инженеры', constructor_source)
+        self.assertNotIn('Focus Factor', constructor_source)
+        self.assertIn('+ Добавить задачу', index_source)
         self.assertIn("/api/plan-constructor/plan", api_source)
         self.assertIn("/api/plan-constructor/plan/upload", api_source)
         for old_demo_name in (
@@ -208,6 +230,44 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             self.assertNotIn(old_demo_name, app_source)
 
 
+class ProductRiskSemanticsTests(unittest.TestCase):
+    def test_dependency_chain_outside_quarter_becomes_red_alert(self) -> None:
+        scenario = (
+            SyntheticQuarter()
+            .team("Team-A", velocity=100)
+            .engineer("ENG-1", "Team-A", "Developer")
+            .task(
+                "BLOCKER",
+                initiative_id="PRODF-RED",
+                story_points=1,
+                role_hours={"Developer": 400},
+            )
+            .task(
+                "BLOCKED",
+                initiative_id="PRODF-RED",
+                story_points=1,
+                role_hours={"Developer": 1},
+            )
+            .depends_on("BLOCKED", "BLOCKER")
+        )
+        service = PlanningAPIService.from_tables(
+            {
+                "tasks": scenario.tasks,
+                "task_role_effort": scenario.effort,
+                "task_dependencies": scenario.dependencies,
+                "engineers": scenario.engineers,
+                "engineer_skills": scenario.engineer_skills,
+                "team_history": scenario.team_history,
+            }
+        )
+        red = next(risk for risk in service.risks if risk["severity"] == "RED")
+        self.assertEqual(red["code"], "DEADLINE_OUTSIDE_QUARTER")
+        self.assertEqual(red["task_id"], "BLOCKED")
+        self.assertEqual(red["initiative_id"], "PRODF-RED")
+        self.assertGreater(red["sprint"], 6)
+        self.assertIn("текущем квартале", red["effect"])
+
+
 class FrontendRefinementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -216,14 +276,17 @@ class FrontendRefinementTests(unittest.TestCase):
         cls.app = (cls.frontend / "app.js").read_text(encoding="utf-8")
         cls.styles = (cls.frontend / "styles.css").read_text(encoding="utf-8")
 
-    def test_top_navigation_has_no_tasks_entry(self) -> None:
+    def test_top_navigation_includes_task_catalog(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
-        self.assertNotIn('data-page="tasks"', navigation)
         self.assertNotIn('data-page="constructor"', navigation)
-        for page in ("home", "planning", "current-plan", "risks", "recalc", "star"):
+        for page in ("home", "planning", "current-plan", "tasks", "risks", "recalc", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
+        self.assertIn('data-page="tasks">Задачи</button>', navigation)
         self.assertIn('data-page="planning">Планирование</button>', navigation)
         self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
+        self.assertIn('id="addTaskFromTasks"', self.html)
+        self.assertIn("window.planConstructor.openTaskForm()", self.app)
+        self.assertIn("postcode:constructor-task-added", self.app)
 
     def test_constructor_approves_preview_before_replacing_current_plan(self) -> None:
         self.assertIn("planning: window.planConstructor.render", self.app)
@@ -309,21 +372,72 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("REASON_GROUPS", self.app)
         self.assertIn("Другая причина", self.app)
 
-    def test_task_detail_is_contextual_and_has_dynamic_hero_id(self) -> None:
+    def test_task_catalog_and_detail_are_contextual(self) -> None:
         self.assertIn('id="page-tasks"', self.html)
+        self.assertIn('id="page-task-detail"', self.html)
+        self.assertIn('id="tasksTableBody"', self.html)
         self.assertIn('id="taskHeroId"', self.html)
         self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
         self.assertIn("taskReturnPage", self.app)
         self.assertIn("taskReturnPage: 'current-plan'", self.app)
-        self.assertNotIn('id="taskSearch"', self.html)
+        self.assertIn("show('task-detail')", self.app)
 
-    def test_development_notice_is_reused_on_unfinished_pages(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 2)
-        for target in (
-            "risksDevelopmentNotice",
-            "recalcDevelopmentNotice",
+    def test_task_catalog_sorts_every_required_column(self) -> None:
+        for key in (
+            "task_id", "title", "story_points", "rung", "assigned_team_id",
+            "initiative_id", "start_sprint", "status",
         ):
-            self.assertIn(f'id="{target}"', self.html)
+            self.assertIn(f'data-task-sort="{key}"', self.html)
+        self.assertIn("state.taskSortDirection === 'asc'", self.app)
+        self.assertIn("numericKeys", self.app)
+        self.assertIn("aria-sort", self.app)
+        self.assertIn("rungBadge(task)", self.app)
+        self.assertIn("taskStatusIndicator(task)", self.app)
+        self.assertIn("data-tooltip=", self.app)
+        self.assertIn(".task-status-indicator", self.styles)
+
+    def test_task_detail_uses_real_dependencies_and_cross_team_allocations(self) -> None:
+        detail = self.app.split("function renderTaskDetail()", 1)[1].split(
+            "function renderRisks()", 1
+        )[0]
+        self.assertIn("task.dependencies?.incoming", detail)
+        self.assertIn("task.dependencies?.outgoing", detail)
+        self.assertIn('data-open-employee', detail)
+        self.assertIn("item.cross_team", detail)
+        self.assertIn("Другая команда", detail)
+        self.assertIn("$('#taskTopActions').innerHTML", detail)
+        self.assertIn('id="taskTopActions"', self.html)
+        self.assertEqual(detail.count('data-archive-entity="task"'), 1)
+        self.assertNotIn("ОБЪЯСНЕНИЯ BACKEND", detail)
+        self.assertNotIn("task.reasons", detail)
+
+    def test_shareable_task_routes_serve_the_spa(self) -> None:
+        client = TestClient(app)
+        self.assertEqual(client.get("/tasks").status_code, 200)
+        response = client.get("/tasks/AI-302")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="page-task-detail"', response.text)
+        self.assertIn('href="/styles.css?v=', response.text)
+        self.assertIn('src="/app.js?v=', response.text)
+
+    def test_development_notice_remains_only_on_unfinished_replanning_page(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 1)
+        self.assertNotIn('id="risksDevelopmentNotice"', self.html)
+        self.assertIn('id="recalcDevelopmentNotice"', self.html)
+
+    def test_risk_page_uses_three_actionable_alert_types(self) -> None:
+        self.assertIn('data-risk-filter="Сроки"', self.html)
+        self.assertIn('data-risk-filter="Ресурсы"', self.html)
+        self.assertIn('data-risk-filter="Зависимости"', self.html)
+        self.assertNotIn('data-risk-filter="Компетенции"', self.html)
+        self.assertIn('>Уровень</th>', self.html)
+        self.assertIn('renderRiskEvidence', self.app)
+        self.assertIn('renderRiskBusFactor', self.app)
+        self.assertIn('risk.severity_label', self.app)
+        self.assertIn('risk-detail-meta', self.app)
+        self.assertIn('risk-table-copy', self.app)
+        self.assertIn('.risk-evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr))', self.styles)
+        self.assertNotIn('.risk-detail{overflow-x:', self.styles)
 
     def test_star_map_uses_backend_bus_factor_for_selected_team(self) -> None:
         self.assertIn('id="competencyMap"', self.html)

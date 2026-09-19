@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -10,16 +12,13 @@ from src.web.api import PlanDraftStore, app, plan_drafts
 from src.web.constructor import (
     ConstructorScenario,
     ScenarioValidationError,
-    build_constructor_plan,
     build_constructor_catalog,
+    build_constructor_plan,
     scenario_tables,
     validate_constructor_scenario,
 )
-<<<<<<< Updated upstream
-=======
 from src.web.service import PlanningAPIService
 from src.web.recommendations import RecommendationDraft
->>>>>>> Stashed changes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +74,42 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 
 
 class ConstructorDomainTests(unittest.TestCase):
+    @staticmethod
+    def cross_team_payload(task_count: int = 1) -> dict:
+        engineers = []
+        tasks = []
+        for index in range(1, task_count + 1):
+            role = f"Backend-{index}"
+            engineers.extend([
+                {
+                    "engineer_id": "ENG-A" if index == 1 else f"ENG-A-{index}",
+                    "name": f"Engineer A {index}",
+                    "assignments": [{"team_id": "Team-A", "role": role, "capacity_rate": 0.75}],
+                    "skills": [],
+                },
+                {
+                    "engineer_id": "ENG-B" if index == 1 else f"ENG-B-{index}",
+                    "name": f"Engineer B {index}",
+                    "assignments": [{"team_id": "Team-B", "role": role, "capacity_rate": 0.25}],
+                    "skills": [],
+                },
+            ])
+            tasks.append({
+                "task_id": f"TASK-{index}", "title": "Needs help", "initiative_id": f"I-{index}",
+                "team_id": "Team-A", "status": "ToDo", "rung": 100 - index,
+                "story_points": 1,
+                "role_requirements": [{"role": role, "required_hours": 400, "skills": []}],
+                "depends_on": [],
+            })
+        return {
+            "teams": [
+                {"team_id": "Team-A", "name": "A", "expected_velocity_sp": 20, "focus_factor": 0.8},
+                {"team_id": "Team-B", "name": "B", "expected_velocity_sp": 20, "focus_factor": 0.8},
+            ],
+            "engineers": engineers,
+            "tasks": tasks,
+        }
+
     def test_real_planner_builds_six_sprints_from_ephemeral_scenario(self) -> None:
         result = build_constructor_plan(ConstructorScenario(**scenario_payload()))
 
@@ -378,6 +413,68 @@ class ConstructorDomainTests(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioValidationError, "Capacity Rate"):
             validate_constructor_scenario(ConstructorScenario(**payload))
 
+    def test_catalog_engineer_cannot_be_moved_to_another_team(self) -> None:
+        payload = scenario_payload()
+        payload["teams"].append({"team_id": "Team-B", "expected_velocity_sp": 20})
+        payload["engineers"][0]["assignments"][0]["team_id"] = "Team-B"
+        catalog_tables = {
+            "engineers": [
+                {
+                    "engineer_id": "ENG-1",
+                    "team_id": "Team-A",
+                    "role": "Backend",
+                    "capacity_rate": 1,
+                }
+            ],
+            "tasks": [],
+        }
+
+        with self.assertRaisesRegex(ScenarioValidationError, "другой командой"):
+            validate_constructor_scenario(
+                ConstructorScenario(**payload), catalog_tables=catalog_tables
+            )
+
+    def test_catalog_marks_only_unassigned_engineer_as_free(self) -> None:
+        service = SimpleNamespace(
+            tables={
+                "engineers": [
+                    {
+                        "engineer_id": "ENG-FREE",
+                        "team_id": None,
+                        "role": "Backend",
+                        "grade": "Middle",
+                        "capacity_rate": 1,
+                    },
+                    {
+                        "engineer_id": "ENG-BUSY",
+                        "team_id": "Team-A",
+                        "role": "Backend",
+                        "grade": "Senior",
+                        "capacity_rate": 1,
+                    },
+                ],
+                "engineer_skills": [],
+                "task_skill_requirements": [],
+                "task_role_effort": [],
+                "task_dependencies": [],
+                "tasks": [],
+            },
+            tasks=[],
+            teams=[],
+        )
+
+        engineers = {
+            item["engineer_id"]: item
+            for item in build_constructor_catalog(service)["engineers"]
+        }
+
+        self.assertTrue(engineers["ENG-FREE"]["is_free"])
+        self.assertEqual(engineers["ENG-FREE"]["assignments"], [])
+        self.assertEqual(
+            engineers["ENG-FREE"]["free_assignment"]["role"], "Backend"
+        )
+        self.assertFalse(engineers["ENG-BUSY"]["is_free"])
+
 
 @unittest.skipUnless((PROCESSED_DIR / "tasks.csv").is_file(), "processed dataset is absent")
 class ConstructorAPIIntegrationTests(unittest.TestCase):
@@ -455,8 +552,6 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
             ["TASK-1"],
         )
 
-<<<<<<< Updated upstream
-=======
     def test_apply_recommendation_keeps_current_plan_until_exact_draft_is_approved(self) -> None:
         plan_drafts.reset()
         response = self.client.post(
@@ -517,7 +612,6 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         self.assertTrue(any(item["status"] == "DONE" for item in applied.json()["tasks"]))
         self.assertEqual(self.client.get("/api/dashboard").json()["plan"], current_before["plan"])
 
->>>>>>> Stashed changes
     @unittest.skipUnless(RAW_WORKBOOK.is_file(), "raw workbook is absent")
     def test_uploaded_workbook_builds_plan_without_modifying_project_data(self) -> None:
         protected_files = [RAW_WORKBOOK, *sorted(PROCESSED_DIR.glob("*"))]

@@ -184,6 +184,12 @@ def validate_constructor_scenario(
 
     known_teams = set(team_ids)
     selected_tasks = set(task_ids)
+    catalog_engineer_teams: dict[str, set[str]] = defaultdict(set)
+    for row in (catalog_tables or {}).get("engineers", []):
+        engineer_id = _clean_text(row.get("engineer_id"))
+        team_id = _clean_text(row.get("team_id"))
+        if engineer_id and team_id:
+            catalog_engineer_teams[engineer_id].add(team_id)
     catalog_task_rows = {
         _clean_text(row.get("task_id")): row
         for row in (catalog_tables or {}).get("tasks", [])
@@ -220,6 +226,12 @@ def validate_constructor_scenario(
                 errors.append(
                     f"Инженер {engineer.engineer_id}: команда "
                     f"{assignment.team_id} не добавлена в сценарий."
+                )
+            source_teams = catalog_engineer_teams.get(engineer.engineer_id, set())
+            if source_teams and assignment.team_id not in source_teams:
+                errors.append(
+                    f"Инженер {engineer.engineer_id} уже закреплён за другой "
+                    "командой и не может быть перенесён в сценарии."
                 )
         for duplicate in sorted(_duplicates(assignment_teams)):
             errors.append(
@@ -491,9 +503,20 @@ def build_constructor_plan(
         if _clean_text(row.get("task_id")) not in selected_ids
         and not is_historical_done(row)
     }
-    service = PlanningAPIService.from_tables(tables, plan_version="constructor-draft")
+    service = PlanningAPIService.from_tables(
+        tables,
+        plan_version="constructor-base-draft",
+        planner_options={
+            "allow_team_reassignment": False,
+            "allow_cross_team": False,
+        },
+    )
     return {
         **_without_support_tasks(service.dashboard, support_ids),
+        "_recommendation_context": {
+            "tables": tables,
+            "support_task_ids": sorted(support_ids),
+        },
         "draft": {
             "storage": "browser_local_storage",
             "server_persisted": False,
@@ -545,15 +568,9 @@ def prepare_constructor_workbook(
                 if csv_name in normalized.tables:
                     imported_tables[table_name] = normalized.tables[csv_name]
             fingerprint = hashlib.sha256(content).hexdigest()[:8]
-<<<<<<< Updated upstream
-            service = PlanningAPIService.from_tables(
-                repository.active_planning_tables(),
-                plan_version=f"constructor-upload-{fingerprint}",
-=======
             merge_preview = repository.merge_tables(imported_tables, dry_run=True)
             audit = build_data_preflight(
                 parsed, normalized, validation, merge_preview
->>>>>>> Stashed changes
             )
     except (
         DatasetParsingError,
@@ -608,13 +625,10 @@ def build_constructor_plan_from_prepared(
     )
     return {
         **_without_support_tasks(service.dashboard, hidden_archived_tasks),
-<<<<<<< Updated upstream
-=======
         "_recommendation_context": {
             "tables": planning_tables,
             "support_task_ids": sorted(hidden_archived_tasks),
         },
->>>>>>> Stashed changes
         "catalog": catalog,
         "uploaded_dataset": {
             "name": prepared.filename,
@@ -662,7 +676,7 @@ def build_constructor_catalog(
         engineer_id = _clean_text(row.get("engineer_id"))
         team_id = _clean_text(row.get("team_id"))
         role = _clean_text(row.get("role"))
-        if not engineer_id or not team_id or not role:
+        if not engineer_id or not role:
             continue
         target = engineer_profiles.setdefault(
             engineer_id,
@@ -670,10 +684,19 @@ def build_constructor_catalog(
                 "engineer_id": engineer_id,
                 "name": _clean_text(row.get("name")) or engineer_id,
                 "assignments": [],
+                "free_assignment": None,
                 "skills": [],
                 "source": "dataset",
             },
         )
+        if not team_id:
+            if target["free_assignment"] is None:
+                target["free_assignment"] = {
+                    "role": role,
+                    "grade": _clean_text(row.get("grade")) or None,
+                    "capacity_rate": float(row.get("capacity_rate") or 1),
+                }
+            continue
         key = (engineer_id, team_id, role)
         if key not in seen_assignments:
             target["assignments"].append(
@@ -687,6 +710,9 @@ def build_constructor_catalog(
             seen_assignments.add(key)
     for engineer_id, profile in engineer_profiles.items():
         profile["assignments"].sort(key=lambda item: (item["team_id"], item["role"]))
+        profile["is_free"] = not profile["assignments"] and bool(
+            profile["free_assignment"]
+        )
         profile["skills"] = sorted(skills_by_engineer[engineer_id])
 
     role_requirements: dict[str, list[dict[str, Any]]] = defaultdict(list)

@@ -15,13 +15,11 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from src.bus_factor import BusFactorService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
-<<<<<<< Updated upstream
-=======
 from src.planning.ownership import evaluate_ownership_rows
 from src.planning.task_states import is_historical_done
->>>>>>> Stashed changes
 from src.replanning import (
     ActualResults,
     PlanItem,
@@ -109,12 +107,356 @@ STATUS_LABELS = {
     "UNPLANNABLE": "Невыполнима",
 }
 
-RISK_PRESENTATION = {
-    "MULTI_SPRINT": ("Сроки", "Работа в нескольких спринтах"),
-    "CROSS_TEAM_DEPENDENCY": ("Ресурсы", "Зависимость от другой команды"),
-    "QUARTER_OVERFLOW": ("Сроки", "Выход за пределы квартала"),
-    "RESOURCE_BOTTLENECK": ("Ресурсы", "Дефицит ресурса"),
+RISK_SEVERITY_PRIORITY = {"RED": 0, "ORANGE": 1, "YELLOW": 2}
+RESOURCE_REASON_CODES = {
+    "INSUFFICIENT_ROLE_CAPACITY",
+    "INSUFFICIENT_ENGINEER_CAPACITY",
+    "INSUFFICIENT_SKILL_CAPACITY",
+    "MISSING_SPECIALIST",
 }
+RESOURCE_REASON_PRIORITY = {
+    "MISSING_SPECIALIST": 4,
+    "INSUFFICIENT_SKILL_CAPACITY": 3,
+    "INSUFFICIENT_ENGINEER_CAPACITY": 2,
+    "INSUFFICIENT_ROLE_CAPACITY": 1,
+}
+
+
+def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group planner reasons into concise task-detail explanations."""
+
+    groups: dict[str, dict[str, Any]] = {}
+    order = {
+        "dependency": 0,
+        "specialists": 1,
+        "engineer_hours": 2,
+        "team_capacity": 3,
+        "quarter": 4,
+        "other": 5,
+    }
+    for reason in reasons:
+        code = str(reason.get("code") or "")
+        details = reason.get("details") or {}
+        if code in {
+            "DEPENDENCY_NOT_COMPLETED",
+            "UNKNOWN_DEPENDENCY_DATE",
+            "MISSING_DEPENDENCY_REFERENCE",
+            "DEPENDENCY_DELAY",
+        }:
+            key, title = "dependency", "Задача заблокирована зависимостью"
+            blocker = details.get("blocking_task_id")
+            values = [
+                f"Сначала должна быть завершена {blocker}."
+                if blocker
+                else "Ожидается завершение связанной задачи."
+            ]
+        elif code in {
+            "MISSING_SPECIALIST",
+            "NO_AVAILABLE_ROLE_SPECIALIST",
+            "INSUFFICIENT_SKILL_CAPACITY",
+        }:
+            key, title = "specialists", "Не хватает специалистов"
+            values = [str(details.get("role"))] if details.get("role") else [
+                "Нет специалиста с нужными компетенциями."
+            ]
+        elif code in {"INSUFFICIENT_ROLE_CAPACITY", "INSUFFICIENT_ENGINEER_CAPACITY"}:
+            key, title = "engineer_hours", "Не хватает доступного времени специалистов"
+            role = details.get("role")
+            deficit = _number(details.get("deficit_hours"))
+            values = [
+                f"{role}: дефицит {deficit:g} ч."
+                if role and deficit is not None
+                else (f"{role}: недостаточно часов." if role else "Недостаточно часов специалистов.")
+            ]
+        elif code in {"INSUFFICIENT_TEAM_CAPACITY", "INSUFFICIENT_SP_CAPACITY"}:
+            key, title = "team_capacity", "Недостаточно ресурсов команды"
+            deficit = _number(details.get("deficit_sp"))
+            values = [
+                f"Не хватает {deficit:g} SP."
+                if deficit
+                else "Не хватает доступной ёмкости команды."
+            ]
+        elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
+            key, title = "quarter", "Не помещается в текущем квартале"
+            values = ["Для завершения требуется срок за пределами шести спринтов."]
+        elif code in {"ALLOCATION_ROLLED_BACK", "MULTI_SPRINT_REQUIRED"}:
+            continue
+        else:
+            key, title = "other", "Требуется уточнение данных"
+            values = ["Планировщик не получил достаточно данных для размещения задачи."]
+        group = groups.setdefault(key, {"type": key, "title": title, "details": []})
+        for value in values:
+            if value not in group["details"]:
+                group["details"].append(value)
+    return [groups[key] for key in sorted(groups, key=lambda item: order[item])]
+
+BUS_FACTOR_PRESENTATION = {
+    "critical": {"label": "Критично", "rank": 0},
+    "warning": {"label": "Требует внимания", "rank": 1},
+    "healthy": {"label": "Достаточное покрытие", "rank": 2},
+}
+
+
+def _frame(
+    rows: Iterable[dict[str, Any]], columns: tuple[str, ...]
+) -> pd.DataFrame:
+    """Build an empty-safe DataFrame for the existing Bus Factor service."""
+
+    materialized = [dict(row) for row in rows]
+    if not materialized:
+        return pd.DataFrame(columns=list(columns))
+    frame = pd.DataFrame(materialized)
+    for column in columns:
+        if column not in frame:
+            frame[column] = None
+    return frame
+
+
+def _bus_factor_risk(team_bus_factor: int) -> str:
+    if team_bus_factor <= 1:
+        return "critical"
+    if team_bus_factor == 2:
+        return "warning"
+    return "healthy"
+
+
+def build_bus_factor_payload(
+    tables: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Adapt the existing calculator to the product-facing Star Map DTO.
+
+    The adapter deliberately does not infer skills or recalculate Bus Factor. It
+    only attaches catalog labels, holder identities and presentation metadata to
+    values returned by :class:`BusFactorService`.
+    """
+
+    engineers = _frame(
+        tables.get("engineers", []),
+        ("engineer_id", "team_id", "role", "grade", "capacity_rate"),
+    )
+    skills = _frame(
+        tables.get("engineer_skills", []), ("engineer_id", "technology")
+    )
+
+    if engineers.empty:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "message": "Недостаточно данных для расчёта Bus Factor.",
+            "method": "existing_bus_factor_service",
+            "teams": [],
+            "engineers": [],
+        }
+
+    service = BusFactorService(
+        engineers=engineers,
+        engineer_skills=skills,
+        tasks=_frame(
+            tables.get("tasks", []), ("task_id", "team_id", "status")
+        ),
+        task_role_effort=_frame(
+            tables.get("task_role_effort", []),
+            ("task_id", "role", "required_hours"),
+        ),
+        task_skill_requirements=_frame(
+            tables.get("task_skill_requirements", []),
+            ("task_id", "technology", "required_hours"),
+        ),
+    )
+
+    team_names = {
+        team_id: (_text(row.get("team_name")) or _text(row.get("name")) or team_id)
+        for row in tables.get("team_history", [])
+        if (team_id := _text(row.get("team_id")))
+    }
+    raw_profiles: dict[str, dict[str, Any]] = {}
+    memberships: dict[str, dict[str, float | None]] = defaultdict(dict)
+    for row in tables.get("engineers", []):
+        engineer_id = _text(row.get("engineer_id"))
+        team_id = _text(row.get("team_id"))
+        if not engineer_id or not team_id:
+            continue
+        profile = raw_profiles.setdefault(
+            engineer_id,
+            {"names": set(), "roles": set(), "grades": set(), "team_ids": set()},
+        )
+        profile["team_ids"].add(team_id)
+        if name := _text(row.get("name")):
+            profile["names"].add(name)
+        if role := _text(row.get("role")):
+            profile["roles"].add(role)
+        if grade := _text(row.get("grade")):
+            profile["grades"].add(grade)
+        rate = _number(row.get("capacity_rate"))
+        current = memberships[engineer_id].get(team_id)
+        memberships[engineer_id][team_id] = (
+            rate if current is None else max(current, rate or 0.0)
+        )
+
+    skill_sets: dict[str, set[str]] = defaultdict(set)
+    for row in service.engineer_skills.itertuples(index=False):
+        skill_sets[row.engineer_id].add(row.skill)
+
+    def engineer_dto(engineer_id: str) -> dict[str, Any]:
+        profile = raw_profiles.get(engineer_id, {})
+        names = sorted(profile.get("names", set()))
+        return {
+            "engineer_id": engineer_id,
+            "name": names[0] if names else engineer_id,
+            "roles": sorted(profile.get("roles", set())),
+            "grade": ", ".join(sorted(profile.get("grades", set()))) or None,
+            "team_ids": sorted(profile.get("team_ids", set())),
+            "memberships": [
+                {"team_id": team_id, "capacity_rate": rate}
+                for team_id, rate in sorted(memberships.get(engineer_id, {}).items())
+            ],
+            "skills": sorted(skill_sets.get(engineer_id, set())),
+        }
+
+    impacts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    team_payloads = []
+    for team_id in service.teams():
+        coverage = service.skill_coverage(team_id)
+        competencies = []
+        if not coverage.empty:
+            coverage = coverage.sort_values(["team_bus_factor", "competency"])
+        for item in coverage.itertuples(index=False):
+            team_bf = int(item.team_bus_factor)
+            # A zero without an explicit task requirement is not a staffing gap.
+            if team_bf == 0 and item.quarter_relevance != "required":
+                continue
+
+            risk_level = _bus_factor_risk(team_bf)
+            holders = service.competency_engineers(team_id, "skill", item.competency)
+            external_engineers = []
+            organization_holders = service.organization_competency_engineers(
+                "skill", item.competency
+            )
+            for engineer_id in sorted(set(organization_holders) - set(holders)):
+                external = engineer_dto(engineer_id)
+                external["source_team_ids"] = [
+                    source_team_id
+                    for source_team_id in external["team_ids"]
+                    if source_team_id != team_id
+                ]
+                if external["source_team_ids"]:
+                    external_engineers.append(external)
+
+            if team_bf == 0:
+                reason = (
+                    f"В {team_names.get(team_id, team_id)} нет инженеров, "
+                    "которые покрывают эту компетенцию."
+                )
+            elif team_bf == 1:
+                reason = (
+                    f"Только один инженер в {team_names.get(team_id, team_id)} "
+                    "покрывает эту компетенцию."
+                )
+            elif team_bf == 2:
+                reason = (
+                    f"Два инженера в {team_names.get(team_id, team_id)} "
+                    "покрывают эту компетенцию."
+                )
+            else:
+                reason = f"Компетенцию покрывают {team_bf} инженера команды."
+
+            competency = {
+                "competency_type": "skill",
+                "skill": item.competency,
+                "bus_factor": team_bf,
+                "organization_bus_factor": int(item.organization_bus_factor),
+                "risk_level": risk_level,
+                "risk_label": BUS_FACTOR_PRESENTATION[risk_level]["label"],
+                "coverage_status": item.coverage_status,
+                "quarter_relevance": item.quarter_relevance,
+                "engineers": [engineer_dto(engineer_id) for engineer_id in holders],
+                "external_engineers": external_engineers,
+                "reason": reason,
+                "recommendation": (
+                    "Требуется дополнительное покрытие компетенции."
+                    if team_bf <= 2
+                    else None
+                ),
+            }
+            competencies.append(competency)
+            for engineer_id in holders:
+                impacts[engineer_id].append(
+                    {
+                        "team_id": team_id,
+                        "team_name": team_names.get(team_id, team_id),
+                        "skill": item.competency,
+                        "bus_factor": team_bf,
+                        "risk_level": risk_level,
+                        "risk_label": BUS_FACTOR_PRESENTATION[risk_level]["label"],
+                        "single_person_dependency": team_bf == 1,
+                    }
+                )
+
+        competencies.sort(
+            key=lambda item: (
+                BUS_FACTOR_PRESENTATION[item["risk_level"]]["rank"],
+                item["bus_factor"],
+                item["skill"].casefold(),
+            )
+        )
+        summary = {
+            "zero_coverage_count": sum(item["bus_factor"] == 0 for item in competencies),
+            "single_owner_count": sum(item["bus_factor"] == 1 for item in competencies),
+            "critical_count": sum(item["risk_level"] == "critical" for item in competencies),
+            "warning_count": sum(item["risk_level"] == "warning" for item in competencies),
+            "healthy_count": sum(item["risk_level"] == "healthy" for item in competencies),
+        }
+        member_ids = service.team_engineers(team_id)
+        team_payloads.append(
+            {
+                "team_id": team_id,
+                "team_name": team_names.get(team_id, team_id),
+                "member_ids": member_ids,
+                "engineer_count": len(member_ids),
+                "competency_count": len(competencies),
+                "bus_factor_available": bool(competencies),
+                "status": "AVAILABLE" if competencies else "NO_COMPETENCY_DATA",
+                "message": (
+                    None
+                    if competencies
+                    else "Для этой команды пока нет данных о компетенциях."
+                ),
+                "competencies": competencies,
+                "summary": summary,
+            }
+        )
+
+    engineers_payload = []
+    for engineer_id in sorted(raw_profiles):
+        profile = engineer_dto(engineer_id)
+        profile["team_criticality"] = sorted(
+            impacts.get(engineer_id, []),
+            key=lambda item: (
+                BUS_FACTOR_PRESENTATION[item["risk_level"]]["rank"],
+                item["team_name"].casefold(),
+                item["skill"].casefold(),
+            ),
+        )
+        engineers_payload.append(profile)
+
+    has_competencies = any(team["competencies"] for team in team_payloads)
+    return _clean(
+        {
+            "status": "AVAILABLE" if has_competencies else "INSUFFICIENT_DATA",
+            "message": (
+                None
+                if has_competencies
+                else "Недостаточно данных для расчёта Bus Factor."
+            ),
+            "method": "existing_bus_factor_service",
+            "thresholds": {
+                "critical": "Bus Factor 0–1",
+                "warning": "Bus Factor 2",
+                "healthy": "Bus Factor больше 2",
+            },
+            "teams": team_payloads,
+            "engineers": engineers_payload,
+        }
+    )
 
 
 class PlanningAPIService:
@@ -126,9 +468,11 @@ class PlanningAPIService:
         *,
         tables: dict[str, list[dict[str, Any]]] | None = None,
         plan_version: str | None = None,
+        planner_options: dict[str, Any] | None = None,
     ):
         self.processed_dir = processed_dir
         self._plan_version_override = plan_version
+        self._planner_options = dict(planner_options or {})
         if tables is None:
             self.tables = {
                 name: _read_table(processed_dir, name) for name in TABLE_FILES
@@ -152,7 +496,7 @@ class PlanningAPIService:
             team_history=self.tables["team_history"],
             task_skill_requirements=self.tables["task_skill_requirements"],
         )
-        self.plan = build_quarter_plan(self.context)
+        self.plan = build_quarter_plan(self.context, **self._planner_options)
         self._raw_tasks = {
             task_id: row
             for row in self.tables["tasks"]
@@ -169,10 +513,15 @@ class PlanningAPIService:
         tables: dict[str, list[dict[str, Any]]],
         *,
         plan_version: str = "in-memory",
+        planner_options: dict[str, Any] | None = None,
     ) -> "PlanningAPIService":
         """Build API DTOs from temporary normalized records without file writes."""
 
-        return cls(tables=tables, plan_version=plan_version)
+        return cls(
+            tables=tables,
+            plan_version=plan_version,
+            planner_options=planner_options,
+        )
 
     @cached_property
     def plan_version(self) -> str:
@@ -355,6 +704,13 @@ class PlanningAPIService:
             result = self._task_results[task_id]
             explanation = self._task_explanations[task_id]
             allocations = self._task_allocations(task_id)
+            ownership = (
+                evaluate_ownership_rows(
+                    explanation.assigned_team_id, allocations
+                ).to_dict()
+                if explanation.assigned_team_id
+                else None
+            )
             role_hours_by_sprint = {
                 str(item["sprint"]): dict(item["allocated_role_hours"])
                 for item in explanation.allocations
@@ -394,7 +750,9 @@ class PlanningAPIService:
                     "role_requirements": self._task_role_requirements(task_id),
                     "dependencies": self._task_dependencies(task_id),
                     "allocations": allocations,
+                    "ownership": ownership,
                     "reasons": reasons,
+                    "reason_blocks": _human_reason_blocks(reasons),
                     "risks": [item.to_dict() for item in explanation.risks],
                     "recommendations": [item.to_dict() for item in explanation.recommendations],
                     "summary": explanation.summary,
@@ -443,6 +801,10 @@ class PlanningAPIService:
         return result
 
     @cached_property
+    def bus_factor_payload(self) -> dict[str, Any]:
+        return build_bus_factor_payload(self.tables)
+
+    @cached_property
     def teams(self) -> list[dict[str, Any]]:
         team_ids = sorted(
             {
@@ -468,12 +830,16 @@ class PlanningAPIService:
             if (team_id := _text(row.get("team_id")))
         }
         output = []
+        bus_factor_teams = {
+            item["team_id"]: item for item in self.bus_factor_payload["teams"]
+        }
         all_allocations = [
             {"task_id": task["task_id"], **allocation}
             for task in self.tasks
             for allocation in task["allocations"]
         ]
         for team_id in team_ids:
+            bus_factor = bus_factor_teams.get(team_id)
             profiles = [
                 row for row in self.tables["engineers"]
                 if _text(row.get("team_id")) == team_id
@@ -535,8 +901,10 @@ class PlanningAPIService:
                         )
                         for sprint in range(1, 7)
                     },
-                    "bus_factor": None,
-                    "bus_factor_status": "NOT_IMPLEMENTED",
+                    "bus_factor": bus_factor["summary"] if bus_factor else None,
+                    "bus_factor_status": (
+                        bus_factor["status"] if bus_factor else "INSUFFICIENT_DATA"
+                    ),
                 }
             )
         return _clean(output)
@@ -644,30 +1012,394 @@ class PlanningAPIService:
         return {item["engineer_id"]: item for item in self.engineers}
 
     @cached_property
-    def risks(self) -> list[dict[str, Any]]:
-        output = []
-        for task in self.tasks:
-            for index, risk in enumerate(task["risks"], start=1):
-                category, title = RISK_PRESENTATION.get(
-                    risk["code"], ("Ресурсы", risk["code"])
+    def _risk_bus_factor_service(self) -> BusFactorService:
+        """Reuse the existing Bus Factor engine only as staffing context.
+
+        Sprint availability is deliberately not calculated here.  The planner
+        remains the source of truth for required/available/deficit hours.
+        """
+
+        return BusFactorService(
+            engineers=_frame(
+                self.tables.get("engineers", []),
+                ("engineer_id", "team_id", "role", "grade", "capacity_rate"),
+            ),
+            engineer_skills=_frame(
+                self.tables.get("engineer_skills", []),
+                ("engineer_id", "technology"),
+            ),
+            tasks=_frame(
+                self.tables.get("tasks", []),
+                ("task_id", "team_id", "status"),
+            ),
+            task_role_effort=_frame(
+                self.tables.get("task_role_effort", []),
+                ("task_id", "role", "required_hours"),
+            ),
+            task_skill_requirements=_frame(
+                self.tables.get("task_skill_requirements", []),
+                ("task_id", "technology", "required_hours"),
+            ),
+        )
+
+    def _downstream_task_ids(self, task_id: str) -> list[str]:
+        graph: dict[str, set[str]] = defaultdict(set)
+        for row in self.tables.get("task_dependencies", []):
+            blocking = _text(row.get("blocking_task_id"))
+            blocked = _text(row.get("blocked_task_id"))
+            if blocking and blocked:
+                graph[blocking].add(blocked)
+
+        visited: set[str] = set()
+        queue = list(sorted(graph.get(task_id, set())))
+        while queue:
+            current = queue.pop(0)
+            if current in visited or current == task_id:
+                continue
+            visited.add(current)
+            queue.extend(sorted(graph.get(current, set()) - visited))
+        return sorted(visited)
+
+    def _resource_reason_sprint(self, task_id: str, role: str | None) -> int | None:
+        result = self._task_results.get(task_id)
+        if result is None:
+            return None
+        candidates: list[int] = []
+        for attempt in result.placement_attempts:
+            for reason in attempt.reasons:
+                if reason.code.value not in RESOURCE_REASON_CODES:
+                    continue
+                reason_role = _text(reason.details.get("role"))
+                if role and reason_role and reason_role != role:
+                    continue
+                candidates.append(attempt.sprint_number)
+        return min(candidates, default=None)
+
+    def _role_bus_factor_context(
+        self, team_id: str | None, role: str | None
+    ) -> dict[str, Any] | None:
+        if not team_id or not role:
+            return None
+        try:
+            coverage = self._risk_bus_factor_service.role_coverage(team_id)
+        except KeyError:
+            return None
+        if coverage.empty:
+            return None
+        matches = coverage[
+            coverage["competency"].astype(str).str.casefold() == role.casefold()
+        ]
+        if matches.empty:
+            return None
+        row = matches.iloc[0]
+        helpers = self._risk_bus_factor_service.get_potential_helpers(
+            team_id, "role", role
+        )
+        helper_rows = []
+        if not helpers.empty:
+            for item in helpers.head(5).to_dict("records"):
+                helper_rows.append(
+                    {
+                        "engineer_id": item.get("engineer_id"),
+                        "source_team_id": item.get("source_team_id"),
+                        "role": item.get("role"),
+                        "grade": item.get("grade"),
+                        "capacity_rate": item.get("capacity_rate"),
+                        "match_score": item.get("match_score"),
+                    }
                 )
+        return _clean(
+            {
+                "role": role,
+                "team_bus_factor": int(row["team_bus_factor"]),
+                "organization_bus_factor": int(row["organization_bus_factor"]),
+                "coverage_status": row["coverage_status"],
+                "quarter_relevance": row["quarter_relevance"],
+                "potential_helpers": helper_rows,
+                "availability_note": (
+                    "Bus Factor показывает наличие подходящих специалистов, "
+                    "но не их свободные часы в конкретном спринте."
+                ),
+            }
+        )
+
+    @staticmethod
+    def _evidence(label: str, value: Any, unit: str | None = None) -> dict[str, Any]:
+        return {"label": label, "value": value, "unit": unit}
+
+    @cached_property
+    def risks(self) -> list[dict[str, Any]]:
+        """Product-facing actionable alerts built only from planner facts.
+
+        Normal multi-sprint execution and successful cross-team allocations are
+        intentionally not risks.  Alerts follow the agreed product semantics:
+        RED = outside the six-sprint quarter, YELLOW = dependency shift,
+        ORANGE = concrete role/capacity deficit.
+        """
+
+        output: list[dict[str, Any]] = []
+        for task in self.tasks:
+            reasons = task["reasons"]
+            reason_codes = {reason["code"] for reason in reasons}
+
+            # RED: forecast cannot fit inside the six-sprint quarter.
+            for index, reason in enumerate(
+                (item for item in reasons if item["code"] == "QUARTER_OVERFLOW"),
+                start=1,
+            ):
+                details = dict(reason.get("details") or {})
+                forecast_sprint = (
+                    details.get("forecast_completion_sprint_minimum")
+                    or details.get("forecast_start_sprint")
+                )
+                last_sprint = details.get("last_sprint") or 6
+                initiative_id = task.get("initiative_id")
+                cause = (
+                    f"Прогнозное завершение задачи {task['task_id']} — не раньше "
+                    f"Sprint {forecast_sprint}, что выходит за границу квартала "
+                    f"(Sprint {last_sprint})."
+                    if forecast_sprint
+                    else (
+                        f"Прогноз выполнения задачи {task['task_id']} выходит "
+                        f"за границу квартала (Sprint {last_sprint})."
+                    )
+                )
+                effect = (
+                    f"Бизнес-инициатива {initiative_id} не может быть полностью "
+                    "завершена в текущем квартале."
+                    if initiative_id
+                    else (
+                        f"Задача {task['task_id']} не может быть завершена в "
+                        "текущем квартале."
+                    )
+                )
+                evidence = [
+                    self._evidence("Прогноз завершения", forecast_sprint, "спринт"),
+                    self._evidence("Граница квартала", last_sprint, "спринт"),
+                ]
+                blockers = details.get("blocking_task_ids") or []
+                if blockers:
+                    evidence.append(
+                        self._evidence("Блокирующие задачи", ", ".join(blockers))
+                    )
                 output.append(
                     {
-                        "risk_id": f"{task['task_id']}:{risk['code']}:{index}",
-                        "code": risk["code"],
-                        "severity": risk["severity"],
-                        "type": category,
-                        "title": title,
+                        "risk_id": f"{task['task_id']}:DEADLINE_OUTSIDE_QUARTER:{index}",
+                        "code": "DEADLINE_OUTSIDE_QUARTER",
+                        "severity": "RED",
+                        "severity_label": "Красный алерт",
+                        "type": "Сроки",
+                        "title": "Критический риск",
                         "object": task["task_id"],
-                        "sprint": task["completion_sprint"],
-                        "cause": risk["message"],
-                        "effect": None,
+                        "sprint": forecast_sprint,
+                        "cause": cause,
+                        "effect": effect,
+                        "recommendation": (
+                            "Перенести задачу на следующий квартал или устранить "
+                            "ограничивающую зависимость/ресурс и пересчитать план."
+                        ),
+                        "evidence": evidence,
+                        "affected_tasks": self._downstream_task_ids(task["task_id"]),
+                        "task_id": task["task_id"],
+                        "team_id": task["assigned_team_id"],
+                        "initiative_id": initiative_id,
+                        "bus_factor_context": None,
+                        "details": details,
+                    }
+                )
+
+            # YELLOW: a dependency already shifts this task, but the quarter
+            # boundary is not yet violated.
+            if "QUARTER_OVERFLOW" not in reason_codes:
+                for index, reason in enumerate(
+                    (item for item in reasons if item["code"] == "DEPENDENCY_DELAY"),
+                    start=1,
+                ):
+                    details = dict(reason.get("details") or {})
+                    earliest = details.get("earliest_allowed_sprint")
+                    if earliest is not None and int(earliest) > 6:
+                        continue
+                    blocker = details.get("blocking_task_id")
+                    blocker_completion = details.get("blocking_completion_sprint")
+                    downstream = self._downstream_task_ids(task["task_id"])
+                    affected = [task["task_id"], *downstream]
+                    if downstream:
+                        effect = (
+                            "Сдвиг распространяется на зависимую цепочку: "
+                            + " → ".join(affected)
+                            + ". Финальная граница квартала пока не нарушена."
+                        )
+                    else:
+                        effect = (
+                            f"Старт {task['task_id']} сдвинут зависимостью, но "
+                            "прогноз пока остаётся внутри квартала. Дальнейшая "
+                            "задержка blocker-а может создать каскадный сдвиг."
+                        )
+                    replanning_start = blocker_completion + 1
+                    cause = (
+                        f"{task['task_id']} зависит от {blocker}. В исходном плане после "
+                        f"планового завершения {blocker} в Sprint {blocker_completion} "
+                        f"действует один спринт запаса, поэтому {task['task_id']} может "
+                        f"стартовать не раньше Sprint {earliest}. Если {blocker} фактически "
+                        f"завершится по итогам Sprint {blocker_completion}, при replanning "
+                        f"возможен старт уже в Sprint {replanning_start}."
+                    )
+                    output.append(
+                        {
+                            "risk_id": f"{task['task_id']}:DEPENDENCY_SHIFT:{index}",
+                            "code": "DEPENDENCY_SHIFT",
+                            "severity": "YELLOW",
+                            "severity_label": "Жёлтый алерт",
+                            "type": "Зависимости",
+                            "title": "Риск каскадного сдвига",
+                            "object": task["task_id"],
+                            "sprint": earliest,
+                            "cause": cause,
+                            "effect": effect,
+                            "recommendation": (
+                                f"Контролировать завершение {blocker}; при фактической "
+                                "задержке пересчитать всю downstream-цепочку."
+                            ),
+                            "evidence": [
+                                self._evidence("Blocker", blocker),
+                                self._evidence(
+                                    "Завершение blocker-а", blocker_completion, "спринт"
+                                ),
+                                self._evidence(
+                                    "Самый ранний старт", earliest, "спринт"
+                                ),
+                                self._evidence(
+                                    "Затронуто задач", len(affected), "шт."
+                                ),
+                            ],
+                            "affected_tasks": affected,
+                            "task_id": task["task_id"],
+                            "team_id": task["assigned_team_id"],
+                            "initiative_id": task["initiative_id"],
+                            "bus_factor_context": None,
+                            "details": details,
+                        }
+                    )
+
+            # ORANGE: one actionable alert per role/task.  If several planner
+            # reasons describe the same shortage, keep the most specific one.
+            resource_by_role: dict[str, dict[str, Any]] = {}
+            for reason in reasons:
+                code = reason["code"]
+                if code not in RESOURCE_REASON_CODES:
+                    continue
+                details = dict(reason.get("details") or {})
+                role = _text(details.get("role")) or "Неуказанная роль"
+                current = resource_by_role.get(role)
+                if current is None or RESOURCE_REASON_PRIORITY[code] > RESOURCE_REASON_PRIORITY[current["code"]]:
+                    resource_by_role[role] = reason
+
+            for index, (role, reason) in enumerate(
+                sorted(resource_by_role.items()), start=1
+            ):
+                details = dict(reason.get("details") or {})
+                code = reason["code"]
+                required = _number(details.get("required_hours"))
+                if required is None:
+                    required = _number((task.get("role_requirements") or {}).get(role))
+                if code == "MISSING_SPECIALIST":
+                    available = 0.0
+                else:
+                    available = _number(
+                        details.get("available_hours", details.get("available_matching_hours"))
+                    )
+                deficit = _number(details.get("deficit_hours"))
+                if deficit is None and required is not None and available is not None:
+                    deficit = max(required - available, 0.0)
+                sprint = self._resource_reason_sprint(task["task_id"], role)
+                bf_context = self._role_bus_factor_context(
+                    task.get("assigned_team_id"), role
+                )
+
+                if required is not None and available is not None:
+                    scope = f" в Sprint {sprint}" if sprint else ""
+                    cause = (
+                        f"Для {task['task_id']}{scope} требуется роль «{role}»: "
+                        f"{required:g} ч. Доступно: {available:g} ч. "
+                        f"Дефицит: {(deficit or 0):g} ч."
+                    )
+                else:
+                    cause = reason.get("message") or (
+                        f"Для {task['task_id']} недостаточно ресурса роли «{role}»."
+                    )
+
+                if task["status"] in {"MOVED", "UNPLANNABLE"}:
+                    effect = (
+                        f"Без дополнительного ресурса задача {task['task_id']} "
+                        "не может быть размещена в текущем квартальном плане."
+                    )
+                else:
+                    effect = (
+                        f"Без дополнительного ресурса выполнение {task['task_id']} "
+                        "в запланированном спринте находится под риском."
+                    )
+
+                helpers = (bf_context or {}).get("potential_helpers", [])
+                org_bf = (bf_context or {}).get("organization_bus_factor")
+                if helpers:
+                    recommendation = (
+                        f"Проверить доступность {len(helpers)} потенциальных "
+                        "cross-team специалистов в planner-е; Bus Factor сам "
+                        "свободные часы не подтверждает."
+                    )
+                elif org_bf == 0:
+                    recommendation = (
+                        "В организации нет специалиста этой роли. Нужен внешний "
+                        "ресурс, изменение объёма работ или перенос задачи."
+                    )
+                else:
+                    recommendation = (
+                        "Проверить cross-team allocation в planner-е или перенести "
+                        "часть нагрузки на другой спринт."
+                    )
+
+                evidence = [self._evidence("Роль", role)]
+                if required is not None:
+                    evidence.append(self._evidence("Требуется", required, "ч"))
+                if available is not None:
+                    evidence.append(self._evidence("Доступно", available, "ч"))
+                if deficit is not None:
+                    evidence.append(self._evidence("Дефицит", deficit, "ч"))
+                if sprint is not None:
+                    evidence.append(self._evidence("Проверяемый спринт", sprint, "спринт"))
+
+                output.append(
+                    {
+                        "risk_id": f"{task['task_id']}:ROLE_CAPACITY_DEFICIT:{index}",
+                        "code": "ROLE_CAPACITY_DEFICIT",
+                        "source_reason_code": code,
+                        "severity": "ORANGE",
+                        "severity_label": "Оранжевый алерт",
+                        "type": "Ресурсы",
+                        "title": "Ресурсный дефицит",
+                        "object": task["task_id"],
+                        "sprint": sprint,
+                        "cause": cause,
+                        "effect": effect,
+                        "recommendation": recommendation,
+                        "evidence": evidence,
+                        "affected_tasks": [task["task_id"]],
                         "task_id": task["task_id"],
                         "team_id": task["assigned_team_id"],
                         "initiative_id": task["initiative_id"],
-                        "details": risk["details"],
+                        "bus_factor_context": bf_context,
+                        "details": details,
                     }
                 )
+
+        output.sort(
+            key=lambda item: (
+                RISK_SEVERITY_PRIORITY.get(item["severity"], 99),
+                item["sprint"] if item["sprint"] is not None else 99,
+                item["task_id"],
+                item["risk_id"],
+            )
+        )
         return _clean(output)
 
     @cached_property
@@ -744,15 +1476,7 @@ class PlanningAPIService:
 
     @cached_property
     def star_map(self) -> dict[str, Any]:
-        return {
-            "teams": self.teams,
-            "engineers": self.engineers,
-            "skills": sorted(
-                {skill for engineer in self.engineers for skill in engineer["skills"]}
-            ),
-            "bus_factor": None,
-            "bus_factor_status": "NOT_IMPLEMENTED",
-        }
+        return self.bus_factor_payload
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:
@@ -769,7 +1493,7 @@ class PlanningAPIService:
             "features": {
                 "plan_constructor": "AVAILABLE_EPHEMERAL",
                 "replanning": "NOT_IMPLEMENTED",
-                "bus_factor": "NOT_IMPLEMENTED",
+                "bus_factor": "AVAILABLE",
                 "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
             },
         }

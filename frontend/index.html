@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260919-3">
 </head>
 <body>
   <div class="shell">
@@ -15,6 +15,7 @@
         <button type="button" class="nav-link active" data-page="home">Главная</button>
         <button type="button" class="nav-link" data-page="planning">Планирование</button>
         <button type="button" class="nav-link" data-page="current-plan">Текущий план</button>
+        <button type="button" class="nav-link" data-page="tasks">Задачи</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
         <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
@@ -44,7 +45,7 @@
                 <div class="constructor-pick-list" id="constructorTeamCatalog"></div>
               </article>
               <article class="panel constructor-section">
-                <div class="panel-heading"><h2>Выберите задачи</h2><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить</button></div>
+                <div class="panel-heading"><h2>Выберите задачи</h2><button class="btn btn-outline" id="addConstructorTask" type="button">+ Добавить задачу</button></div>
                 <input class="constructor-search" id="constructorTaskSearch" type="search" placeholder="Поиск по ID или названию">
                 <div class="constructor-pick-list tall" id="constructorTaskCatalog"></div>
               </article>
@@ -79,13 +80,42 @@
         <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
       </section>
 
-      <section class="page" id="page-tasks" aria-labelledby="tasksTitle">
-        <button class="task-back" type="button" data-task-back>← Назад</button>
-        <div class="page-intro task-detail-hero"><div><div class="eyebrow">ПОДРОБНАЯ ИНФОРМАЦИЯ</div><h1 id="tasksTitle">Карточка задачи</h1><p id="taskHeroDescription">Выбранная задача квартального плана.</p></div><div class="task-id-hero" id="taskHeroId" aria-label="ID задачи">—</div></div>
-        <div id="taskSummary" class="task-summary"></div><div id="taskTeamResource" class="panel"></div><div class="two-cols task-columns"><article class="panel" id="taskDescription"></article><article class="panel" id="taskPeople"></article></div><article class="panel" id="taskDependencies"></article><article class="panel" id="taskHours"></article><article class="panel reason-panel" id="taskReason" hidden></article>
+      <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
+        <div class="page-intro tasks-list-hero"><div><h1 id="tasksListTitle">Задачи</h1><p>Все задачи текущего набора: приоритет, команда, инициатива и положение в квартальном плане.</p></div><div class="page-intro-icon" aria-hidden="true">✓</div></div>
+        <article class="panel tasks-list-panel">
+          <div class="panel-heading"><div><h2>Список задач</h2><p class="hint">Нажмите на ID или строку, чтобы открыть карточку задачи.</p></div><div class="tasks-list-controls"><button class="btn btn-blue" id="addTaskFromTasks" type="button">+ Добавить задачу</button><span class="tag" id="tasksListCount">0</span></div></div>
+          <div id="tasksListState" aria-live="polite"></div>
+          <div class="table-scroll" id="tasksTableWrap"><table class="data-table tasks-table"><thead><tr>
+            <th><button class="sort-button" type="button" data-task-sort="task_id">ID <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="title">Название <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="story_points">SP <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="rung">Rung <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="assigned_team_id">Команда <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="initiative_id">Инициатива <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="start_sprint">Спринт <span aria-hidden="true"></span></button></th>
+            <th><button class="sort-button" type="button" data-task-sort="status">Статус <span aria-hidden="true"></span></button></th>
+          </tr></thead><tbody id="tasksTableBody"></tbody></table></div>
+        </article>
       </section>
 
-      <section class="page" id="page-risks" aria-labelledby="risksTitle"><div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Что произошло, почему и к чему это может привести — без дополнительных оценочных шкал.</p></div><div class="page-intro-icon">◇</div></div><div id="risksDevelopmentNotice"></div><div class="panel risk-filter"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button><button class="chip" data-risk-filter="Компетенции" type="button">Компетенции</button></div></div><div class="risk-layout"><article class="panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article><aside class="panel risk-detail" id="riskDetail" aria-live="polite"></aside></div></section>
+      <section class="page" id="page-task-detail" aria-labelledby="taskDetailTitle">
+        <div class="task-detail-toolbar"><button class="task-back" type="button" data-task-back>← Назад</button><div id="taskTopActions"></div></div>
+        <div class="page-intro task-detail-hero"><div class="task-hero-title"><h1 id="taskDetailTitle">Карточка задачи</h1></div><div class="task-hero-meta"><div class="task-id-hero" id="taskHeroId" aria-label="ID задачи">—</div><div class="task-hero-status" id="taskHeroStatus"></div></div></div>
+        <div id="taskDetailState" aria-live="polite"></div>
+        <div id="taskDetailContent">
+          <div class="task-overview-grid"><article class="panel task-facts" id="taskFacts"></article><article class="panel" id="taskDependencies"></article></div>
+          <article class="panel task-resource-panel" id="taskHours"></article>
+        </div>
+      </section>
+
+      <section class="page" id="page-risks" aria-labelledby="risksTitle">
+        <div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Критические выходы за квартал, каскадные сдвиги зависимостей и конкретные ресурсные дефициты с числовым evidence.</p></div><div class="page-intro-icon">◇</div></div>
+        <div class="panel risk-toolbar">
+          <div class="risk-toolbar-left"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button></div></div>
+          <label class="risk-search-label" for="riskSearch"><span>Поиск задачи / риска</span><input id="riskSearch" class="risk-search-input" type="search" placeholder="Например, AI-303, дефицит, PRODF-7125"></label>
+        </div>
+        <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
+      </section>
 
       <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ЗАВЕРШЕНИЕ СПРИНТА</div><h1 id="recalcTitle">Пересчёт плана</h1><p>Сценарий загрузки факта и пересмотра оставшейся части квартала.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcDevelopmentNotice"></div><div class="recalc-warning"><b>Функция ещё не подключена.</b> Backend пересчёта и обработка файла факта не реализованы. Выбор файла не означает, что его данные обработаны.</div><article class="panel upload-card"><div><div class="eyebrow">ФАКТ ЗАВЕРШЁННОГО СПРИНТА</div><h2>Загрузите фактические результаты</h2><p>После появления backend эта форма будет запускать пересчёт оставшейся части квартала с сохранением исходного плана недели 0.</p><div class="upload-filename" id="uploadFileStatus">Файл не выбран</div></div><div class="upload-actions"><input type="file" id="factInput" accept=".csv,.json,.xlsx,.xls" hidden><button class="btn btn-blue" type="button" id="chooseFact">Выбрать файл факта</button><button class="btn btn-outline" type="button" id="runDemo" disabled>Backend пересчёта не подключён</button></div></article><div id="recalcPlaceholder" class="panel empty-recalc"><span class="big-icon">↗</span><h2>Как будет работать пересчёт</h2><p>Факт завершённого спринта → новый актуальный план → изменения и причины решений. Исходный план недели 0 останется неизменным.</p></div><div id="recalcResult" hidden></div></section>
 
@@ -107,6 +137,12 @@
       </div>
     </dialog>
     <dialog class="constructor-dialog" id="constructorDialog"><form method="dialog"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form><div id="constructorDialogContent"></div></dialog>
+    <dialog class="risk-dialog" id="riskDialog" aria-labelledby="riskDialogTitle">
+      <div class="risk-dialog-shell">
+        <form method="dialog" class="risk-dialog-close-form"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form>
+        <div id="riskDialogContent"></div>
+      </div>
+    </dialog>
     <dialog class="archive-dialog" id="archiveDialog" aria-labelledby="archiveDialogTitle">
       <form id="archiveForm">
         <button class="drawer-close" type="button" data-close-archive aria-label="Закрыть">×</button>
@@ -123,8 +159,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="api.js"></script>
-  <script src="constructor.js"></script>
-  <script src="app.js"></script>
+  <script src="/api.js?v=20260919-3"></script>
+  <script src="/constructor.js?v=20260919-3"></script>
+  <script src="/app.js?v=20260919-3"></script>
 </body>
 </html>
