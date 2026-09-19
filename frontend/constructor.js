@@ -13,7 +13,9 @@ window.planConstructor = (() => {
   let pendingDatasetUpload = null;
   let shownRecommendationGroups = 3;
   const shownRecommendations = new Map();
+  const locallyRejectedRecommendations = new Map();
   let changedTaskEffects = [];
+  let showPlanChanges = true;
   let activeRecommendationId = null;
   let recommendationUpdateInFlight = false;
   let bound = false;
@@ -42,7 +44,8 @@ window.planConstructor = (() => {
   }
 
   function recommendationGroups() {
-    const recommendations = previewPlan?.optimization?.recommendations || [];
+    const recommendations = (previewPlan?.optimization?.recommendations || [])
+      .filter((item) => !locallyRejectedRecommendations.has(item.recommendation_id));
     const groups = [
       {key: 'task-allocation', title: 'Перераспределение задач', types: new Set(['TASK_SWAP', 'TASK_REASSIGNMENT', 'ATOMIC_PACKAGE'])},
       {key: 'cross-team-help', title: 'Помощь между командами', types: new Set(['CROSS_TEAM_HELP'])},
@@ -58,19 +61,30 @@ window.planConstructor = (() => {
     return `<div class="recommendation-evidence"><b>Кто выполняет работу</b><p>Основная команда: ${number(ownership.owner_hours)} ч · ${number(ownership.owner_engineer_count)} инженер(а)</p><p>Внешняя помощь: ${number(ownership.external_hours)} ч · ${number(ownership.external_engineer_count)} специалист(а)</p><p>Команда выполняет ${number(ownership.owner_share_percent)}% трудозатрат</p></div>`;
   }
 
-  function recommendationCard(item) {
+  function recommendationCard(item, rejected = false) {
     const effect = item.effect || {};
+    const currentSummary = previewPlan?.optimization?.current_summary || {};
+    const resultingSummary = item.plan_delta?.resulting_summary || {};
     const transfer = (item.task_reassignment || [])[0];
     const help = (item.engineer_help || [])[0];
     const taskIds = (item.tasks || [item.task_id]).filter(Boolean);
     const label = item.is_atomic_package ? `${taskIds.length} связанные задачи` : taskIds.join(' ↔ ');
     const action = transfer ? `${transfer.from_team} → ${transfer.to_team}` : help ? `${help.engineer_name || help.engineer_id} · ${help.source_team} → ${help.target_team}` : '';
+    const taskDelta = Array.isArray(effect.tasks_entering_quarter)
+      ? effect.tasks_entering_quarter.length
+      : Number(resultingSummary.planned_tasks || 0) - Number(currentSummary.planned_tasks || 0);
+    const initiativeDelta = Number(resultingSummary.initiatives || 0) - Number(currentSummary.initiatives || 0);
+    const effectLines = `<span>${taskDelta >= 0 ? '+' : ''}${number(taskDelta)} задач войдёт в квартал</span><span>${initiativeDelta >= 0 ? '+' : ''}${number(initiativeDelta)} инициатив завершится полностью</span>`;
     const details = [
-      transfer ? `<p>Sprint ${esc(transfer.after_sprint || '—')} · SP: ${number(transfer.task_sp)}</p>${ownershipRows(transfer.ownership)}` : '',
-      help ? `<p>${esc(help.target_task)} · ${esc(help.role)} · Sprint ${esc(help.sprint)} · ${number(help.help_hours)} ч</p><p>После подключения: ${number(help.engineer_capacity?.resulting_total_hours)} / ${number(help.engineer_capacity?.capacity_hours)} ч</p>${ownershipRows(help.ownership)}` : '',
+      ...(item.task_reassignment || []).map((change) => `<p>${esc(change.task_id)} · ${esc(change.from_team)} → ${esc(change.to_team)} · Sprint ${esc(change.after_sprint || '—')} · SP: ${number(change.task_sp)}</p>${ownershipRows(change.ownership)}`),
+      ...(item.engineer_help || []).map((change) => `<p>${esc(change.target_task)} · ${esc(change.engineer_name || change.engineer_id)} · ${esc(change.source_team)} → ${esc(change.target_team)} · ${esc(change.role)} · Sprint ${esc(change.sprint)} · ${number(change.help_hours)} ч</p><p>После подключения: ${number(change.engineer_capacity?.resulting_total_hours)} / ${number(change.engineer_capacity?.capacity_hours)} ч</p>${ownershipRows(change.ownership)}`),
     ].join('');
     const applying = activeRecommendationId === item.recommendation_id;
-    return `<article class="recommendation-card ${applying ? 'recommendation-card--loading' : ''}" id="recommendation-${esc(item.recommendation_id)}"><div class="recommendation-card-title"><b>${esc(item.title)}</b><span>${esc(label)}</span></div><p>${esc(action)}</p><strong>${esc(effect.summary || 'План станет выполнимее.')}</strong><details><summary>Подробнее</summary>${details}</details><div class="recommendation-actions"><button type="button" class="btn btn-outline" data-recommendation-reject="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>Отклонить</button><button type="button" class="btn btn-blue" data-recommendation-apply="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>${applying ? 'Применяем…' : 'Применить'}</button></div></article>`;
+    return `<article class="recommendation-card ${rejected ? 'recommendation-card--rejected' : ''} ${applying ? 'recommendation-card--loading' : ''}" id="recommendation-${esc(item.recommendation_id)}"><div class="recommendation-card-title"><b>${esc(item.title)}</b><span>${rejected ? `Отклонено · ${esc(label)}` : esc(label)}</span></div>${action ? `<p class="recommendation-action">${esc(action)}</p>` : ''}<div class="recommendation-effect">${effectLines}</div><p class="recommendation-description">${esc(effect.summary || 'План станет выполнимее.')}</p><details><summary>Подробнее</summary><div class="recommendation-details">${details || '<p>Изменение рассчитано в сохранённом варианте плана.</p>'}</div></details><div class="recommendation-actions">${!rejected ? `<button type="button" class="btn btn-outline" data-recommendation-reject="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>Отклонить</button>` : ''}<button type="button" class="btn btn-blue" data-recommendation-apply="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>${applying ? 'Применяем…' : 'Применить'}</button></div></article>`;
+  }
+
+  function optimizationSummaryCard(label, summary) {
+    return `<div class="optimization-summary-card"><span>${label}</span><b>${number(summary.planned_tasks)} задач</b><small>${number(summary.initiatives)} инициатив завершится полностью</small></div>`;
   }
 
   function optimizationSummary() {
@@ -78,12 +92,29 @@ window.planConstructor = (() => {
     const base = optimization.base_summary || {};
     const current = optimization.current_summary || {};
     const best = optimization.optimized_summary || {};
-    return `<section class="optimization-summary"><div><span>Базовый план</span><b>${number(base.planned_tasks)} задач</b></div><div><span>Текущий вариант</span><b>${number(current.planned_tasks)} задач</b></div><div><span>Лучший найденный вариант</span><b>${number(best.planned_tasks)} задач</b></div></section>`;
+    return `<section class="optimization-summary">${optimizationSummaryCard('Базовый план', base)}${optimizationSummaryCard('Текущий вариант', current)}${optimizationSummaryCard('Лучший найденный вариант', best)}</section>`;
   }
 
   function acceptedChangesPanel() {
     const accepted = previewPlan?.optimization?.accepted_changes || [];
-    return accepted.length ? `<section class="preview-section"><h3>Применённые изменения</h3><div class="accepted-changes">${accepted.map((item) => `<article><span><b>✓ ${esc(item.title)}</b><small>${esc(item.task_id || '')} · ${esc(item.summary || '')}</small></span><button class="btn btn-outline" type="button" data-change-undo="${esc(item.change_id)}">Отменить</button></article>`).join('')}</div><button class="text-button" type="button" id="resetConstructorDraft">Вернуться к базовому плану</button></section>` : '';
+    if (!accepted.length) return '';
+    const rows = accepted.map((item) => {
+      const action = item.action || {};
+      const changes = action.type === 'TASK_SWAP' ? (action.changes || []) : [action];
+      const title = action.type === 'TASK_SWAP'
+        ? 'Обменять задачи между командами'
+        : action.type === 'CROSS_TEAM_HELP'
+          ? 'Подключить специалиста другой команды'
+          : action.type === 'TASK_REASSIGNMENT' && (item.tasks || []).length > 1
+            ? 'Совместное перераспределение задач'
+            : 'Передать задачу другой команде';
+      const taskLabel = (item.tasks?.length ? item.tasks : [item.task_id]).filter(Boolean).join(', ');
+      const routing = changes.filter((change) => change.type === 'TASK_REASSIGNMENT' && (change.source_team_id || change.team_id))
+        .map((change) => `${change.source_team_id || 'Команда'} → ${change.team_id || 'команда'}`).join(' · ');
+      const detail = [taskLabel, routing || item.title].filter(Boolean).join(' · ');
+      return `<article class="accepted-change-row"><span class="accepted-change-mark" aria-hidden="true">✓</span><div class="accepted-change-copy"><b>${esc(title)}</b><small>${esc(detail)}</small><em>${esc(item.summary || 'Изменение применено.')}</em></div><button class="btn btn-outline" type="button" data-change-undo="${esc(item.change_id)}">Отменить</button></article>`;
+    }).join('');
+    return `<section class="preview-section accepted-changes-section"><div class="accepted-changes-heading"><h3>Применённые изменения</h3><span>${accepted.length}</span></div><div class="accepted-changes">${rows}</div><button class="text-button" type="button" id="resetConstructorDraft">Вернуться к базовому плану</button></section>`;
   }
 
   function recommendationPanel() {
@@ -98,12 +129,16 @@ window.planConstructor = (() => {
     const applyAll = optimization.status === 'ready' && (optimization.optimized_actions || []).length
       ? `<div class="apply-all-recommendations ${optimization.best_selected ? 'apply-all-recommendations--selected' : ''}"><div><b>Лучший найденный совместимый вариант</b><small>Сохранённый вариант не меняется при отдельных действиях.</small></div><button class="btn btn-blue" type="button" id="applyAllRecommendations" ${recommendationUpdateInFlight || optimization.best_selected ? 'disabled' : ''}>${optimization.best_selected ? '✓ Лучший найденный вариант выбран' : 'Применить все рекомендации'}</button></div>`
       : '';
-    return `<section class="preview-section recommendations-section"><h3>Как можно улучшить план</h3><div class="recommendation-comparison"><div><span>Текущий вариант</span><b>${number(current.planned_tasks)} задач</b></div><div><span>Лучший найденный</span><b>${number(best.planned_tasks)} задач</b></div></div>${applyAll}${groups.length ? `<div class="recommendation-groups-scroll">${cards}</div>` : '<p class="muted">Дополнительных улучшений не найдено.</p>'}</section>`;
+    const rejected = [...locallyRejectedRecommendations.values()];
+    const rejectedSection = rejected.length ? `<section class="recommendation-group recommendation-group--rejected"><h4>Отклонённые <small>${rejected.length}</small></h4><div class="recommendation-list">${rejected.map((item) => recommendationCard(item, true)).join('')}</div></section>` : '';
+    const activeContent = groups.length ? `<div class="recommendation-groups-scroll">${cards}</div>` : '<p class="muted">Дополнительных улучшений не найдено.</p>';
+    return `<section class="preview-section recommendations-section"><div class="recommendations-heading"><div><h3>Как можно улучшить план</h3><p>Отдельные изменения рассчитаны в сохранённом лучшем варианте и применяются независимо.</p></div><label class="recommendations-change-toggle"><input id="showPlanChanges" type="checkbox" ${showPlanChanges ? 'checked' : ''}><span>Показывать изменения</span></label></div><div class="recommendation-comparison"><div><span>Текущий вариант</span><b>${number(current.planned_tasks)} задач · ${number(current.initiatives)} инициатив</b></div><div><span>Лучший найденный</span><b>${number(best.planned_tasks)} задач · ${number(best.initiatives)} инициатив</b></div></div>${applyAll}${activeContent}${rejectedSection}</section>`;
   }
 
   function invalidatePreview() {
     if (!previewPlan) return;
     previewPlan = null;
+    locallyRejectedRecommendations.clear();
     renderPreview();
   }
 
@@ -114,10 +149,18 @@ window.planConstructor = (() => {
       .map((reason) => reason.details.role))];
     const messages = (task.reasons || [])
       .filter((reason) => !missingRoleCodes.has(reason.code) || !reason.details?.role)
-      .map((reason) => reason.message || reason.title)
+      .map((reason) => reason.message)
       .filter(Boolean);
     if (missingRoles.length) messages.unshift(`Нет специалистов ролей: ${missingRoles.join(', ')}.`);
     return [...new Set(messages)];
+  }
+
+  function previewReasonBlocks(task) {
+    const blocks = Array.isArray(task.reason_blocks) ? task.reason_blocks : [];
+    if (blocks.length) {
+      return blocks.map((block) => `<div class="preview-reason-block"><b>${esc(block.title || 'Причина ограничения')}</b>${(block.details || []).map((detail) => `<span>${esc(detail)}</span>`).join('')}</div>`).join('');
+    }
+    return previewReasons(task).map((message) => `<div class="preview-reason-block"><span>${esc(message)}</span></div>`).join('');
   }
 
   function previewSprintCard(task, sprint) {
@@ -155,7 +198,6 @@ window.planConstructor = (() => {
     }
     const plannedTasks = (previewPlan.tasks || []).filter((task) => task.status === 'PLANNED');
     const excludedTasks = (previewPlan.tasks || []).filter((task) => ['MOVED', 'UNPLANNABLE'].includes(task.status));
-    const currentSummary = previewPlan.optimization?.current_summary || {};
     const sprintBoard = Array.from({length: 6}, (_, index) => {
       const sprint = index + 1;
       const cards = plannedTasks.filter((task) => (task.planned_sprints || []).includes(sprint))
@@ -164,13 +206,13 @@ window.planConstructor = (() => {
       return `<section class="preview-sprint"><h3>Sprint ${sprint}</h3><div>${cards}</div></section>`;
     }).join('');
     const exclusions = excludedTasks.map((task) => {
-      const reasons = previewReasons(task);
-      return `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><p>${esc(reasons.join(' ') || task.summary || 'Причина не указана.')}</p></article>`;
+      const reasonBlocks = previewReasonBlocks(task);
+      return `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><div class="preview-reason-blocks">${reasonBlocks || '<div class="preview-reason-block"><span>Причина ограничения не раскрыта.</span></div>'}</div></article>`;
     }).join('') || '<p class="muted">Все задачи удалось разместить в квартальном плане.</p>';
     const historicalDone = (previewPlan.tasks || []).filter((task) => task.status === 'DONE');
     const historicalBlock = historicalDone.length ? `<section class="preview-section"><h3>Уже завершены до начала планирования</h3><div class="preview-exclusion-list">${historicalDone.map((task) => `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><small>✓ Завершена до начала планирования</small></article>`).join('')}</div></section>` : '';
     target.hidden = false;
-    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>План построен без перераспределения задач и специалистов между командами.</p></div></div><section class="preview-kpi"><span>Текущий вариант</span><b>${number(currentSummary.planned_tasks)} задач · ${number(currentSummary.initiatives)} завершённых инициатив</b><small>KPI здесь не используется для выбора лучшего варианта.</small></section>${optimizationSummary()}<section class="preview-section" id="constructorSprintPlan"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section>${historicalBlock}<section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section"><h3>Переносы и исключения</h3><div class="preview-exclusion-list">${exclusions}</div></section>${recommendationPanel()}${acceptedChangesPanel()}<div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
+    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>План построен без перераспределения задач и специалистов между командами.</p></div></div>${optimizationSummary()}<section class="preview-section" id="constructorSprintPlan"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section>${historicalBlock}<section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section"><h3>Переносы и исключения</h3><div class="preview-exclusion-list">${exclusions}</div></section>${recommendationPanel()}${acceptedChangesPanel()}<div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
   }
 
   function loadDraft() {
@@ -260,6 +302,7 @@ window.planConstructor = (() => {
     pendingDatasetUpload = null;
     shownRecommendationGroups = 3;
     shownRecommendations.clear();
+    locallyRejectedRecommendations.clear();
     render();
     $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
@@ -613,6 +656,7 @@ window.planConstructor = (() => {
       previewPlan = planResult;
       shownRecommendationGroups = 3;
       shownRecommendations.clear();
+      locallyRejectedRecommendations.clear();
       renderPreview();
       $c('#constructorPreview')?.scrollIntoView({behavior: 'smooth', block: 'start'});
     } catch (error) {
@@ -624,6 +668,10 @@ window.planConstructor = (() => {
   }
 
   function focusChangedTasks(effects) {
+    if (!showPlanChanges) {
+      changedTaskEffects = [];
+      return;
+    }
     const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     const cards = (effects || []).flatMap((effect) => $$c(`[data-preview-task="${CSS.escape(effect.task_id)}"]`)
       .filter((card) => effect.to_sprint == null || Number(card.dataset.previewSprint) === Number(effect.to_sprint)));
@@ -658,13 +706,22 @@ window.planConstructor = (() => {
     recommendationUpdateInFlight = true;
     activeRecommendationId = action === 'applyAll' ? 'apply-all' : id;
     renderPreview();
+    if (action === 'reject') {
+      const recommendation = (previewPlan.optimization?.recommendations || []).find((item) => item.recommendation_id === id);
+      if (recommendation) locallyRejectedRecommendations.set(id, clone(recommendation));
+      recommendationUpdateInFlight = false;
+      activeRecommendationId = null;
+      renderPreview();
+      return;
+    }
     try {
       if (action === 'apply') applyOptimisticDelta(id);
       if (action === 'apply') previewPlan = await api.applyConstructorRecommendation(draftId, id);
-      if (action === 'reject') previewPlan = await api.rejectConstructorRecommendation(draftId, id);
       if (action === 'undo') previewPlan = await api.undoConstructorChange(draftId, id);
       if (action === 'reset') previewPlan = await api.resetConstructorDraft(draftId);
       if (action === 'applyAll') previewPlan = await api.applyAllConstructorRecommendations(draftId);
+      if (action === 'apply') locallyRejectedRecommendations.delete(id);
+      if (action === 'reset' || action === 'applyAll') locallyRejectedRecommendations.clear();
       changedTaskEffects = previewPlan.optimization?.changed_tasks || [];
       shownRecommendationGroups = 3;
       shownRecommendations.clear();
@@ -714,6 +771,12 @@ window.planConstructor = (() => {
       const pick = event.target.closest('[data-constructor-pick]');
       if (pick) { toggleCatalog(pick.dataset.constructorPick, pick.value, pick.checked); return; }
       if (event.target.matches('[name="dependency_id"]')) updateDependencyView();
+      if (event.target.id === 'showPlanChanges') {
+        showPlanChanges = event.target.checked;
+        if (!showPlanChanges) changedTaskEffects = [];
+        renderPreview();
+        return;
+      }
     });
     document.addEventListener('input', (event) => {
       if (event.target.id !== 'constructorDependencySearch') return;

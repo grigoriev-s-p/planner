@@ -131,8 +131,9 @@ def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, An
         "specialists": 1,
         "engineer_hours": 2,
         "team_capacity": 3,
-        "quarter": 4,
-        "other": 5,
+        "allocation": 4,
+        "quarter": 5,
+        "other": 6,
     }
     for reason in reasons:
         code = str(reason.get("code") or "")
@@ -179,7 +180,10 @@ def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, An
         elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
             key, title = "quarter", "Не помещается в текущем квартале"
             values = ["Для завершения требуется срок за пределами шести спринтов."]
-        elif code in {"ALLOCATION_ROLLED_BACK", "MULTI_SPRINT_REQUIRED"}:
+        elif code == "ALLOCATION_ROLLED_BACK":
+            key, title = "allocation", "Не удалось разместить задачу"
+            values = ["Не удалось разместить задачу с учётом доступных ресурсов."]
+        elif code == "MULTI_SPRINT_REQUIRED":
             continue
         else:
             key, title = "other", "Требуется уточнение данных"
