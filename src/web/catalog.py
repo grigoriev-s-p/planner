@@ -6,6 +6,7 @@ import json
 import math
 import sqlite3
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -75,6 +76,11 @@ class CatalogMergeResult:
     kept: dict[str, int]
     warnings: tuple[str, ...]
     conflicts: tuple[dict[str, Any], ...] = ()
+    archived_entities: tuple[dict[str, Any], ...] = ()
+    restored: dict[str, int] | None = None
+    restored_updated: dict[str, int] | None = None
+    kept_archived: dict[str, int] | None = None
+    summary: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +88,11 @@ class CatalogMergeResult:
             "kept": dict(self.kept),
             "warnings": list(self.warnings),
             "conflicts": [dict(conflict) for conflict in self.conflicts],
+            "archived_entities": [dict(entity) for entity in self.archived_entities],
+            "restored": dict(self.restored or {}),
+            "restored_updated": dict(self.restored_updated or {}),
+            "kept_archived": dict(self.kept_archived or {}),
+            "summary": dict(self.summary or {}),
         }
 
 
@@ -601,11 +612,119 @@ class CatalogRepository:
                 grouped.setdefault(entity_id, []).append(row)
         return grouped
 
+    @staticmethod
+    def _archive_decision_key(entity_type: str, entity_id: str) -> str:
+        return f"{entity_type}:{entity_id}"
+
+    @staticmethod
+    def _archive_field_label(field: str) -> str | None:
+        return {
+            "summary": "Название",
+            "name": "Имя",
+            "team_name": "Название команды",
+            "team_id": "Команда",
+            "status": "Статус",
+            "rung": "Приоритет Rung",
+            "story_points": "Story Points",
+            "initiative_id": "Инициатива",
+            "role": "Роль",
+            "grade": "Грейд",
+            "capacity_rate": "Занятость",
+            "snapshot_date": "Дата снимка",
+            "velocity_achieved": "Фактическая производительность",
+            "planned_sp": "Запланировано Story Points",
+        }.get(field)
+
+    @classmethod
+    def _archive_differences(
+        cls,
+        saved_rows: Iterable[Mapping[str, Any]],
+        excel_rows: Iterable[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        saved = [dict(row) for row in saved_rows]
+        excel = [dict(row) for row in excel_rows]
+        fields = sorted(
+            set().union(*(row.keys() for row in [*saved, *excel])) if [*saved, *excel] else set()
+        )
+        result = []
+        for field in fields:
+            label = cls._archive_field_label(field)
+            if not label:
+                continue
+            current = saved[0].get(field) if saved else None
+            incoming = excel[0].get(field) if excel else None
+            if current == incoming:
+                continue
+            result.append({"field": field, "label": label, "current": current, "incoming": incoming})
+        return result
+
+    def _archived_entity_records(
+        self,
+        current: Mapping[str, list[dict[str, Any]]],
+        materialized: Mapping[str, list[dict[str, Any]]],
+        archived: Mapping[str, set[str]],
+    ) -> list[dict[str, Any]]:
+        specs = {
+            "tasks": ("task", "task_id", "Задача"),
+            "engineers": ("engineer", "engineer_id", "Инженер"),
+            "team_history": ("team", "team_id", "Команда"),
+        }
+        records: list[dict[str, Any]] = []
+        for table_name, (entity_type, field, label) in specs.items():
+            current_groups = self._groups(current.get(table_name, []), field)
+            incoming_groups = self._groups(materialized.get(table_name, []), field)
+            for entity_id in sorted(set(incoming_groups) & archived.get(entity_type, set())):
+                lifecycle = self.lifecycle(entity_type, entity_id)
+                saved_rows = current_groups.get(entity_id, [])
+                incoming_rows = incoming_groups.get(entity_id, [])
+                display = next((
+                    _text(row.get(key)) for row in [*incoming_rows, *saved_rows]
+                    for key in ("summary", "name", "team_name") if _text(row.get(key))
+                ), entity_id)
+                records.append({
+                    "decision_key": self._archive_decision_key(entity_type, entity_id),
+                    "entity_type": entity_type,
+                    "entity_label": label,
+                    "entity_id": entity_id,
+                    "display_name": display,
+                    "archived_at": lifecycle.get("archived_at"),
+                    "archive_reason_label": lifecycle.get("archive_reason_label"),
+                    "archive_reason_text": lifecycle.get("archive_reason_text"),
+                    "current": deepcopy(saved_rows),
+                    "incoming": deepcopy(incoming_rows),
+                    "differences": self._archive_differences(saved_rows, incoming_rows),
+                })
+        # A workbook can reference an archived team without carrying a
+        # Team_history row for it. Keep that decision explicit as well.
+        referenced_teams = {
+            _text(row.get("team_id"))
+            for table_name in ("tasks", "engineers", "team_history")
+            for row in materialized.get(table_name, [])
+            if _text(row.get("team_id")) in archived.get("team", set())
+        }
+        known = {(item["entity_type"], item["entity_id"]) for item in records}
+        for team_id in sorted(referenced_teams):
+            if ("team", team_id) in known:
+                continue
+            lifecycle = self.lifecycle("team", team_id)
+            saved_rows = self._groups(current.get("team_history", []), "team_id").get(team_id, [])
+            records.append({
+                "decision_key": self._archive_decision_key("team", team_id),
+                "entity_type": "team", "entity_label": "Команда", "entity_id": team_id,
+                "display_name": team_id, "archived_at": lifecycle.get("archived_at"),
+                "archive_reason_label": lifecycle.get("archive_reason_label"),
+                "archive_reason_text": lifecycle.get("archive_reason_text"),
+                "current": deepcopy(saved_rows), "incoming": [], "differences": [],
+                "referenced_only": True,
+            })
+        return sorted(records, key=lambda item: (item["entity_label"], item["entity_id"]))
+
     def merge_tables(
         self,
         incoming: Mapping[str, Iterable[Mapping[str, Any]]],
         *,
         dry_run: bool = False,
+        archive_decisions: Mapping[str, str] | None = None,
     ) -> CatalogMergeResult:
         """Atomically add entities, or inspect the exact merge without writing."""
 
@@ -619,6 +738,30 @@ class CatalogRepository:
             entity_type: self.archived_ids(entity_type)
             for entity_type in ENTITY_TABLES
         }
+        archived_entities = self._archived_entity_records(current, materialized, archived)
+        decisions = {str(key): str(value).upper() for key, value in (archive_decisions or {}).items()}
+        allowed_decisions = {"KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"}
+        known_archive_keys = {item["decision_key"] for item in archived_entities}
+        active_entity_keys = {
+            self._archive_decision_key(entity_type, entity_id)
+            for table_name, (entity_type, field, _label) in {
+                "tasks": ("task", "task_id", "Задача"),
+                "engineers": ("engineer", "engineer_id", "Инженер"),
+                "team_history": ("team", "team_id", "Команда"),
+            }.items()
+            for entity_id in self._groups(current.get(table_name, []), field)
+        }
+        unknown_decisions = set(decisions) - known_archive_keys - active_entity_keys
+        if unknown_decisions:
+            raise ArchiveValidationError("Решение относится к неизвестной архивной записи.")
+        invalid_decisions = {key: value for key, value in decisions.items() if value not in allowed_decisions}
+        if invalid_decisions:
+            raise ArchiveValidationError("Выберите допустимое действие для архивной записи.")
+        decisions = {
+            item["decision_key"]: decisions.get(item["decision_key"], "KEEP_ARCHIVED")
+            for item in archived_entities
+        }
+        entity_summary = {"new": 0, "active_existing": 0, "archived": len(archived_entities)}
 
         referenced_archived_teams = {
             _text(row.get("team_id"))
@@ -645,14 +788,18 @@ class CatalogRepository:
             new_entity_ids[entity_type] = set(incoming_groups) - set(existing_groups)
             rows_to_insert[table_name] = []
             for entity_id, rows in incoming_groups.items():
-                if entity_id in archived[entity_type]:
+                if entity_id in archived[entity_type] and decisions[self._archive_decision_key(entity_type, entity_id)] == "KEEP_ARCHIVED":
                     kept[table_name] += len(rows)
                     warnings.append(
                         f"{label} {entity_id} присутствует в загруженном файле, "
                         "но ранее была удалена из активного каталога."
                     )
                     continue
+                if entity_id in archived[entity_type]:
+                    kept[table_name] += len(rows)
+                    continue
                 if entity_id in existing_groups:
+                    entity_summary["active_existing"] += 1
                     kept[table_name] += len(rows)
                     old = sorted(_comparison_payload(row) for row in existing_groups[entity_id])
                     new = sorted(_comparison_payload(row) for row in rows)
@@ -670,6 +817,7 @@ class CatalogRepository:
                         })
                     continue
                 rows_to_insert[table_name].extend(rows)
+                entity_summary["new"] += 1
 
         linked_specs = {
             "task_role_effort": ("task", "task_id"),
@@ -705,11 +853,64 @@ class CatalogRepository:
                 kept,
                 tuple(dict.fromkeys(warnings)),
                 tuple(conflicts),
+                tuple(archived_entities),
+                {}, {}, {"archived": sum(1 for value in decisions.values() if value == "KEEP_ARCHIVED")},
+                entity_summary,
             )
 
         now = datetime.now(timezone.utc).isoformat()
+        restored: dict[str, int] = {}
+        restored_updated: dict[str, int] = {}
+        kept_archived: dict[str, int] = {}
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            for item in archived_entities:
+                decision = decisions[item["decision_key"]]
+                entity_type, entity_id = item["entity_type"], item["entity_id"]
+                if decision == "KEEP_ARCHIVED":
+                    kept_archived[entity_type] = kept_archived.get(entity_type, 0) + 1
+                    continue
+                connection.execute(
+                    "UPDATE entity_lifecycle SET archived=0 WHERE entity_type=? AND entity_id=?",
+                    (entity_type, entity_id),
+                )
+                target = restored_updated if decision == "RESTORE_UPDATE" else restored
+                target[entity_type] = target.get(entity_type, 0) + 1
+                if decision != "RESTORE_UPDATE":
+                    continue
+                table_name = ENTITY_TABLES[entity_type]
+                identity_field = {"task": "task_id", "engineer": "engineer_id", "team": "team_id"}[entity_type]
+                incoming_rows = self._groups(materialized.get(table_name, []), identity_field).get(entity_id, [])
+                if not incoming_rows:
+                    continue
+                incoming_row = incoming_rows[0]
+                protected = {
+                    "task": {
+                        "task_id", "status", "completed_in_quarter", "completion_sprint",
+                        "planned_sprints", "allocations", "dependencies", "is_placeholder",
+                        "original_team_id",
+                    },
+                    "engineer": {"engineer_id", "team_id", "role", "role_raw", "allocations"},
+                    "team": {"team_id", "snapshot_date"},
+                }[entity_type]
+                rows = connection.execute(
+                    "SELECT source.row_key,COALESCE(changes.payload,source.payload) payload "
+                    "FROM catalog_rows source LEFT JOIN catalog_row_overrides changes "
+                    "ON changes.table_name=source.table_name AND changes.row_key=source.row_key "
+                    "WHERE source.table_name=?",
+                    (table_name,),
+                ).fetchall()
+                for row in rows:
+                    payload = json.loads(row["payload"])
+                    if _text(payload.get(identity_field)) != entity_id:
+                        continue
+                    replacement = dict(payload)
+                    replacement.update({key: value for key, value in incoming_row.items() if key not in protected})
+                    connection.execute(
+                        "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) VALUES(?,?,?,?) "
+                        "ON CONFLICT(table_name,row_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
+                        (table_name, row["row_key"], _json_payload(replacement), now),
+                    )
             for table_name, rows in rows_to_insert.items():
                 for row in rows:
                     key = _row_identity(table_name, row)
@@ -723,7 +924,9 @@ class CatalogRepository:
                     else:
                         kept[table_name] = kept.get(table_name, 0) + 1
         return CatalogMergeResult(
-            added, kept, tuple(dict.fromkeys(warnings)), tuple(conflicts)
+            added, kept, tuple(dict.fromkeys(warnings)), tuple(conflicts),
+            tuple(archived_entities), restored, restored_updated, kept_archived,
+            entity_summary,
         )
 
     def archive(
