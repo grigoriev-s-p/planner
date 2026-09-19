@@ -125,6 +125,17 @@
         <div id="starDistribution" class="star-view"><article class="panel"><div class="eyebrow">НЕСКОЛЬКО КОМАНД / ОДИН ИНЖЕНЕР</div><h2>Распределение сотрудников</h2><p class="hint">Доступность инженера показана отдельно для каждой команды и суммарно за спринт.</p><div id="distributionTable" class="table-scroll"></div></article></div>
       </section>
     </main>
+    <dialog class="data-preflight-dialog" id="dataPreflightDialog" aria-labelledby="dataPreflightTitle">
+      <div class="data-preflight-shell">
+        <header class="data-preflight-header">
+          <div><div class="eyebrow">ПЕРЕД ПОСТРОЕНИЕМ ПЛАНА</div><h2 id="dataPreflightTitle">Проверка данных</h2><p id="dataPreflightSubtitle"></p></div>
+          <button class="drawer-close" type="button" data-close-data-preflight aria-label="Закрыть">×</button>
+        </header>
+        <div class="data-preflight-summary" id="dataPreflightSummary"></div>
+        <div class="data-preflight-groups" id="dataPreflightGroups"></div>
+        <footer class="data-preflight-actions" id="dataPreflightActions"></footer>
+      </div>
+    </dialog>
     <dialog class="constructor-dialog" id="constructorDialog"><form method="dialog"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form><div id="constructorDialogContent"></div></dialog>
     <dialog class="risk-dialog" id="riskDialog" aria-labelledby="riskDialogTitle">
       <div class="risk-dialog-shell">

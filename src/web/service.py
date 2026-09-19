@@ -18,6 +18,8 @@ import pandas as pd
 from src.bus_factor import BusFactorService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.planning.capacity import calculate_team_capacity
+from src.planning.ownership import evaluate_ownership_rows
+from src.planning.task_states import is_historical_done
 from src.replanning import (
     ActualResults,
     PlanItem,
@@ -99,7 +101,7 @@ def _read_table(directory: Path, table_name: str) -> list[dict[str, Any]]:
 
 
 STATUS_LABELS = {
-    "DONE": "Завершена",
+    "DONE": "Завершена до начала планирования",
     "PLANNED": "Запланирована",
     "MOVED": "Перенесена",
     "UNPLANNABLE": "Невыполнима",
@@ -119,6 +121,74 @@ RESOURCE_REASON_PRIORITY = {
     "INSUFFICIENT_ROLE_CAPACITY": 1,
 }
 
+
+def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group planner reasons into concise task-detail explanations."""
+
+    groups: dict[str, dict[str, Any]] = {}
+    order = {
+        "dependency": 0,
+        "specialists": 1,
+        "engineer_hours": 2,
+        "team_capacity": 3,
+        "quarter": 4,
+        "other": 5,
+    }
+    for reason in reasons:
+        code = str(reason.get("code") or "")
+        details = reason.get("details") or {}
+        if code in {
+            "DEPENDENCY_NOT_COMPLETED",
+            "UNKNOWN_DEPENDENCY_DATE",
+            "MISSING_DEPENDENCY_REFERENCE",
+            "DEPENDENCY_DELAY",
+        }:
+            key, title = "dependency", "Задача заблокирована зависимостью"
+            blocker = details.get("blocking_task_id")
+            values = [
+                f"Сначала должна быть завершена {blocker}."
+                if blocker
+                else "Ожидается завершение связанной задачи."
+            ]
+        elif code in {
+            "MISSING_SPECIALIST",
+            "NO_AVAILABLE_ROLE_SPECIALIST",
+            "INSUFFICIENT_SKILL_CAPACITY",
+        }:
+            key, title = "specialists", "Не хватает специалистов"
+            values = [str(details.get("role"))] if details.get("role") else [
+                "Нет специалиста с нужными компетенциями."
+            ]
+        elif code in {"INSUFFICIENT_ROLE_CAPACITY", "INSUFFICIENT_ENGINEER_CAPACITY"}:
+            key, title = "engineer_hours", "Не хватает доступного времени специалистов"
+            role = details.get("role")
+            deficit = _number(details.get("deficit_hours"))
+            values = [
+                f"{role}: дефицит {deficit:g} ч."
+                if role and deficit is not None
+                else (f"{role}: недостаточно часов." if role else "Недостаточно часов специалистов.")
+            ]
+        elif code in {"INSUFFICIENT_TEAM_CAPACITY", "INSUFFICIENT_SP_CAPACITY"}:
+            key, title = "team_capacity", "Недостаточно ресурсов команды"
+            deficit = _number(details.get("deficit_sp"))
+            values = [
+                f"Не хватает {deficit:g} SP."
+                if deficit
+                else "Не хватает доступной ёмкости команды."
+            ]
+        elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
+            key, title = "quarter", "Не помещается в текущем квартале"
+            values = ["Для завершения требуется срок за пределами шести спринтов."]
+        elif code in {"ALLOCATION_ROLLED_BACK", "MULTI_SPRINT_REQUIRED"}:
+            continue
+        else:
+            key, title = "other", "Требуется уточнение данных"
+            values = ["Планировщик не получил достаточно данных для размещения задачи."]
+        group = groups.setdefault(key, {"type": key, "title": title, "details": []})
+        for value in values:
+            if value not in group["details"]:
+                group["details"].append(value)
+    return [groups[key] for key in sorted(groups, key=lambda item: order[item])]
 
 BUS_FACTOR_PRESENTATION = {
     "critical": {"label": "Критично", "rank": 0},
@@ -251,9 +321,7 @@ def build_bus_factor_payload(
             coverage = coverage.sort_values(["team_bus_factor", "competency"])
         for item in coverage.itertuples(index=False):
             team_bf = int(item.team_bus_factor)
-            # Without explicit task -> skill requirements, BF=0 means "not a
-            # team competency", not a staffing gap. The existing module uses
-            # the same rule for recommendations.
+            # A zero without an explicit task requirement is not a staffing gap.
             if team_bf == 0 and item.quarter_relevance != "required":
                 continue
 
@@ -270,9 +338,8 @@ def build_bus_factor_payload(
                     for source_team_id in external["team_ids"]
                     if source_team_id != team_id
                 ]
-                if not external["source_team_ids"]:
-                    continue
-                external_engineers.append(external)
+                if external["source_team_ids"]:
+                    external_engineers.append(external)
 
             if team_bf == 0:
                 reason = (
@@ -290,9 +357,7 @@ def build_bus_factor_payload(
                     "покрывают эту компетенцию."
                 )
             else:
-                reason = (
-                    f"Компетенцию покрывают {team_bf} инженера команды."
-                )
+                reason = f"Компетенцию покрывают {team_bf} инженера команды."
 
             competency = {
                 "competency_type": "skill",
@@ -334,21 +399,11 @@ def build_bus_factor_payload(
             )
         )
         summary = {
-            "zero_coverage_count": sum(
-                item["bus_factor"] == 0 for item in competencies
-            ),
-            "single_owner_count": sum(
-                item["bus_factor"] == 1 for item in competencies
-            ),
-            "critical_count": sum(
-                item["risk_level"] == "critical" for item in competencies
-            ),
-            "warning_count": sum(
-                item["risk_level"] == "warning" for item in competencies
-            ),
-            "healthy_count": sum(
-                item["risk_level"] == "healthy" for item in competencies
-            ),
+            "zero_coverage_count": sum(item["bus_factor"] == 0 for item in competencies),
+            "single_owner_count": sum(item["bus_factor"] == 1 for item in competencies),
+            "critical_count": sum(item["risk_level"] == "critical" for item in competencies),
+            "warning_count": sum(item["risk_level"] == "warning" for item in competencies),
+            "healthy_count": sum(item["risk_level"] == "healthy" for item in competencies),
         }
         member_ids = service.team_engineers(team_id)
         team_payloads.append(
@@ -413,9 +468,11 @@ class PlanningAPIService:
         *,
         tables: dict[str, list[dict[str, Any]]] | None = None,
         plan_version: str | None = None,
+        planner_options: dict[str, Any] | None = None,
     ):
         self.processed_dir = processed_dir
         self._plan_version_override = plan_version
+        self._planner_options = dict(planner_options or {})
         if tables is None:
             self.tables = {
                 name: _read_table(processed_dir, name) for name in TABLE_FILES
@@ -439,7 +496,7 @@ class PlanningAPIService:
             team_history=self.tables["team_history"],
             task_skill_requirements=self.tables["task_skill_requirements"],
         )
-        self.plan = build_quarter_plan(self.context)
+        self.plan = build_quarter_plan(self.context, **self._planner_options)
         self._raw_tasks = {
             task_id: row
             for row in self.tables["tasks"]
@@ -456,10 +513,15 @@ class PlanningAPIService:
         tables: dict[str, list[dict[str, Any]]],
         *,
         plan_version: str = "in-memory",
+        planner_options: dict[str, Any] | None = None,
     ) -> "PlanningAPIService":
         """Build API DTOs from temporary normalized records without file writes."""
 
-        return cls(tables=tables, plan_version=plan_version)
+        return cls(
+            tables=tables,
+            plan_version=plan_version,
+            planner_options=planner_options,
+        )
 
     @cached_property
     def plan_version(self) -> str:
@@ -582,7 +644,7 @@ class PlanningAPIService:
                 dependency_state = "MISSING"
                 satisfied = False
                 blocker_title = None
-            elif (_text(blocker.get("status")) or "").casefold() == "done":
+            elif is_historical_done(blocker):
                 dependency_state = "HISTORICAL_DONE"
                 satisfied = True
                 blocker_title = _text(blocker.get("summary"))
@@ -598,7 +660,7 @@ class PlanningAPIService:
                 "satisfied": satisfied,
                 "blocking_task_title": blocker_title,
                 "status_message": (
-                    "Задача завершена до начала квартала"
+                    "Задача завершена до начала планирования"
                     if dependency_state == "HISTORICAL_DONE"
                     else (
                         "Блокирующая задача неизвестна каталогу"
@@ -642,6 +704,13 @@ class PlanningAPIService:
             result = self._task_results[task_id]
             explanation = self._task_explanations[task_id]
             allocations = self._task_allocations(task_id)
+            ownership = (
+                evaluate_ownership_rows(
+                    explanation.assigned_team_id, allocations
+                ).to_dict()
+                if explanation.assigned_team_id
+                else None
+            )
             role_hours_by_sprint = {
                 str(item["sprint"]): dict(item["allocated_role_hours"])
                 for item in explanation.allocations
@@ -681,7 +750,9 @@ class PlanningAPIService:
                     "role_requirements": self._task_role_requirements(task_id),
                     "dependencies": self._task_dependencies(task_id),
                     "allocations": allocations,
+                    "ownership": ownership,
                     "reasons": reasons,
+                    "reason_blocks": _human_reason_blocks(reasons),
                     "risks": [item.to_dict() for item in explanation.risks],
                     "recommendations": [item.to_dict() for item in explanation.recommendations],
                     "summary": explanation.summary,

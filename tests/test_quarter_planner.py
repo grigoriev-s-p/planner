@@ -430,7 +430,7 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual(completed.status, PlanStatus.COMPLETED)
         self.assertEqual(completed.completed_sp, 5)
 
-    def test_full_story_points_wait_for_a_sprint_with_team_capacity(self) -> None:
+    def test_full_story_points_wait_for_owner_team_capacity(self) -> None:
         plan = build_quarter_plan(
             context(
                 [task("A", story_points=8, rung=100), task("B", story_points=2, rung=50)],
@@ -438,7 +438,7 @@ class QuarterPlannerTests(unittest.TestCase):
             )
         )
         delayed = result_by_id(plan, "B")
-        self.assertEqual((delayed.start_sprint, delayed.completion_sprint), (1, 1))
+        self.assertEqual((delayed.start_sprint, delayed.completion_sprint), (2, 2))
         self.assertEqual(
             [
                 (
@@ -449,11 +449,12 @@ class QuarterPlannerTests(unittest.TestCase):
                 )
                 for a in delayed.allocations
             ],
-            [(1, 10, 2, 0)],
+            [(2, 10, 2, 0)],
         )
         self.assertEqual(plan.sprints[0].team_sp_used["Team-A"], 8)
-        self.assertEqual(plan.sprints[0].team_sp_used["Team-B"], 2)
-        self.assertTrue(delayed.team_reassigned)
+        self.assertEqual(plan.sprints[1].team_sp_used["Team-A"], 2)
+        self.assertTrue(all(sprint.team_sp_used.get("Team-B", 0) == 0 for sprint in plan.sprints))
+        self.assertFalse(delayed.team_reassigned)
 
     def test_initiative_count_cannot_override_absolute_task_rung(self) -> None:
         tasks = [

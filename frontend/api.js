@@ -44,10 +44,13 @@ window.postcodeApi = (() => {
         body: JSON.stringify(reason),
       });
     },
-    buildConstructorPlanFromDataset: (file) => request(`/api/plan-constructor/plan/upload?filename=${encodeURIComponent(file.name)}`, {
+    preflightConstructorDataset: (file) => request(`/api/plan-constructor/plan/upload?filename=${encodeURIComponent(file.name)}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/octet-stream'},
       body: file,
+    }),
+    continueConstructorDataset: (uploadId) => request(`/api/plan-constructor/plan/upload/${encodeURIComponent(uploadId)}/continue`, {
+      method: 'POST',
     }),
     buildConstructorPlan: (scenario) => request('/api/plan-constructor/plan', {
       method: 'POST',
@@ -59,5 +62,19 @@ window.postcodeApi = (() => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({draft_id: draftId}),
     }),
+    applyConstructorRecommendation: (draftId, recommendationId) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/recommendations/apply`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({recommendation_id: recommendationId}),
+    }),
+    rejectConstructorRecommendation: (draftId, recommendationId) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/recommendations/reject`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({recommendation_id: recommendationId}),
+    }),
+    applyAllConstructorRecommendations: (draftId) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/recommendations/apply-all`, {method: 'POST'}),
+    refreshConstructorRecommendations: (draftId, revision) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/recommendations/refresh`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({revision}),
+    }),
+    undoConstructorChange: (draftId, changeId) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/changes/undo`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({change_id: changeId}),
+    }),
+    resetConstructorDraft: (draftId) => request(`/api/plan-constructor/drafts/${encodeURIComponent(draftId)}/reset`, {method: 'POST'}),
   });
 })();

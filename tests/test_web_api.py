@@ -45,7 +45,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn('data-constructor-mode="upload"', page.text)
         self.assertNotIn('id="constructorAutoResult"', page.text)
 
-    def test_plan_contract_is_json_serializable_and_preserves_source_ids(self) -> None:
+    def test_current_plan_contract_excludes_historical_done_and_preserves_active_source_ids(self) -> None:
         response = self.client.get("/api/plan")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -56,8 +56,12 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         tasks = payload["tasks"]
         self.assertTrue(tasks)
         with (PROCESSED_DIR / "tasks.csv").open(encoding="utf-8-sig", newline="") as source:
-            source_ids = {row["task_id"] for row in csv.DictReader(source)}
-        self.assertEqual({task["task_id"] for task in tasks}, source_ids)
+            active_source_ids = {
+                row["task_id"] for row in csv.DictReader(source)
+                if row["status"].strip().casefold() != "done"
+            }
+        self.assertEqual({task["task_id"] for task in tasks}, active_source_ids)
+        self.assertFalse(any(task["status"] == "DONE" for task in tasks))
         self.assertTrue(any(task["initiative_id"] for task in tasks))
         self.assertTrue(any(task["multi_sprint"] for task in tasks))
 
@@ -78,6 +82,16 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("original_team_id", tasks[0])
         self.assertIn("assigned_team_id", tasks[0])
         self.assertTrue(any(task["team_reassigned"] for task in tasks))
+        planned = [task for task in tasks if task["status"] == "PLANNED"]
+        self.assertTrue(all(task["ownership"]["valid"] for task in planned))
+        for task in planned:
+            ownership = task["ownership"]
+            if ownership["external_hours"] > 0:
+                self.assertGreater(ownership["owner_hours"], ownership["external_hours"])
+                self.assertGreaterEqual(
+                    ownership["owner_engineer_count"],
+                    ownership["external_engineer_count"],
+                )
 
         task_id = tasks[0]["task_id"]
         response = self.client.get(f"/api/tasks/{task_id}")
@@ -185,7 +199,8 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("escapeHtml", app_source)
         self.assertIn("localStorage", constructor_source)
         self.assertIn("buildConstructorPlan", constructor_source)
-        self.assertIn("buildConstructorPlanFromDataset", constructor_source)
+        self.assertIn("preflightConstructorDataset", constructor_source)
+        self.assertIn("continueConstructorDataset", constructor_source)
         self.assertIn("previewPlan = planResult", constructor_source)
         self.assertIn("approveConstructorPlan", constructor_source)
         self.assertIn("invalidatePreview", constructor_source)
@@ -282,6 +297,42 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("previewPlan = planResult", constructor_source)
         self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
         self.assertIn("onPlanApproved(approvedPlan);", constructor_source)
+
+    def test_constructor_kpi_uses_backend_percent_without_second_multiplication(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("format(parsed)", constructor_source)
+        self.assertNotIn("Number(value) * 100", constructor_source)
+        self.assertNotIn("Math.round(expectedKpi * 100)", constructor_source)
+        self.assertIn("KPI недоступен", constructor_source)
+
+    def test_constructor_renders_changed_task_effect_without_reoptimizing(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("changed_tasks", constructor_source)
+        self.assertIn("scrollIntoView", constructor_source)
+        self.assertIn("task-card--just-added", constructor_source)
+        self.assertIn("prefers-reduced-motion", constructor_source)
+        self.assertIn("applyOptimisticDelta", constructor_source)
+        self.assertNotIn("refreshRecommendations(draftId", constructor_source)
+
+    def test_recommendation_ui_uses_work_volume_and_saved_best_state(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Лучший найденный вариант выбран", constructor_source)
+        self.assertIn("Перераспределение задач", constructor_source)
+        self.assertIn("Помощь между командами", constructor_source)
+        self.assertIn("После подключения", constructor_source)
+        self.assertIn("Кто выполняет работу", constructor_source)
+        self.assertIn("Основная команда", constructor_source)
+        self.assertIn("Внешняя помощь", constructor_source)
+        self.assertIn("Команда выполняет", constructor_source)
+        self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+
+    def test_task_detail_groups_owner_team_and_external_help(self) -> None:
+        self.assertIn("Основная команда —", self.app)
+        self.assertIn("Помощь других команд", self.app)
+        self.assertIn("task.ownership", self.app)
+        self.assertIn("Команда выполняет ${number(ownership.owner_share_percent)}%", self.app)
+        self.assertNotIn("'Cross-team'", self.app)
+        self.assertNotIn("'Доля bucket'", self.app)
 
     def test_home_plan_links_open_current_plan(self) -> None:
         home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
@@ -447,6 +498,28 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("item.state === 'HISTORICAL_DONE'", self.app)
         self.assertIn("dependency-satisfied", self.app)
         self.assertIn("item.status_message", self.app)
+
+    def test_manual_constructor_keeps_historical_done_visible_and_read_only(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("Завершена до начала планирования", constructor_source)
+        self.assertIn("data-constructor-pick=\"tasks\"", constructor_source)
+        self.assertIn("${completed ? 'disabled' : ''}", constructor_source)
+        self.assertIn("data-open-task=\"${esc(task.task_id)}\"", constructor_source)
+
+    def test_excel_preflight_modal_is_user_facing_and_requires_confirmation(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        api_source = (self.frontend / "api.js").read_text(encoding="utf-8")
+        styles = (self.frontend / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="dataPreflightDialog"', self.html)
+        self.assertIn("Проверка данных", self.html)
+        self.assertIn("Продолжить с этими данными", constructor_source)
+        self.assertIn("Загрузить исправленный файл", constructor_source)
+        self.assertIn("preflightConstructorDataset", api_source)
+        self.assertIn("continueConstructorDataset", api_source)
+        self.assertIn("preflight.status === 'blocked'", constructor_source)
+        self.assertIn("preflight?.status === 'blocked' || preflight?.status === 'review_required'", constructor_source)
+        self.assertIn("max-height:84vh", styles)
 
 
 if __name__ == "__main__":
