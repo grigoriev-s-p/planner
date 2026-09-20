@@ -159,6 +159,40 @@ class ProductAPIIntegrationTests(unittest.TestCase):
             "AVAILABLE_PERSISTENT_CATALOG",
         )
 
+    def test_star_map_exposes_general_and_quarter_modes(self) -> None:
+        payload = self.client.get("/api/star-map").json()
+        self.assertTrue(payload["teams"])
+        for team in payload["teams"]:
+            modes = team["competency_modes"]
+            self.assertIn("all", modes)
+            self.assertIn("quarter", modes)
+            self.assertGreaterEqual(
+                len(modes["all"]["technologies"]),
+                len(modes["quarter"]["technologies"]),
+            )
+            self.assertTrue(
+                all(item["team_bus_factor"] > 0 for item in modes["all"]["roles"])
+            )
+            for mode_name in ("all", "quarter"):
+                counts = modes[mode_name]["zone_counts"]
+                self.assertEqual(
+                    counts["total"],
+                    counts["critical"] + counts["limited"] + counts["stable"],
+                )
+
+    def test_star_map_frontend_has_quarter_toggle_and_static_graph(self) -> None:
+        frontend = Path(__file__).resolve().parents[1] / "frontend"
+        html = (frontend / "index.html").read_text(encoding="utf-8")
+        app_source = (frontend / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="starQuarterOnly"', html)
+        self.assertIn("function starGraph", app_source)
+        self.assertNotIn("startStarGraphForce", app_source)
+        self.assertIn('id="selectedCompetencyPanel"', html)
+        star_html = html.split('id="page-star"', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("ЗВЁЗДНАЯ КАРТА КОМАНДЫ", star_html)
+        self.assertNotIn("РИСКИ И BUS FACTOR", star_html)
+
     def test_kpi_endpoint_exposes_structured_unavailable_fact_without_internal_ids(self) -> None:
         response = self.client.get("/api/kpis")
         self.assertEqual(response.status_code, 200)
@@ -169,19 +203,14 @@ class ProductAPIIntegrationTests(unittest.TestCase):
 
         expected = payload["expected_kpi"]
         self.assertEqual(expected["completed_initiatives"], 2)
-        week0_tasks = (
-            self.dashboard.get("_planning_state", {})
-            .get("tables", {})
-            .get("tasks", [])
-        )
-        initial_pool = {
-            item.get("initiative_id")
-            for item in week0_tasks
-            if item.get("initiative_id")
-            and str(item.get("status") or "").strip().casefold()
-            in {"todo", "inprogress"}
-            and not item.get("is_placeholder")
-        }
+        with (PROCESSED_DIR / "tasks.csv").open(encoding="utf-8-sig", newline="") as source:
+            initial_pool = {
+                row["initiative_id"]
+                for row in csv.DictReader(source)
+                if row.get("initiative_id")
+                and str(row.get("status") or "").strip().casefold()
+                in {"todo", "inprogress"}
+            }
         self.assertEqual(expected["baseline_initiatives"], len(initial_pool))
         self.assertEqual(
             expected["incomplete_initiatives"],
@@ -492,11 +521,13 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('href="/styles.css?v=', response.text)
         self.assertIn('src="/app.js?v=', response.text)
 
-    def test_replanning_page_no_longer_shows_unfinished_notice(self) -> None:
+    def test_replanning_page_uses_live_review_flow(self) -> None:
         self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 0)
         self.assertNotIn('id="risksDevelopmentNotice"', self.html)
-        self.assertIn('id="recalcDevelopmentNotice"', self.html)
-        self.assertIn("submitReplanningFile", self.app)
+        self.assertNotIn('id="recalcDevelopmentNotice"', self.html)
+        self.assertIn('id="recalcResult"', self.html)
+        self.assertIn("function renderRecalc", self.app)
+        self.assertIn("hasPendingReplan", self.app)
 
     def test_risk_page_uses_three_actionable_alert_types(self) -> None:
         self.assertIn('data-risk-filter="Сроки"', self.html)

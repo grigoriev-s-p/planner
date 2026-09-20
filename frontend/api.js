@@ -41,6 +41,7 @@ window.postcodeApi = (() => {
     getEngineers: () => request('/api/engineers'),
     getEngineer: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}`),
     getEngineerHistory: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}/history`),
+    getEngineerWorkspace: (engineerId) => request(`/api/engineer-workspace/${encodeURIComponent(engineerId)}`),
     getStarMap: () => request('/api/star-map'),
     getConstructorCatalog: () => request('/api/plan-constructor/catalog'),
     getArchiveReasons: () => request('/api/catalog/archive-reasons'),
