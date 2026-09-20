@@ -48,6 +48,7 @@ from .entity_projections import (
     build_team_history,
     build_team_projection,
 )
+from .lifecycle import capture_closed_sprint, project_lifecycle
 from src.planning.task_states import is_historical_done
 
 
@@ -97,6 +98,7 @@ class ActualTaskResultRequest(BaseModel):
 
 class SprintActualRequest(BaseModel):
     sprint_number: int = Field(ge=1, le=6)
+    all_completed: bool = False
     results: list[ActualTaskResultRequest] = Field(default_factory=list)
 
 
@@ -317,9 +319,15 @@ class PlanDraftStore:
         return "fingerprint:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _actual_fingerprint(sprint_number: int, results: list[dict]) -> str:
+    def _actual_fingerprint(
+        sprint_number: int, results: list[dict], all_completed: bool = False
+    ) -> str:
         raw = json.dumps(
-            {"sprint_number": sprint_number, "results": results},
+            {
+                "sprint_number": sprint_number,
+                "all_completed": all_completed,
+                "results": results,
+            },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -327,7 +335,12 @@ class PlanDraftStore:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _validate_sprint_actual(approved: dict, sprint_number: int, results: list[dict]) -> None:
+    def _validate_sprint_actual(
+        approved: dict,
+        sprint_number: int,
+        results: list[dict],
+        all_completed: bool = False,
+    ) -> None:
         state = approved.get("_planning_state") or {}
         tables = state.get("tables") or {}
         if not tables:
@@ -341,10 +354,32 @@ class PlanDraftStore:
         unknown = sorted(set(task_ids) - known_ids)
         if unknown:
             raise ValueError("Неизвестные task_id в факте: " + ", ".join(unknown))
+        if all_completed and any(not row.get("task_completed") for row in results):
+            raise ValueError(
+                "При all_completed=true нельзя передавать незавершённые задачи."
+            )
+        if all_completed:
+            due_ids = {
+                task_id
+                for task_id, task in _task_map(approved).items()
+                if not is_historical_done(task)
+                and int(task.get("completion_sprint") or 0) == sprint_number
+            }
+            unexpected = sorted(set(task_ids) - due_ids)
+            if unexpected:
+                raise ValueError(
+                    "При all_completed=true можно передать только задачи, "
+                    f"завершающиеся в Sprint {sprint_number}: "
+                    + ", ".join(unexpected)
+                )
         for row in results:
             if not row.get("task_completed") and not row.get("remaining_role_hours"):
                 raise ValueError(
                     f"Для незавершённой задачи {row.get('task_id')} укажите remaining_role_hours."
+                )
+            if not row.get("task_completed") and not row.get("incomplete_reason"):
+                raise ValueError(
+                    f"Для незавершённой задачи {row.get('task_id')} укажите причину."
                 )
 
     def _save_replan_workflow(self, workflow: dict) -> dict:
@@ -407,6 +442,7 @@ class PlanDraftStore:
             }
             workflow.update({
                 "status": "READY_FOR_REVIEW",
+                "replanning_required": True,
                 "draft_plan": candidate,
                 "diff": deepcopy((candidate.get("replanning") or {}).get("diff") or {}),
                 "kind": (
@@ -426,32 +462,163 @@ class PlanDraftStore:
         except Exception as error:
             workflow.update({
                 "status": "REPLANNING_FAILED",
+                "replanning_required": True,
                 "draft_plan": None,
                 "diff": None,
                 "error": str(error),
             })
         return self._save_replan_workflow(workflow)
 
-    def close_sprint(self, sprint_number: int, results: list[dict]) -> dict:
-        """Persist actual first, then produce a reviewable draft without approving it."""
+    def _close_without_replanning(
+        self,
+        approved: dict,
+        sprint_number: int,
+        results: list[dict],
+        workflow: dict,
+    ) -> dict:
+        """Close a successful sprint while preserving the approved future plan."""
 
-        approved = self.approved()
-        if approved is None:
-            raise RuntimeError("Сначала утвердите квартальный план.")
-        self._validate_sprint_actual(approved, sprint_number, results)
-        base_token = self._approved_token(approved)
-        actual_fingerprint = self._actual_fingerprint(sprint_number, results)
+        candidate = deepcopy(approved)
+        state = deepcopy(candidate.get("_planning_state") or {})
+        tasks = _task_map(approved)
+        due_ids = {
+            task_id
+            for task_id, task in tasks.items()
+            if not is_historical_done(task)
+            and int(task.get("completion_sprint") or 0) == sprint_number
+        }
+        supplied = {str(row.get("task_id") or ""): row for row in results}
+
+        actual_by_task = {
+            task_id: {
+                **deepcopy(supplied.get(task_id) or {}),
+                "task_id": task_id,
+                "task_completed": True,
+                "remaining_role_hours": {},
+                "remaining_engineer_allocations": {},
+                "unavailable_next_sprint": False,
+                "unavailable_engineer_ids": [],
+                "auto_completed": task_id not in supplied,
+            }
+            for task_id in sorted(due_ids)
+        }
+        completed = {
+            **{
+                str(task_id): int(completed_sprint)
+                for task_id, completed_sprint
+                in (state.get("actual_completed_tasks") or {}).items()
+            },
+            **{task_id: sprint_number for task_id in due_ids},
+        }
+
+        tables = deepcopy(state.get("tables") or {})
+        for task in tables.get("tasks", []):
+            if str(task.get("task_id")) in due_ids:
+                task["status"] = "Done"
+        state["tables"] = tables
+        state["completed_through_sprint"] = sprint_number
+        state["actual_completed_tasks"] = completed
+        state["actual_results"] = [
+            *(state.get("actual_results") or []),
+            *[
+                {**deepcopy(actual_by_task[task_id]), "sprint_number": sprint_number}
+                for task_id in sorted(actual_by_task)
+            ],
+        ]
+        closed_history = [
+            deepcopy(row)
+            for row in state.get("closed_sprint_history") or []
+            if int(row.get("sprint_number") or 0) != sprint_number
+        ]
+        closed_history.append(
+            capture_closed_sprint(approved, sprint_number, actual_by_task)
+        )
+        closed_history.sort(key=lambda row: int(row.get("sprint_number") or 0))
+        state["closed_sprint_history"] = closed_history
+        if sprint_number == 6:
+            state["quarter_status"] = "COMPLETED"
+        candidate["_planning_state"] = state
+
+        for task in candidate.get("tasks", []):
+            if str(task.get("task_id")) in due_ids:
+                task["status"] = "DONE"
+                task["status_label"] = "Завершена"
+
+        quarter_completed = sprint_number == 6
+        current_sprint = 6 if quarter_completed else sprint_number + 1
+        quarter = candidate.setdefault("plan", {}).setdefault("quarter", {})
+        quarter["current_sprint"] = current_sprint
+        quarter["current_sprint_source"] = "sprint_close_actual"
+        candidate["replanning"] = {
+            **deepcopy(candidate.get("replanning") or {}),
+            "completed_through_sprint": sprint_number,
+            "frozen_sprints": list(range(1, sprint_number + 1)),
+            "remaining_sprints": list(range(sprint_number + 1, 7)),
+            "quarter_status": "COMPLETED" if quarter_completed else "IN_PROGRESS",
+            "replanning_required": False,
+        }
+        candidate["revision_context"] = {
+            "previous_approved_revision": (
+                approved.get("approved_snapshot") or {}
+            ).get("revision"),
+            "closed_sprint": sprint_number,
+            "actual_result_sprint": sprint_number,
+            "trigger": "SPRINT_CLOSE_NO_REPLAN",
+            "workflow_id": workflow["workflow_id"],
+        }
+        saved = self.replace_approved(candidate)
+        workflow.update({
+            "status": "SPRINT_CLOSED",
+            "kind": "QUARTER_CLOSED" if quarter_completed else "SPRINT_CLOSED",
+            "replanning_required": False,
+            "current_sprint": current_sprint,
+            "quarter_completed": quarter_completed,
+            "approved_revision": (saved.get("approved_snapshot") or {}).get("revision"),
+            "sprint_result": {
+                "completed_task_ids": sorted(due_ids),
+                "unfinished_task_ids": [],
+                "completed_count": len(due_ids),
+                "unfinished_count": 0,
+                "task_results": [deepcopy(actual_by_task[key]) for key in sorted(actual_by_task)],
+            },
+            "draft_plan": None,
+            "diff": None,
+            "error": None,
+        })
+        return self._save_replan_workflow(workflow)
+
+    def close_sprint(
+        self,
+        sprint_number: int,
+        results: list[dict],
+        all_completed: bool = False,
+    ) -> dict:
+        """Close a successful sprint or create a review draft for deviations."""
+
         with self._lock:
+            approved = self.approved()
+            if approved is None:
+                raise RuntimeError("Сначала утвердите квартальный план.")
+            self._validate_sprint_actual(
+                approved, sprint_number, results, all_completed=all_completed
+            )
+            base_token = self._approved_token(approved)
+            actual_fingerprint = self._actual_fingerprint(
+                sprint_number, results, all_completed=all_completed
+            )
             latest = self.replan_workflow()
             if (
                 latest
-                and latest.get("status") != "APPROVED"
                 and latest.get("base_approved_token") == base_token
                 and int(latest.get("sprint_number") or 0) == sprint_number
             ):
                 if latest.get("actual_fingerprint") != actual_fingerprint:
                     raise RuntimeError(
                         "Факт этого спринта уже сохранён. Используйте существующий черновик или повторите пересчёт."
+                    )
+                if all_completed and latest.get("status") == "ACTUAL_SAVED":
+                    return self._close_without_replanning(
+                        approved, sprint_number, results, latest
                     )
                 return latest
             now = datetime.now(timezone.utc).isoformat()
@@ -464,8 +631,13 @@ class PlanDraftStore:
                     approved.get("approved_snapshot") or {}
                 ).get("revision"),
                 "actual_fingerprint": actual_fingerprint,
-                "actual": {"sprint_number": sprint_number, "results": deepcopy(results)},
+                "actual": {
+                    "sprint_number": sprint_number,
+                    "all_completed": all_completed,
+                    "results": deepcopy(results),
+                },
                 "actual_persisted": True,
+                "replanning_required": not all_completed,
                 "draft_plan": None,
                 "diff": None,
                 "error": None,
@@ -473,6 +645,10 @@ class PlanDraftStore:
                 "updated_at": now,
             }
             workflow = self._save_replan_workflow(workflow)
+            if all_completed:
+                return self._close_without_replanning(
+                    approved, sprint_number, results, workflow
+                )
             return self._build_replan_workflow(workflow, approved)
 
     def retry_replanning(self, workflow_id: str) -> dict:
@@ -674,28 +850,163 @@ def _with_lifecycle(payload: dict, entity_type: str, entity_id: str) -> dict:
 def _current_dashboard() -> dict:
     # The persistent working catalog is the source of the current plan after a
     # restart as well; an approved in-memory draft still takes precedence.
+    approved = plan_drafts.approved()
     current = _current_plan_without_historical_done(
-        plan_drafts.approved() or deepcopy(_catalog_service().dashboard)
+        approved or deepcopy(_catalog_service().dashboard)
     )
-    state = current.get("_planning_state") or {}
-    completed_through = int(state.get("completed_through_sprint") or 0)
-    quarter = current.setdefault("plan", {}).setdefault("quarter", {})
-    quarter["current_sprint"] = (
-        6 if state.get("quarter_status") == "COMPLETED"
-        else min(completed_through + 1, 6)
-    )
-    quarter["current_sprint_source"] = (
-        "replanning_state" if completed_through else quarter.get("current_sprint_source", "default_without_replanning_fact")
-    )
-    for sprint in current.get("plan", {}).get("sprints", []):
-        number = int(sprint.get("sprint_number") or 0)
-        sprint["status"] = (
-            "COMPLETED" if number <= completed_through
-            else "CURRENT" if number == quarter["current_sprint"] and state.get("quarter_status") != "COMPLETED"
-            else "PLANNED"
-        )
+    history = plan_drafts.history() if approved is not None else []
+    current = project_lifecycle(current, history)
+    current = _apply_canonical_expected_initiatives(current)
     current.setdefault("features", {})["replanning"] = "AVAILABLE"
     return current
+
+
+def _canonical_expected_initiatives(payload: dict) -> dict[str, object]:
+    """Build one expected-initiative result for KPI and initiative lists.
+
+    The Week-0 task membership is immutable.  A task is expected to complete
+    when it is factually Done or still has a valid plan completion inside the
+    six-sprint quarter.  This keeps historical Done tasks and moved/carry-over
+    tasks in the same calculation as the current plan.
+    """
+
+    state = payload.get("_planning_state") or {}
+    baseline_tables = state.get("baseline_tables") or state.get("tables") or {}
+    baseline_by_initiative: dict[str, set[str]] = {}
+    for task in baseline_tables.get("tasks") or []:
+        task_id = str(task.get("task_id") or "").strip()
+        initiative_id = str(task.get("initiative_id") or "").strip()
+        status = str(task.get("status") or "").strip().casefold()
+        if (
+            task_id
+            and initiative_id
+            and status in {"todo", "inprogress"}
+            and not bool(task.get("is_placeholder"))
+        ):
+            baseline_by_initiative.setdefault(initiative_id, set()).add(task_id)
+
+    current_tasks = {
+        str(task.get("task_id")): task
+        for task in payload.get("tasks") or []
+        if task.get("task_id")
+    }
+    actual_done = {
+        str(task_id)
+        for task_id in (state.get("actual_completed_tasks") or {})
+        if task_id
+    }
+
+    def task_is_expected(task_id: str) -> bool:
+        if task_id in actual_done:
+            return True
+        task = current_tasks.get(task_id)
+        if not task:
+            return False
+        current_status = str(task.get("current_status") or "").strip().upper()
+        if current_status == "DONE" or is_historical_done(task):
+            return True
+        status = str(task.get("status") or "").strip().upper()
+        completion = task.get("completion_sprint")
+        try:
+            completion_sprint = int(completion)
+        except (TypeError, ValueError):
+            return False
+        return status in {"PLANNED", "MOVED", "COMPLETED", "IN_PROGRESS"} and (
+            completion_sprint <= 6
+        )
+
+    completed_ids = {
+        initiative_id
+        for initiative_id, task_ids in baseline_by_initiative.items()
+        if task_ids and all(task_is_expected(task_id) for task_id in task_ids)
+    }
+    incomplete_ids = set(baseline_by_initiative) - completed_ids
+    return {
+        "week0_total_initiatives": len(baseline_by_initiative),
+        "completed_initiative_ids": tuple(sorted(completed_ids)),
+        "incomplete_initiative_ids": tuple(sorted(incomplete_ids)),
+    }
+
+
+def _apply_canonical_expected_initiatives(payload: dict) -> dict:
+    """Align expected KPI and both initiative lists to one canonical result."""
+
+    result = _canonical_expected_initiatives(payload)
+    completed_ids = set(result["completed_initiative_ids"])
+    incomplete_ids = set(result["incomplete_initiative_ids"])
+    denominator = int(result["week0_total_initiatives"])
+    if denominator == 0:
+        return payload
+    initiatives_by_id = {
+        str(row.get("initiative_id")): row
+        for row in payload.get("initiatives") or []
+        if row.get("initiative_id")
+    }
+    baseline_tables = (payload.get("_planning_state") or {}).get("baseline_tables") or {}
+    current_tasks = {
+        str(task.get("task_id")): task
+        for task in payload.get("tasks") or []
+        if task.get("task_id")
+    }
+    actual_done = {
+        str(task_id)
+        for task_id in ((payload.get("_planning_state") or {}).get("actual_completed_tasks") or {})
+        if task_id
+    }
+
+    def is_expected_task(task_id: str) -> bool:
+        if task_id in actual_done:
+            return True
+        task = current_tasks.get(task_id)
+        if not task:
+            return False
+        if str(task.get("current_status") or "").upper() == "DONE" or is_historical_done(task):
+            return True
+        try:
+            completion_sprint = int(task.get("completion_sprint"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            completion_sprint <= 6
+            and str(task.get("status") or "").upper()
+            in {"PLANNED", "MOVED", "COMPLETED", "IN_PROGRESS"}
+        )
+
+    baseline_tasks_by_initiative: dict[str, list[str]] = {}
+    for task in baseline_tables.get("tasks") or []:
+        initiative_id = str(task.get("initiative_id") or "").strip()
+        task_id = str(task.get("task_id") or "").strip()
+        if initiative_id and task_id and initiative_id in set(completed_ids) | incomplete_ids:
+            baseline_tasks_by_initiative.setdefault(initiative_id, []).append(task_id)
+
+    normalized_initiatives = []
+    for initiative_id in sorted(set(baseline_tasks_by_initiative)):
+        row = deepcopy(initiatives_by_id.get(initiative_id) or {
+            "initiative_id": initiative_id,
+            "selection_reasons": [],
+            "summary": None,
+            "selected_for_plan": False,
+        })
+        row["task_ids"] = sorted(baseline_tasks_by_initiative[initiative_id])
+        row["task_count"] = len(row["task_ids"])
+        row["completed_in_quarter"] = initiative_id in completed_ids
+        row["planned_task_count"] = sum(is_expected_task(task_id) for task_id in row["task_ids"])
+        normalized_initiatives.append(row)
+
+    payload["initiatives"] = normalized_initiatives
+    if isinstance(payload.get("plan"), dict):
+        payload["plan"]["initiatives"] = deepcopy(normalized_initiatives)
+    kpis = payload.setdefault("kpis", {})
+    expected = kpis.setdefault("expected_kpi", {})
+    expected.update({
+        "completed_initiatives": float(len(completed_ids)),
+        "baseline_initiatives": float(denominator),
+        "incomplete_initiatives": float(len(incomplete_ids)),
+        "completion_percent": (
+            len(completed_ids) / denominator * 100 if denominator else None
+        ),
+    })
+    return payload
 
 
 def _dashboard_with_lifecycle() -> dict:
@@ -788,6 +1099,7 @@ def close_sprint(request: SprintActualRequest) -> dict:
         return plan_drafts.close_sprint(
             request.sprint_number,
             [row.model_dump() for row in request.results],
+            all_completed=request.all_completed,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -797,7 +1109,12 @@ def close_sprint(request: SprintActualRequest) -> dict:
 
 @app.get("/api/replanning/draft")
 def current_replan_draft() -> dict:
-    return plan_drafts.replan_workflow() or {"status": "NONE"}
+    workflow = plan_drafts.replan_workflow()
+    if not workflow or workflow.get("status") not in {
+        "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+    }:
+        return {"status": "NONE"}
+    return workflow
 
 
 @app.post("/api/replanning/drafts/{workflow_id}/retry")
@@ -861,6 +1178,13 @@ def task_history(task_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown task_id: {task_id}")
     state = approved.get("_planning_state") or {}
     current = latest.get(task_id)
+    projected = next(
+        (
+            row for row in _current_dashboard().get("tasks", [])
+            if str(row.get("task_id")) == task_id
+        ),
+        None,
+    )
     current_hours = {}
     for row in (state.get("tables") or {}).get("task_role_effort", []):
         if str(row.get("task_id")) == task_id:
@@ -924,6 +1248,8 @@ def task_history(task_id: str) -> dict:
             "planned_sprints": (current or {}).get("planned_sprints") or [],
             "current_sprint_placement": (current or {}).get("planned_sprints") or [],
             "status": (current or {}).get("status"),
+            "current_status": (projected or {}).get("current_status"),
+            "current_status_label": (projected or {}).get("current_status_label"),
         },
         "completed": completed_sprint is not None,
         "completion_sprint": completed_sprint,

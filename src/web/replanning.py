@@ -8,6 +8,7 @@ from typing import Any
 
 from .service import PlanningAPIService
 from src.planning.ownership import evaluate_ownership_rows
+from .lifecycle import capture_closed_sprint
 
 
 def _task_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -83,13 +84,19 @@ def _reference_plan_by_task(tasks: dict[str, dict[str, Any]], closed_sprint: int
 
 
 def _preferred_engineer_hours_by_task(
-    tasks: dict[str, dict[str, Any]], closed_sprint: int
+    tasks: dict[str, dict[str, Any]],
+    closed_sprint: int,
+    carry_over_task_ids: set[str] | None = None,
 ) -> dict[str, dict[str, float]]:
+    carry_over_task_ids = carry_over_task_ids or set()
     result: dict[str, dict[str, float]] = {}
     for task_id, task in tasks.items():
         by_engineer: dict[str, float] = defaultdict(float)
         for row in task.get("allocations") or []:
-            if int(row.get("sprint") or 0) <= closed_sprint:
+            sprint = int(row.get("sprint") or 0)
+            if sprint < closed_sprint or (
+                sprint == closed_sprint and task_id not in carry_over_task_ids
+            ):
                 continue
             engineer_id = row.get("engineer_id")
             if engineer_id:
@@ -125,26 +132,94 @@ def _allocation_view(task: dict[str, Any] | None) -> list[dict[str, Any]]:
     ]
 
 
-def _task_diff_view(task: dict[str, Any] | None) -> dict[str, Any] | None:
+def _task_diff_view(
+    task: dict[str, Any] | None,
+    closed_sprint: int | None = None,
+) -> dict[str, Any] | None:
     if task is None:
         return None
-    allocations = _allocation_view(task)
+    horizon_start = int(closed_sprint or 0)
+    allocations = [
+        row for row in _allocation_view(task)
+        if int(row.get("sprint") or 0) > horizon_start
+    ]
+    planned_sprints = sorted({
+        int(value) for value in task.get("planned_sprints") or []
+        if int(value) > horizon_start
+    })
+    completion_sprint = task.get("completion_sprint")
+    if completion_sprint is not None and int(completion_sprint) <= horizon_start:
+        completion_sprint = None
     return {
         "status": task.get("status"),
         "team_id": task.get("assigned_team_id") or task.get("original_team_id"),
-        "planned_sprints": [int(value) for value in task.get("planned_sprints") or []],
-        "completion_sprint": task.get("completion_sprint"),
+        "rung": task.get("rung"),
+        "planned_sprints": planned_sprints,
+        "completion_sprint": completion_sprint,
         "sp_load_by_sprint": {
-            str(key): float(value or 0.0)
+            str(key): round(float(value or 0.0), 6)
             for key, value in (task.get("sp_load_by_sprint") or {}).items()
+            if int(key) > horizon_start
         },
         "total_hours": round(sum(row["hours"] for row in allocations), 6),
         "allocations": allocations,
+        "reason_codes": [
+            str(reason.get("code"))
+            for reason in (task.get("reasons") or [])
+            if reason.get("code")
+        ],
     }
 
 
+def _allocation_changes(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return manager-visible allocation deltas without ordering noise."""
+
+    def key(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            int(row.get("sprint") or 0),
+            str(row.get("engineer_id") or ""),
+            str(row.get("role") or ""),
+            str(row.get("source_team_id") or ""),
+            str(row.get("owner_team_id") or ""),
+            bool(row.get("cross_team")),
+        )
+
+    left = {key(row): float(row.get("hours") or 0.0) for row in before}
+    right = {key(row): float(row.get("hours") or 0.0) for row in after}
+    changes: list[dict[str, Any]] = []
+    for allocation_key in sorted(set(left) | set(right)):
+        before_hours = round(left.get(allocation_key, 0.0), 6)
+        after_hours = round(right.get(allocation_key, 0.0), 6)
+        if abs(before_hours - after_hours) <= 1e-6:
+            continue
+        if allocation_key not in left:
+            kind = "ADDED"
+        elif allocation_key not in right:
+            kind = "REMOVED"
+        else:
+            kind = "HOURS_CHANGED"
+        changes.append({
+            "kind": kind,
+            "sprint": allocation_key[0],
+            "engineer_id": allocation_key[1] or None,
+            "role": allocation_key[2] or None,
+            "source_team_id": allocation_key[3] or None,
+            "owner_team_id": allocation_key[4] or None,
+            "cross_team": allocation_key[5],
+            "before_hours": before_hours,
+            "after_hours": after_hours,
+        })
+    return changes
+
+
 def _snapshot_diff(
-    before: dict[str, Any], after: dict[str, Any], closed_sprint: int | None = None
+    before: dict[str, Any],
+    after: dict[str, Any],
+    closed_sprint: int | None = None,
+    carry_over_by_task: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Structured, auditable diff between Approved Plan and Replan Draft."""
 
@@ -159,21 +234,42 @@ def _snapshot_diff(
     affected_engineers: set[str] = set()
     type_counts: dict[str, int] = defaultdict(int)
 
+    carry_over_by_task = carry_over_by_task or {}
     for task_id in sorted(set(left) | set(right)):
         old, new = left.get(task_id), right.get(task_id)
-        old_view, new_view = _task_diff_view(old), _task_diff_view(new)
+        old_view = _task_diff_view(old, closed_sprint)
+        new_view = _task_diff_view(new, closed_sprint)
         fields: list[str] = []
+        old_in_future = bool(
+            old_view
+            and old_view["status"] == "PLANNED"
+            and old_view["planned_sprints"]
+        )
+        new_in_future = bool(
+            new_view
+            and new_view["status"] == "PLANNED"
+            and new_view["planned_sprints"]
+        )
+        carry_over = carry_over_by_task.get(task_id)
+        allocation_changes: list[dict[str, Any]] = []
         if old is None:
-            fields = ["ADDED_TO_REMAINING_QUARTER"]
+            if new_in_future:
+                fields = ["ADDED_TO_REMAINING_QUARTER"]
         elif new is None:
-            fields = ["TASK_COMPLETED" if task_id in completed else "TASK_REMOVED"]
+            expected_completion = (
+                task_id in completed
+                and closed_sprint is not None
+                and int(old.get("completion_sprint") or 0) == int(closed_sprint)
+            )
+            if expected_completion:
+                unchanged.append(task_id)
+                continue
+            if old_in_future:
+                fields = ["TASK_COMPLETED" if task_id in completed else "TASK_REMOVED"]
         else:
-            old_in_future = old_view["status"] == "PLANNED" and any(
-                sprint > int(closed_sprint or 0) for sprint in old_view["planned_sprints"]
-            )
-            new_in_future = new_view["status"] == "PLANNED" and any(
-                sprint > int(closed_sprint or 0) for sprint in new_view["planned_sprints"]
-            )
+            if not old_in_future and not new_in_future and carry_over is None:
+                unchanged.append(task_id)
+                continue
             if old_in_future and not new_in_future:
                 fields.append("REMOVED_FROM_REMAINING_QUARTER")
             elif not old_in_future and new_in_future:
@@ -192,15 +288,26 @@ def _snapshot_diff(
             )
             old_allocations = old_view["allocations"]
             new_allocations = new_view["allocations"]
-            if old_allocations != new_allocations:
+            allocation_changes = _allocation_changes(old_allocations, new_allocations)
+            if allocation_changes:
                 old_engineers = {row["engineer_id"] for row in old_allocations if row["engineer_id"]}
                 new_engineers = {row["engineer_id"] for row in new_allocations if row["engineer_id"]}
                 if old_engineers != new_engineers:
                     fields.append("ENGINEERS_CHANGED")
-                if any(row["cross_team"] for row in old_allocations + new_allocations):
+                old_cross_team = {
+                    tuple(sorted(row.items())) for row in old_allocations if row["cross_team"]
+                }
+                new_cross_team = {
+                    tuple(sorted(row.items())) for row in new_allocations if row["cross_team"]
+                }
+                if old_cross_team != new_cross_team:
                     fields.append("CROSS_TEAM_CHANGED")
-                if "HOURS_CHANGED" not in fields:
-                    fields.append("ALLOCATION_CHANGED")
+                if any(row["kind"] == "HOURS_CHANGED" for row in allocation_changes):
+                    fields.append("HOURS_CHANGED")
+                fields.append("ALLOCATION_CHANGED")
+        if carry_over is not None:
+            fields.insert(0, "CARRY_OVER")
+        fields = list(dict.fromkeys(fields))
         if not fields:
             unchanged.append(task_id)
             continue
@@ -217,7 +324,22 @@ def _snapshot_diff(
                     affected_engineers.add(str(row["engineer_id"]))
                 if row.get("source_team_id"):
                     affected_teams.add(str(row["source_team_id"]))
-        if fields[0] == "TASK_COMPLETED":
+        if fields[0] == "CARRY_OVER":
+            scheduled = bool(
+                new_view
+                and new_view.get("status") == "PLANNED"
+                and any(
+                    sprint > int(closed_sprint or 0)
+                    for sprint in new_view.get("planned_sprints") or []
+                )
+            )
+            reason = (
+                "Незавершённый остаток перенесён в оставшийся горизонт."
+                if scheduled
+                else "Незавершённый остаток явно исключён из оставшегося горизонта planner-ом."
+            )
+            classification = "CARRY_OVER"
+        elif fields[0] == "TASK_COMPLETED":
             reason = "Фактически завершена в закрытом спринте."
             classification = "REQUIRED_BY_ACTUAL"
         elif "ADDED_TO_REMAINING_QUARTER" in fields:
@@ -235,7 +357,7 @@ def _snapshot_diff(
         else:
             reason = "Пересчитана после фиксации факта спринта."
             classification = "PLANNER_DECISION"
-        changes.append({
+        change = {
             "task_id": task_id,
             "title": (new or old or {}).get("title") or (new or old or {}).get("summary"),
             "change": fields[0],
@@ -244,10 +366,32 @@ def _snapshot_diff(
             "classification": classification,
             "before": old_view,
             "after": new_view,
-        })
+            "allocation_changes": allocation_changes,
+        }
+        if carry_over is not None:
+            remaining_roles = {
+                str(role): float(hours)
+                for role, hours in (carry_over.get("remaining_role_hours") or {}).items()
+                if float(hours) > 0
+            }
+            change["carry_over"] = {
+                "closed_sprint": closed_sprint,
+                "earliest_remaining_sprint": (
+                    int(closed_sprint) + 1 if closed_sprint is not None else None
+                ),
+                "incomplete_reason": carry_over.get("incomplete_reason"),
+                "remaining_role_hours": remaining_roles,
+                "remaining_total_hours": sum(remaining_roles.values()),
+                "remaining_story_points": (
+                    ((after.get("_planning_state") or {}).get("remaining_story_points") or {}).get(task_id)
+                ),
+                "outcome": "SCHEDULED" if scheduled else "EXCLUDED",
+            }
+        changes.append(change)
     return {
         "closed_sprint": closed_sprint,
         "changed_tasks": changes,
+        "affected_elements": changes,
         "changed_count": len(changes),
         "unchanged_tasks": unchanged,
         "affected_team_ids": sorted(affected_teams),
@@ -258,6 +402,7 @@ def _snapshot_diff(
             "unchanged_tasks": len(unchanged),
             "affected_teams": len(affected_teams),
             "affected_engineers": len(affected_engineers),
+            "has_changes": bool(changes),
         },
     }
 
@@ -420,6 +565,10 @@ def build_remaining_horizon_plan(
         for task_id, row in result_by_id.items()
         if not row.get("task_completed") and row.get("remaining_engineer_allocations")
     }
+    carry_over_task_ids = {
+        task_id for task_id, row in result_by_id.items()
+        if not row.get("task_completed")
+    }
     unavailable_next = {
         str(engineer_id)
         for row in result_by_id.values()
@@ -441,7 +590,10 @@ def build_remaining_horizon_plan(
         if owner_team and any(
             row.get("source_team_id")
             and row.get("source_team_id") != owner_team
-            and int(row.get("sprint") or 0) > sprint_number
+            and (
+                int(row.get("sprint") or 0) > sprint_number
+                or task_id in carry_over_task_ids
+            )
             for row in task.get("allocations") or []
         ):
             cross_team_tasks.add(task_id)
@@ -455,7 +607,7 @@ def build_remaining_horizon_plan(
     }
     reference_plan = _reference_plan_by_task(current_tasks, sprint_number)
     preferred_engineer_hours = _preferred_engineer_hours_by_task(
-        current_tasks, sprint_number
+        current_tasks, sprint_number, carry_over_task_ids
     )
 
     if sprint_number < 6:
@@ -474,6 +626,7 @@ def build_remaining_horizon_plan(
                     sprint_number + 1: unavailable_next
                 },
                 "carry_over_engineer_hours_by_task": carry_over,
+                "carry_over_task_ids": carry_over_task_ids,
                 "prior_task_ownership_by_task": prior_ownership,
                 "story_points_override_by_task": remaining_story_points,
                 "original_total_required_hours_by_task": original_total_hours,
@@ -484,6 +637,30 @@ def build_remaining_horizon_plan(
     else:
         # Sprint 6 closes the quarter. There is no Sprint 7 planner run.
         candidate = deepcopy(approved)
+        for task in candidate.get("tasks") or []:
+            task_id = str(task.get("task_id") or "")
+            if task_id not in carry_over_task_ids:
+                continue
+            task.update({
+                "status": "MOVED",
+                "status_label": "Перенесена",
+                "completion_sprint": None,
+                "outside_quarter": True,
+                "reasons": [{
+                    "code": "QUARTER_OVERFLOW",
+                    "severity": "WARNING",
+                    "title": "Остаток выходит за пределы квартала",
+                    "message": (
+                        f"После закрытия Sprint 6 остаток задачи {task_id} "
+                        "должен быть запланирован в следующем квартале."
+                    ),
+                    "details": {
+                        "task_id": task_id,
+                        "last_sprint": 6,
+                        "resources_committed": False,
+                    },
+                }],
+            })
     completed_ids = set(actual_completed)
     candidate["tasks"] = [row for row in candidate["tasks"] if row["task_id"] not in completed_ids]
     new_tasks = _task_map(candidate)
@@ -495,6 +672,31 @@ def build_remaining_horizon_plan(
         task_id = str(task.get("task_id"))
         if task_id in remaining_story_points:
             task["remaining_story_points"] = remaining_story_points[task_id]
+
+    invalid_carry_over: list[str] = []
+    for task_id in sorted(carry_over_task_ids):
+        task = new_tasks.get(task_id)
+        if task is None:
+            invalid_carry_over.append(f"{task_id}: отсутствует в результате planner")
+            continue
+        scheduled = task.get("status") == "PLANNED" and any(
+            int(value) > sprint_number
+            for value in task.get("planned_sprints") or []
+        )
+        explicitly_excluded = (
+            task.get("status") in {
+                "MOVED", "UNPLANNABLE", "INELIGIBLE_DATA_CONSTRAINT", "UNKNOWN"
+            }
+            and bool(task.get("reasons"))
+        )
+        if not scheduled and not explicitly_excluded:
+            invalid_carry_over.append(
+                f"{task_id}: нет будущего размещения или явной причины исключения"
+            )
+    if invalid_carry_over:
+        raise RuntimeError(
+            "Нарушен invariant carry-over: " + "; ".join(invalid_carry_over)
+        )
 
     old_plan = approved.get("plan") or {}
     new_plan = candidate.get("plan") or {}
@@ -519,12 +721,23 @@ def build_remaining_horizon_plan(
     ):
         current_row["baseline_sp"] = baseline_row.get("baseline_sp")
 
+    closed_sprint_history = [
+        deepcopy(row)
+        for row in state.get("closed_sprint_history") or []
+        if int(row.get("sprint_number") or 0) != sprint_number
+    ]
+    closed_sprint_history.append(
+        capture_closed_sprint(approved, sprint_number, result_by_id)
+    )
+    closed_sprint_history.sort(key=lambda row: int(row.get("sprint_number") or 0))
+
     state.update({
         "tables": tables,
         "baseline_tables": baseline_tables,
         "original_task_baseline": state.get("original_task_baseline") or _immutable_task_baseline(baseline_tables),
         "completed_through_sprint": sprint_number,
         "actual_completed_tasks": actual_completed,
+        "closed_sprint_history": closed_sprint_history,
         "remaining_story_points": remaining_story_points,
         "actual_results": [
             *(state.get("actual_results") or []),
@@ -544,7 +757,16 @@ def build_remaining_horizon_plan(
         "frozen_sprints": list(range(1, sprint_number + 1)),
         "remaining_sprints": list(range(sprint_number + 1, 7)),
         "quarter_status": "COMPLETED" if sprint_number == 6 else "IN_PROGRESS",
-        "diff": _snapshot_diff(approved, candidate, sprint_number),
+        "diff": _snapshot_diff(
+            approved,
+            candidate,
+            sprint_number,
+            {
+                task_id: row
+                for task_id, row in result_by_id.items()
+                if not row.get("task_completed")
+            },
+        ),
     }
     quarter = candidate.setdefault("plan", {}).setdefault("quarter", {})
     quarter["current_sprint"] = 6 if sprint_number == 6 else sprint_number + 1

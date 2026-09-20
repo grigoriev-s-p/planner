@@ -36,6 +36,9 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "title": task.get("title"),
         "initiative_id": task.get("initiative_id"),
         "status": task.get("status"),
+        "current_status": task.get("current_status") or task.get("status"),
+        "current_status_label": task.get("current_status_label") or task.get("status_label"),
+        "actual_completion_sprint": task.get("actual_completion_sprint"),
         "original_story_points": task.get("story_points"),
         "remaining_story_points": task.get("remaining_story_points", task.get("story_points")),
         "remaining_role_hours": deepcopy(task.get("role_requirements") or {}),
@@ -319,6 +322,8 @@ def build_engineer_projection(
         item = {
             **dict(row),
             "task_title": task.get("title"),
+            "task_current_status": task.get("current_status") or task.get("status"),
+            "task_current_status_label": task.get("current_status_label") or task.get("status_label"),
             "owner_team_id": owner_team_id,
             "participation_type": (
                 "CROSS_TEAM"

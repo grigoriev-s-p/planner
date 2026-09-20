@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260919-11">
+  <link rel="stylesheet" href="/styles.css?v=20260920-12">
 </head>
 <body>
   <div class="shell">
@@ -20,7 +20,6 @@
         <button type="button" class="nav-link" data-page="engineers">Инженеры</button>
         <button type="button" class="nav-link" data-page="teams">Команды</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
-        <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
       </nav>
     </header>
@@ -200,7 +199,7 @@
         <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
       </section>
 
-      <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ЗАВЕРШЕНИЕ СПРИНТА</div><h1 id="recalcTitle">Пересчёт плана</h1><p>Загрузите факт закрытого спринта и пересчитайте оставшуюся часть квартала.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcDevelopmentNotice"></div><article class="panel upload-card"><div><div class="eyebrow">ФАКТ ЗАВЕРШЁННОГО СПРИНТА</div><h2>Загрузите фактические результаты</h2><p>JSON должен содержать sprint_number и results. Для незавершённых задач укажите remaining_role_hours.</p><div class="upload-filename" id="uploadFileStatus">Файл не выбран</div></div><div class="upload-actions"><input type="file" id="factInput" accept=".json,application/json" hidden><button class="btn btn-blue" type="button" id="chooseFact">Выбрать JSON с фактом</button><button class="btn btn-outline" type="button" id="runDemo" disabled>Закрыть спринт и пересчитать</button></div></article><div id="recalcPlaceholder" class="panel empty-recalc"><span class="big-icon">↗</span><h2>Что произойдёт</h2><p>Прошедшие спринты останутся неизменными, а задачи и ресурсы будут пересчитаны только для открытой части квартала.</p></div><div id="recalcResult" hidden></div></section>
+      <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ПРОВЕРКА ИЗМЕНЕНИЙ</div><h1 id="recalcTitle">Изменения плана</h1><p id="recalcSubtitle">Проверьте изменения перед утверждением нового плана.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcResult" hidden></div></section>
 
       <section class="page" id="page-star" aria-labelledby="starTitle"><div class="page-intro"><div><div class="eyebrow">TEAM INTELLIGENCE</div><h1 id="starTitle">Звёздная карта</h1><p>Покрытие компетенций команды, кадровые риски и люди, от которых зависит результат.</p></div><div class="page-intro-icon">✳</div></div><div class="subnav" role="tablist" aria-label="Разделы звёздной карты"><button class="subtab active" data-star-tab="teams" type="button" role="tab" aria-selected="true">Карта команды</button><button class="subtab" data-star-tab="skills" type="button" role="tab" aria-selected="false">Навыки</button><button class="subtab" data-star-tab="distribution" type="button" role="tab" aria-selected="false">Распределение</button></div>
         <div id="starTeams" class="star-view active"><div class="panel team-selector"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h2>Выберите команду</h2><p class="hint">Карта и список рисков обновятся вместе.</p></div><div class="team-selector-control"><label for="starTeamSelect">Команда</label><select id="starTeamSelect" aria-label="Выбрать команду"></select></div></div><div id="teamMetrics" class="bf-summary"></div><div id="teamLifecycleActions"></div><div class="bus-factor-layout"><article class="panel competency-map-panel"><div class="panel-heading"><div><div class="eyebrow">КОМАНДА × КОМПЕТЕНЦИИ</div><h2>Карта покрытия</h2></div><button class="info-tip" type="button" aria-label="Что такое Bus Factor" data-tooltip="Bus Factor показывает, сколько инженеров способны покрыть конкретную компетенцию. Чем меньше значение, тем выше зависимость команды от отдельных специалистов.">i</button></div><div id="competencyMap" class="competency-map" aria-live="polite"></div><div id="competencyDetail" class="competency-detail" aria-live="polite"></div></article><aside class="panel bus-risk-panel"><div class="eyebrow">ПРИОРИТЕТЫ</div><h2>Риски и Bus Factor</h2><p class="hint">От наиболее уязвимых компетенций к устойчивым.</p><div id="busRiskList" class="bus-risk-list"></div></aside></div><div class="two-cols"><article class="panel"><div class="eyebrow">СОСТАВ</div><h2>Специалисты</h2><div class="table-scroll" id="teamMembers"></div></article><article class="panel"><div class="eyebrow">ЗАГРУЗКА · ЧАСЫ</div><h2>Доступность команды</h2><div id="teamWorkload"></div></article></div><article class="panel"><div class="eyebrow">ЗАДАЧИ И ИНИЦИАТИВЫ</div><h2>Текущая работа</h2><div id="teamTasks" class="table-scroll"></div></article></div>
@@ -257,6 +256,6 @@
   </div>
   <script src="/api.js?v=20260919-9"></script>
   <script src="/constructor.js?v=20260919-9"></script>
-  <script src="/app.js?v=20260919-10"></script>
+  <script src="/app.js?v=20260920-11"></script>
 </body>
 </html>

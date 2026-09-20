@@ -157,7 +157,7 @@ def test_diff_classifies_added_removed_team_engineer_and_cross_team_changes() ->
     assert "REMOVED_FROM_REMAINING_QUARTER" in changes["REM"]["fields"]
     assert "ADDED_TO_REMAINING_QUARTER" in changes["ADD"]["fields"]
     assert {"TEAM_CHANGED", "SPRINT_CHANGED", "ENGINEERS_CHANGED", "CROSS_TEAM_CHANGED"}.issubset(changes["MOVE"]["fields"])
-    assert changes["DONE"]["change"] == "TASK_COMPLETED"
+    assert "DONE" not in changes
 
 
 def test_frontend_exposes_review_retry_and_explicit_approve_controls() -> None:
@@ -166,6 +166,6 @@ def test_frontend_exposes_review_retry_and_explicit_approve_controls() -> None:
 
     assert "data-approve-replan" in source
     assert "data-retry-replan" in source
-    assert "hydrate(result);" not in source[source.index("async function closeCurrentSprint"):source.index("async function submitReplanningFile")]
+    assert "hydrate(result);" not in source[source.index("async function closeCurrentSprint"):source.index("function renderStar")]
     assert "getReplanDraft" in api_source
     assert "approveReplanDraft" in api_source

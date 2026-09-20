@@ -246,6 +246,7 @@ class BaselineQuarterPlanner:
         actual_completed_tasks: dict[str, int] | None = None,
         unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
         carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+        carry_over_task_ids: set[str] | None = None,
         prior_task_ownership_by_task: Mapping[str, Any] | None = None,
         story_points_override_by_task: Mapping[str, float] | None = None,
         original_total_required_hours_by_task: Mapping[str, float] | None = None,
@@ -277,6 +278,7 @@ class BaselineQuarterPlanner:
             }
             for task_id, allocations in (carry_over_engineer_hours_by_task or {}).items()
         }
+        self.carry_over_task_ids = frozenset(str(task_id) for task_id in (carry_over_task_ids or ()))
         self.prior_task_ownership_by_task = dict(prior_task_ownership_by_task or {})
         self.story_points_override_by_task = {
             str(task_id): max(float(value), 0.0)
@@ -645,9 +647,11 @@ class BaselineQuarterPlanner:
         story_points = self.story_points_override_by_task.get(task_id, source_story_points)
         original_requirements = self.feasibility.task_role_requirements(task_id)
         remaining = dict(original_requirements)
-        total_required_hours = self.original_total_required_hours_by_task.get(
-            task_id, sum(original_requirements.values())
-        )
+        # The immutable original total is used by replanning to derive the
+        # remaining SP before entering the planner.  Allocation must pair that
+        # SP value with the current remaining role-hours, otherwise a changed
+        # scope distorts hours-per-SP and can make valid carry-over disappear.
+        total_required_hours = sum(original_requirements.values())
         trial_ledgers = self._clone_ledgers(ledgers)
         allocations: list[TaskAllocation] = []
         attempts: list[PlacementAttempt] = []
@@ -1443,11 +1447,14 @@ class BaselineQuarterPlanner:
             carryover_ids = [
                 candidate_id
                 for candidate_id in preferred_ids
-                if self.carry_over_engineer_hours_by_task.get(candidate_id)
+                if (
+                    candidate_id in self.carry_over_task_ids
+                    or self.carry_over_engineer_hours_by_task.get(candidate_id)
+                )
                 and (_number(pending[candidate_id].get("rung")) or 0.0) == highest_rung
             ]
-            # Employee-specific unfinished work is committed before new work
-            # can consume that employee's next-sprint availability.
+            # After hard dependency/rung/initiative rules, unfinished work is
+            # continued before new work can consume the same sprint capacity.
             task_id = _select_priority_task_id(
                 carryover_ids or preferred_ids,
                 pending,
@@ -1728,6 +1735,7 @@ def build_quarter_plan(
     actual_completed_tasks: dict[str, int] | None = None,
     unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
     carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
+    carry_over_task_ids: set[str] | None = None,
     prior_task_ownership_by_task: Mapping[str, Any] | None = None,
     story_points_override_by_task: Mapping[str, float] | None = None,
     original_total_required_hours_by_task: Mapping[str, float] | None = None,
@@ -1747,6 +1755,7 @@ def build_quarter_plan(
         actual_completed_tasks=actual_completed_tasks,
         unavailable_engineer_ids_by_sprint=unavailable_engineer_ids_by_sprint,
         carry_over_engineer_hours_by_task=carry_over_engineer_hours_by_task,
+        carry_over_task_ids=carry_over_task_ids,
         prior_task_ownership_by_task=prior_task_ownership_by_task,
         story_points_override_by_task=story_points_override_by_task,
         original_total_required_hours_by_task=original_total_required_hours_by_task,

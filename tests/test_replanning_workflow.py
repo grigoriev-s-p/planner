@@ -149,6 +149,7 @@ def test_close_sprint_api_creates_review_draft_before_replacing_approved(monkeyp
             {
                 "task_id": "C", "task_completed": False,
                 "remaining_role_hours": {"Backend": 40},
+                "incomplete_reason": "Не хватило времени",
             },
         ],
     })
@@ -156,6 +157,7 @@ def test_close_sprint_api_creates_review_draft_before_replacing_approved(monkeyp
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["status"] == "READY_FOR_REVIEW"
+    assert payload["replanning_required"] is True
     assert payload["actual_persisted"] is True
     assert payload["draft_plan"]["replanning"]["completed_through_sprint"] == 1
     assert next(task for task in payload["draft_plan"]["tasks"] if task["task_id"] == "B")["start_sprint"] == 2
