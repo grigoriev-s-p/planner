@@ -28,9 +28,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         for page_id in (
-            "home", "planning", "current-plan", "tasks", "task-detail", "risks", "recalc", "star"
+            "planning", "current-plan", "tasks", "task-detail", "risks", "recalc", "star"
         ):
             self.assertIn(f'id="page-{page_id}"', page.text)
+        self.assertNotIn('id="page-home"', page.text)
         for asset in ("/styles.css", "/api.js", "/constructor.js", "/app.js"):
             self.assertEqual(self.client.get(asset).status_code, 200)
         self.assertNotIn("СЦЕНАРИЙ / 6 СПРИНТОВ", page.text)
@@ -255,7 +256,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertIn("Помощь между командами", constructor_source)
         self.assertIn("Переносы и исключения", constructor_source)
         self.assertIn("hydrate(plannerResult)", app_source)
-        self.assertIn("show('current-plan')", app_source)
+        self.assertIn("show('home')", app_source)
         self.assertIn("automaticEngineers", constructor_source)
         self.assertIn("catalogWithDraft('tasks')", constructor_source)
         self.assertIn("Number(right.expected_velocity_sp || 0)", constructor_source)
@@ -327,13 +328,14 @@ class FrontendRefinementTests(unittest.TestCase):
     def test_top_navigation_includes_task_catalog(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('data-page="constructor"', navigation)
-        for page in ("home", "planning", "current-plan", "tasks", "engineers", "teams", "risks", "recalc", "star"):
+        for page in ("home", "planning", "current-sprint", "tasks", "engineers", "teams", "risks", "star"):
             self.assertIn(f'data-page="{page}"', navigation)
         self.assertIn('data-page="tasks">Задачи</button>', navigation)
         self.assertIn('data-page="engineers">Инженеры</button>', navigation)
         self.assertIn('data-page="teams">Команды</button>', navigation)
         self.assertIn('data-page="planning">Планирование</button>', navigation)
-        self.assertIn('data-page="current-plan">Текущий план</button>', navigation)
+        self.assertNotIn('data-page="current-plan"', navigation)
+        self.assertNotIn('>Текущий план</button>', navigation)
         self.assertIn('id="addTaskFromTasks"', self.html)
         self.assertIn("window.planConstructor.openTaskForm()", self.app)
         self.assertIn("postcode:constructor-task-added", self.app)
@@ -391,9 +393,9 @@ class FrontendRefinementTests(unittest.TestCase):
 
     def test_constructor_approves_preview_before_replacing_current_plan(self) -> None:
         self.assertIn("planning: window.planConstructor.render", self.app)
-        self.assertIn("'current-plan': renderPlanning", self.app)
+        self.assertIn("home: renderPlanning", self.app)
         self.assertIn("hydrate(plannerResult);", self.app)
-        self.assertIn("show('current-plan');", self.app)
+        self.assertIn("show('home');", self.app)
         constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
         self.assertIn("previewPlan = planResult", constructor_source)
         self.assertIn("approveConstructorPlan(previewPlan.draft.id)", constructor_source)
@@ -435,10 +437,26 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertNotIn("'Cross-team'", self.app)
         self.assertNotIn("'Доля bucket'", self.app)
 
-    def test_home_plan_links_open_current_plan(self) -> None:
-        home = self.html.split('id="page-home"', 1)[1].split('id="page-planning"', 1)[0]
-        self.assertIn('data-page="current-plan"', home)
-        self.assertNotIn('data-page="planning"', home)
+    def test_home_is_the_canonical_current_plan_view(self) -> None:
+        navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
+        self.assertIn('data-page="home">Главная</button>', navigation)
+        self.assertNotIn('data-page="current-plan"', navigation)
+        self.assertNotIn('id="page-home"', self.html)
+        self.assertIn('class="page active" id="page-current-plan"', self.html)
+        self.assertIn("function canonicalPage(page)", self.app)
+        self.assertIn("return page === 'current-plan' ? 'home' : page;", self.app)
+        self.assertIn("home: renderPlanning", self.app)
+        self.assertNotIn("function renderHome()", self.app)
+        self.assertEqual(self.app.count("function renderPlanning()"), 1)
+
+    def test_home_navigation_keeps_legacy_and_contextual_returns(self) -> None:
+        self.assertIn("'current-plan'", self.app.split("const knownPages", 1)[1].split(";", 1)[0])
+        self.assertIn("page = canonicalPage(page);", self.app)
+        self.assertIn("const viewPage = page === 'home' ? 'current-plan' : page;", self.app)
+        self.assertIn("element.dataset.page === ({'task-detail': 'tasks'", self.app)
+        self.assertIn('data-page="current-plan">← К текущему плану</button>', self.html)
+        self.assertIn("const nav = event.target.closest('button[data-page]')", self.app)
+        self.assertIn("taskReturnPage: 'home'", self.app)
 
     def test_technical_banner_and_header_version_are_absent(self) -> None:
         self.assertNotIn("dataModeRibbon", self.html + self.app)
@@ -446,13 +464,13 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertNotIn("РЕАЛЬНЫЕ ДАННЫЕ", self.html + self.app)
         self.assertNotIn("Processed dataset", self.html + self.app)
 
-    def test_home_uses_current_planned_sprints_instead_of_source_status(self) -> None:
-        render_home = self.app.split("function renderHome()", 1)[1].split(
-            "function initiativeTaskList", 1
-        )[0]
-        self.assertIn("inQuarter(task) && taskSprints(task).includes(currentSprint())", render_home)
-        self.assertNotIn("source_status", render_home)
-        self.assertNotIn("active.slice", render_home)
+    def test_old_home_landing_is_removed(self) -> None:
+        self.assertNotIn("План на виду", self.html)
+        self.assertNotIn("Команда в фокусе", self.html)
+        self.assertNotIn('id="homeSprints"', self.html)
+        self.assertNotIn('id="homeTasks"', self.html)
+        self.assertNotIn('id="homeRisks"', self.html)
+        self.assertNotIn("data-home-sprint", self.app)
 
     def test_board_renders_six_compact_columns_without_global_horizontal_scroll(self) -> None:
         render_planning = self.app.split("function renderPlanning()", 1)[1].split(
@@ -480,7 +498,7 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('id="taskHeroId"', self.html)
         self.assertIn("$('#taskHeroId').textContent = task.task_id", self.app)
         self.assertIn("taskReturnPage", self.app)
-        self.assertIn("taskReturnPage: 'current-plan'", self.app)
+        self.assertIn("taskReturnPage: 'home'", self.app)
         self.assertIn("show('task-detail')", self.app)
 
     def test_task_catalog_sorts_every_required_column(self) -> None:
@@ -560,6 +578,25 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertLess(board_position, kpi_position)
         self.assertLess(kpi_position, initiatives_position)
         self.assertIn("Ожидаемый KPI плана", self.html)
+
+    def test_kpi_details_use_one_collapsed_inline_toggle(self) -> None:
+        self.assertIn('id="toggleKpiDetails"', self.html)
+        self.assertIn('data-toggle-kpi-details', self.html)
+        self.assertIn('aria-expanded="false"', self.html)
+        self.assertIn('aria-controls="kpiDetails"', self.html)
+        self.assertIn('id="kpiDetails" class="kpi-details" hidden', self.html)
+        self.assertIn('Будут завершены в этом квартале', self.html)
+        self.assertIn('Не будут завершены в этом квартале', self.html)
+        self.assertIn('Почему задачи не вошли в план', self.html)
+        self.assertNotIn('По текущему плану будут выполнены инициативы', self.html)
+        self.assertIn('function updateKpiDetailsToggle()', self.app)
+        self.assertIn('function toggleKpiDetails()', self.app)
+        self.assertIn('state.kpiDetailsExpanded', self.app)
+        self.assertIn('details.hidden = !state.kpiDetailsExpanded', self.app)
+        self.assertIn('Подробнее <span aria-hidden="true">⌄</span>', self.app)
+        self.assertIn('Скрыть подробности <span aria-hidden="true">⌃</span>', self.app)
+        toggle_source = self.app.split('function toggleKpiDetails()', 1)[1].split('function renderPlanning()', 1)[0]
+        self.assertNotIn('getDashboard', toggle_source)
 
     def test_frontend_only_formats_backend_kpi_values(self) -> None:
         render_kpis = self.app.split("function renderKpis()", 1)[1].split(

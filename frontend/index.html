@@ -14,7 +14,6 @@
       <nav class="nav" aria-label="Основная навигация">
         <button type="button" class="nav-link active" data-manager-nav data-page="home">Главная</button>
         <button type="button" class="nav-link" data-manager-nav data-page="planning">Планирование</button>
-        <button type="button" class="nav-link" data-manager-nav data-page="current-plan">Текущий план</button>
         <button type="button" class="nav-link" data-manager-nav data-page="current-sprint">Текущий спринт</button>
         <button type="button" class="nav-link" data-manager-nav data-page="tasks">Задачи</button>
         <button type="button" class="nav-link" data-manager-nav data-page="engineers">Инженеры</button>
@@ -33,15 +32,6 @@
       <section class="page engineer-page" id="page-engineer-sprint" aria-labelledby="engineerSprintTitle"><div id="engineerSprintContent"></div></section>
       <section class="page engineer-page" id="page-engineer-quarter" aria-labelledby="engineerQuarterTitle"><div id="engineerQuarterContent"></div></section>
       <section class="page engineer-page" id="page-engineer-tasks" aria-labelledby="engineerTasksTitle"><div id="engineerTasksContent"></div></section>
-
-      <section class="page active" id="page-home" aria-labelledby="homeTitle">
-        <div class="hero home-hero"><div class="hero-copy"><h1 id="homeTitle">План на виду.<br><em>Команда в фокусе.</em></h1><p>Шесть спринтов, работающие задачи и риски — одна точка входа в сервис.</p><button class="btn btn-white" type="button" data-page="current-plan">Открыть текущий план <span>↗</span></button></div><div class="hero-graphic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="abstract-card one">✦</div><div class="abstract-card two">◎</div><div class="abstract-card three">▦</div></div></div>
-        <div class="section-heading"><h2>Шесть спринтов</h2><button class="text-button" type="button" data-page="current-plan">Текущий план <span>↗</span></button></div>
-        <div id="homeSprints" class="home-sprints"></div>
-        <div class="recalc-banner"><span class="recalc-banner-icon">↻</span><div><h3>Завершили спринт?</h3><p>Откройте текущий спринт и зафиксируйте только фактические отклонения.</p></div><button class="btn btn-blue" type="button" data-page="current-sprint">Открыть текущий спринт →</button></div>
-        <div class="two-cols home-sections"><article class="panel"><div class="panel-heading"><h2>Текущие задачи</h2></div><div id="homeTasks" class="stack"></div></article><article class="panel"><div class="panel-heading"><h2>Ключевые риски</h2><button class="text-button" data-page="risks" type="button">Все риски ↗</button></div><div id="homeRisks" class="stack"></div></article></div>
-        <div class="star-banner"><div class="star-banner-icon">✳</div><div><h2>Узнайте, кто в чём силён</h2><p>Команды, инженеры, технологии, занятость и Bus Factor.</p></div><button class="btn btn-blue" type="button" data-page="star">Посмотреть звёздную карту ↗</button></div>
-      </section>
 
       <section class="page" id="page-planning" aria-labelledby="planningTitle">
         <div class="page-intro"><div><h1 id="planningTitle">Планирование</h1><p>Сформируйте состав задач и команд для построения квартального плана.</p></div><div class="page-intro-icon" aria-hidden="true">✶</div></div>
@@ -80,15 +70,17 @@
         <section id="constructorPreview" class="constructor-preview" hidden aria-live="polite"></section>
       </section>
 
-      <section class="page" id="page-current-plan" aria-labelledby="currentPlanTitle">
+      <section class="page active" id="page-current-plan" aria-labelledby="currentPlanTitle">
         <div class="page-intro planning-hero"><div><h1 id="currentPlanTitle">Текущий план</h1><p>Актуальный квартальный план по спринтам, инициативам и причинам решений.</p></div></div>
         <div class="panel planning-board-panel"><div class="panel-heading align-end"><div><h2>Квартал по спринтам</h2><p class="hint">Нажмите на задачу, чтобы открыть подробную информацию.</p></div><div class="legend"><span><i class="legend-mark blue"></i>Текущий спринт</span></div></div><div class="board-viewport"><div id="sprintBoard" class="sprint-board"></div></div></div>
-        <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">Ожидаемый KPI плана</h2><p class="hint">Результат при успешном выполнении всех задач текущего квартального плана.</p></div></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
-        <div class="initiative-grid">
-          <article class="panel initiative-panel completed-initiatives"><div class="panel-heading"><h2>По текущему плану будут выполнены инициативы</h2><span class="initiative-status-mark success" aria-hidden="true">✓</span></div><div id="completedInitiatives" class="initiative-list"></div></article>
-          <article class="panel initiative-panel incomplete-initiatives"><div class="panel-heading"><h2>Не будут завершены в этом квартале</h2><span class="initiative-status-mark danger" aria-hidden="true">!</span></div><div id="incompleteInitiatives" class="initiative-list"></div></article>
+        <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">Ожидаемый KPI плана</h2><p class="hint">Результат при успешном выполнении всех задач текущего квартального плана.</p></div><button class="kpi-details-toggle" id="toggleKpiDetails" type="button" data-toggle-kpi-details aria-expanded="false" aria-controls="kpiDetails">Подробнее <span aria-hidden="true">⌄</span></button></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
+        <div id="kpiDetails" class="kpi-details" hidden>
+          <div class="initiative-grid">
+            <article class="panel initiative-panel completed-initiatives"><div class="panel-heading"><h2>Будут завершены в этом квартале</h2><span class="initiative-status-mark success" aria-hidden="true">✓</span></div><div id="completedInitiatives" class="initiative-list"></div></article>
+            <article class="panel initiative-panel incomplete-initiatives"><div class="panel-heading"><h2>Не будут завершены в этом квартале</h2><span class="initiative-status-mark danger" aria-hidden="true">!</span></div><div id="incompleteInitiatives" class="initiative-list"></div></article>
+          </div>
+          <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
         </div>
-        <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
       </section>
 
       <section class="page" id="page-current-sprint" aria-labelledby="currentSprintTitle">
@@ -266,6 +258,6 @@
   </div>
   <script src="/api.js?v=20260919-9"></script>
   <script src="/constructor.js?v=20260919-9"></script>
-  <script src="/app.js?v=20260920-11"></script>
+  <script src="/app.js?v=20260921-1"></script>
 </body>
 </html>
