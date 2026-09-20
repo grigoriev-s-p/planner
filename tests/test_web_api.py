@@ -151,6 +151,40 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(first_competency["bus_factor"], len(engineer_ids))
         self.assertEqual(len(engineer_ids), len(set(engineer_ids)))
 
+    def test_star_map_exposes_general_and_quarter_modes(self) -> None:
+        payload = self.client.get("/api/star-map").json()
+        self.assertTrue(payload["teams"])
+        for team in payload["teams"]:
+            modes = team["competency_modes"]
+            self.assertIn("all", modes)
+            self.assertIn("quarter", modes)
+            self.assertGreaterEqual(
+                len(modes["all"]["technologies"]),
+                len(modes["quarter"]["technologies"]),
+            )
+            self.assertTrue(
+                all(item["team_bus_factor"] > 0 for item in modes["all"]["roles"])
+            )
+            for mode_name in ("all", "quarter"):
+                counts = modes[mode_name]["zone_counts"]
+                self.assertEqual(
+                    counts["total"],
+                    counts["critical"] + counts["limited"] + counts["stable"],
+                )
+
+    def test_star_map_frontend_has_quarter_toggle_and_static_graph(self) -> None:
+        frontend = Path(__file__).resolve().parents[1] / "frontend"
+        html = (frontend / "index.html").read_text(encoding="utf-8")
+        app_source = (frontend / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="starQuarterOnly"', html)
+        self.assertIn("function starGraph", app_source)
+        self.assertNotIn("startStarGraphForce", app_source)
+        self.assertIn('id="selectedCompetencyPanel"', html)
+        star_html = html.split('id="page-star"', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("ЗВЁЗДНАЯ КАРТА КОМАНДЫ", star_html)
+        self.assertNotIn("РИСКИ И BUS FACTOR", star_html)
+
     def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
         self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
         self.assertEqual(self.dashboard["features"]["bus_factor"], "AVAILABLE")
