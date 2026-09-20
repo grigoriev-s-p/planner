@@ -49,6 +49,7 @@ from .entity_projections import (
     build_team_projection,
 )
 from .lifecycle import capture_closed_sprint, project_lifecycle
+from .engineer_workspace import build_engineer_workspace
 from src.planning.task_states import is_historical_done
 
 
@@ -1009,6 +1010,106 @@ def _apply_canonical_expected_initiatives(payload: dict) -> dict:
     return payload
 
 
+def _company_star_map_team(engineers: list[dict], teams: list[dict]) -> dict:
+    """Build a company view from already calculated active Star Map data."""
+
+    engineer_ids = sorted({str(item.get("engineer_id")) for item in engineers if item.get("engineer_id")})
+
+    def aggregate(kind: str, quarter: bool = False) -> list[dict]:
+        field = "roles" if kind == "role" else "technologies"
+        label_field = "role" if kind == "role" else "technology"
+        holders: dict[str, set[str]] = {}
+        if quarter:
+            for team in teams:
+                mode = (team.get("competency_modes") or {}).get("quarter") or {}
+                for item in mode.get(field, []):
+                    label = item.get(label_field) or item.get("competency")
+                    if label:
+                        holders.setdefault(str(label), set()).update(item.get("engineer_ids") or [])
+        else:
+            source_field = "roles" if kind == "role" else "skills"
+            for engineer in engineers:
+                engineer_id = engineer.get("engineer_id")
+                if not engineer_id:
+                    continue
+                for label in engineer.get(source_field) or []:
+                    if label:
+                        holders.setdefault(str(label), set()).add(str(engineer_id))
+
+        result = []
+        for label, ids in sorted(holders.items(), key=lambda pair: pair[0].casefold()):
+            unique_ids = sorted({str(value) for value in ids if str(value) in engineer_ids})
+            if not unique_ids:
+                continue
+            result.append({
+                label_field: label,
+                **({"competency": label} if kind == "role" else {}),
+                "team_bus_factor": len(unique_ids),
+                "organization_bus_factor": len(unique_ids),
+                "engineer_ids": unique_ids,
+                "engineer_count": len(unique_ids),
+                "quarter_relevant": quarter,
+                "quarter_engineer_ids": unique_ids,
+                "helpers": [],
+            })
+        return result
+
+    def mode(roles: list[dict], technologies: list[dict]) -> dict:
+        entries = [*roles, *technologies]
+        return {
+            "roles": roles,
+            "technologies": technologies,
+            "entries": entries,
+            "zone_counts": {
+                "critical": sum(1 for item in entries if item["team_bus_factor"] <= 1),
+                "limited": sum(1 for item in entries if item["team_bus_factor"] == 2),
+                "stable": sum(1 for item in entries if item["team_bus_factor"] >= 3),
+                "total": len(entries),
+            },
+        }
+
+    all_technologies = aggregate("technology")
+    all_roles = aggregate("role")
+    quarter_technologies = aggregate("technology", quarter=True)
+    quarter_roles = aggregate("role", quarter=True)
+    modes = {
+        "all": mode(all_roles, all_technologies),
+        "quarter": mode(quarter_roles, quarter_technologies),
+    }
+    technology_counts = modes["all"]["zone_counts"]
+    engineer_by_id = {item.get("engineer_id"): item for item in engineers}
+    competencies = [
+        {
+            "skill": item["technology"],
+            "bus_factor": item["team_bus_factor"],
+            "engineers": [engineer_by_id[value] for value in item["engineer_ids"] if value in engineer_by_id],
+            "external_engineers": [],
+        }
+        for item in all_technologies
+    ]
+    available = bool(all_technologies or all_roles)
+    return {
+        "team_id": "__company__",
+        "team_name": "Вся компания",
+        "scope": "company",
+        "member_ids": engineer_ids,
+        "member_count": len(engineer_ids),
+        "engineer_count": len(engineer_ids),
+        "competencies": competencies,
+        "competency_count": len(all_technologies),
+        "bus_factor_available": available,
+        "summary": {
+            "single_owner_count": technology_counts["critical"],
+            "warning_count": technology_counts["limited"],
+            "healthy_count": technology_counts["stable"],
+        },
+        "status": "AVAILABLE" if available else "INSUFFICIENT_DATA",
+        "message": None if available else "Для компании пока нет данных о компетенциях.",
+        "competency_modes": modes,
+        "graph_competencies": quarter_technologies or all_technologies,
+    }
+
+
 def _dashboard_with_lifecycle() -> dict:
     payload = _current_dashboard()
     repository = get_catalog_repository()
@@ -1030,6 +1131,79 @@ def _dashboard_with_lifecycle() -> dict:
             {**item, **lifecycle_by_task[item["task_id"]]}
             for item in payload["plan"].get("tasks", [])
         ]
+    # Keep the immutable current plan untouched while making the Star Map use
+    # the active catalog for current Bus Factor membership.
+    if isinstance(payload.get("star_map"), dict):
+        active_tables = repository.active_planning_tables()
+        active_bus = build_bus_factor_payload(active_tables)
+        payload["star_map"]["status"] = active_bus.get("status", payload["star_map"].get("status"))
+        payload["star_map"]["bus_factor_status"] = active_bus.get(
+            "status", payload["star_map"].get("bus_factor_status")
+        )
+        payload["star_map"]["bus_factor"] = {
+            **(payload["star_map"].get("bus_factor") or {}),
+            "available": active_bus.get("status") == "AVAILABLE",
+            "method": active_bus.get("method"),
+        }
+        active_team_by_id = {item.get("team_id"): item for item in active_bus.get("teams", [])}
+        active_engineer_ids = {
+            str(row.get("engineer_id"))
+            for row in active_tables.get("engineers", [])
+            if row.get("engineer_id")
+        }
+        payload["star_map"]["engineers"] = [
+            item for item in payload["star_map"].get("engineers", [])
+            if item.get("engineer_id") in active_engineer_ids
+        ]
+        filtered_teams = []
+        for team in payload["star_map"].get("teams", []):
+            active_team = active_team_by_id.get(team.get("team_id"))
+            if active_team is None:
+                continue
+            team["member_ids"] = [
+                engineer_id
+                for engineer_id in team.get("member_ids", [])
+                if engineer_id in active_engineer_ids
+            ]
+            team["member_count"] = len(set(team["member_ids"]))
+            team["engineer_count"] = team["member_count"]
+            team["competencies"] = active_team.get("competencies", [])
+            team["competency_count"] = active_team.get("competency_count", len(team["competencies"]))
+            team["bus_factor_available"] = active_team.get("bus_factor_available", False)
+            team["summary"] = active_team.get("summary", {})
+            team["status"] = active_team.get("status", team.get("status"))
+            team["message"] = active_team.get("message")
+            active_skills = {
+                item.get("skill"): item for item in team["competencies"]
+            }
+            for mode in (team.get("competency_modes") or {}).values():
+                if not isinstance(mode, dict):
+                    continue
+                for item in mode.get("technologies", []):
+                    source = active_skills.get(item.get("technology"))
+                    if source is None:
+                        item["engineer_ids"] = []
+                        item["team_bus_factor"] = 0
+                    else:
+                        item["engineer_ids"] = [
+                            holder.get("engineer_id")
+                            for holder in source.get("engineers", [])
+                            if holder.get("engineer_id") in active_engineer_ids
+                        ]
+                        item["team_bus_factor"] = len(set(item["engineer_ids"]))
+                for item in mode.get("roles", []):
+                    item["engineer_ids"] = [
+                        engineer_id
+                        for engineer_id in item.get("engineer_ids", [])
+                        if engineer_id in active_engineer_ids
+                    ]
+                    item["team_bus_factor"] = len(set(item["engineer_ids"]))
+            filtered_teams.append(team)
+        payload["star_map"]["teams"] = filtered_teams
+        payload["star_map"]["company"] = _company_star_map_team(
+            payload["star_map"].get("engineers", []),
+            filtered_teams,
+        )
     return payload
 
 
@@ -1317,9 +1491,24 @@ def engineer_history(engineer_id: str) -> dict:
     return build_engineer_history(plan_drafts.history(), engineer_id)
 
 
+@app.get("/api/engineer-workspace/{engineer_id}")
+def engineer_workspace(engineer_id: str) -> dict:
+    """Personal projection of the approved plan; drafts are never a fallback."""
+
+    catalog_engineer = next(
+        (item for item in _catalog_service().engineers if item.get("engineer_id") == engineer_id),
+        None,
+    )
+    if catalog_engineer is None:
+        raise HTTPException(status_code=404, detail=f"Unknown active engineer_id: {engineer_id}")
+    return build_engineer_workspace(
+        plan_drafts.approved(), engineer_id, catalog_engineer=catalog_engineer
+    )
+
+
 @app.get("/api/star-map")
 def star_map() -> dict:
-    return _current_dashboard()["star_map"]
+    return _dashboard_with_lifecycle()["star_map"]
 
 
 @app.get("/api/plan-constructor/catalog")
