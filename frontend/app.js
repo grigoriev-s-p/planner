@@ -10,7 +10,8 @@ const state = {
   starCompetencyOpen: false,
   starEngineerSearch: '', starRoleFilters: [],
   workspaceMode: 'manager', engineerWorkspaceId: null, engineerTaskSearch: '', engineerWorkspaceLoading: false,
-  taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
+  taskReturnPage: 'home', loading: true, error: null, archive: null,
+  kpiDetailsExpanded: false,
   taskSortKey: 'task_id', taskSortDirection: 'asc',
   engineerSortKey: 'engineer_id', engineerSortDirection: 'asc',
   teamSortKey: 'name', teamSortDirection: 'asc',
@@ -387,11 +388,18 @@ function updateWorkspaceChrome() {
   document.body.classList.toggle('engineer-mode', engineerMode);
 }
 
+function canonicalPage(page) {
+  return page === 'current-plan' ? 'home' : page;
+}
+
 function show(page, historyMode = 'push') {
   if (page === 'recalc' && data.ready && !hasPendingReplan()) page = 'current-sprint';
+  page = canonicalPage(page);
+  if (page === 'home') state.kpiDetailsExpanded = false;
   state.page = page;
   updateWorkspaceChrome();
-  $$('.page').forEach((element) => element.classList.toggle('active', element.id === `page-${page}`));
+  const viewPage = page === 'home' ? 'current-plan' : page;
+  $$('.page').forEach((element) => element.classList.toggle('active', element.id === `page-${viewPage}`));
   $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === ({'task-detail': 'tasks', 'team-detail': 'teams', 'engineer-detail': 'engineers'}[page] || page)));
   closeEmployee();
   renderPage(page);
@@ -404,14 +412,11 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, 'current-sprint': renderCurrentSprint, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'team-detail': renderTeamDetail, 'engineer-detail': renderEngineerDetail, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar, 'engineer-sprint': renderEngineerSprint, 'engineer-quarter': renderEngineerQuarter, 'engineer-tasks': renderEngineerTasks})[page]?.();
+  ({home: renderPlanning, planning: window.planConstructor.render, 'current-sprint': renderCurrentSprint, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'team-detail': renderTeamDetail, 'engineer-detail': renderEngineerDetail, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar, 'engineer-sprint': renderEngineerSprint, 'engineer-quarter': renderEngineerQuarter, 'engineer-tasks': renderEngineerTasks})[canonicalPage(page)]?.();
 }
 
 function renderUnavailable() {
   const message = state.error ? `Backend недоступен: ${state.error}` : 'Загружаем данные planner…';
-  if ($('#homeSprints')) $('#homeSprints').innerHTML = empty(message);
-  if ($('#homeTasks')) $('#homeTasks').innerHTML = empty(message);
-  if ($('#homeRisks')) $('#homeRisks').innerHTML = empty(message);
   if ($('#tasksListState')) $('#tasksListState').innerHTML = empty(message);
   if ($('#tasksTableWrap')) $('#tasksTableWrap').hidden = true;
   if ($('#engineersListState')) $('#engineersListState').innerHTML = empty(message);
@@ -453,16 +458,6 @@ function gotoEmployee(engineerId) {
   state.engineerDetailTab = 'overview';
   show('engineer-detail');
   loadEngineerDetail(engineerId);
-}
-
-function renderHome() {
-  $('#homeSprints').innerHTML = Array.from({length: 6}, (_, index) => {
-    const sprint = index + 1;
-    return `<button class="home-sprint ${sprint === currentSprint() ? 'current' : ''}" type="button" data-home-sprint="${sprint}"><b>Sprint ${sprint}</b><span>${escapeHtml(sprintStatus(sprint))}</span></button>`;
-  }).join('');
-  const active = data.tasks.filter((task) => inQuarter(task) && taskSprints(task).includes(currentSprint()));
-  $('#homeTasks').innerHTML = active.length ? active.map((task) => `<button class="list-button current-task" data-open-task="${attr(task.task_id)}" type="button"><span><strong>${escapeHtml(task.task_id)} · ${escapeHtml(task.title)}</strong><small>${escapeHtml(task.assigned_team_id)}</small></span><span class="end-label">Открыть ↗</span></button>`).join('') : empty('В текущем спринте нет активных задач.');
-  $('#homeRisks').innerHTML = data.risks.slice(0, 3).map((risk) => `<button class="list-button" type="button" data-open-risk="${attr(risk.risk_id)}"><span><strong>${escapeHtml(risk.title)}</strong><small>${escapeHtml(risk.cause)}</small></span><span class="end-label">${escapeHtml(risk.type)} ↗</span></button>`).join('') || empty('Рассчитанных рисков нет.');
 }
 
 function initiativeTaskList(initiative) {
@@ -535,6 +530,22 @@ function renderKpis() {
   target.innerHTML = `<article class="expected-kpi-card"><div><span>Ожидаемое выполнение квартального плана</span><strong>${percent(expected.completion_percent)}</strong></div><div class="expected-kpi-copy"><p>Будут завершены ${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив первоначального бизнес-пула</p><small>Не будут завершены: ${number(expected.incomplete_initiatives)}</small></div></article>`;
 }
 
+function updateKpiDetailsToggle() {
+  const details = $('#kpiDetails');
+  const button = $('#toggleKpiDetails');
+  if (!details || !button) return;
+  details.hidden = !state.kpiDetailsExpanded;
+  button.setAttribute('aria-expanded', String(state.kpiDetailsExpanded));
+  button.innerHTML = state.kpiDetailsExpanded
+    ? 'Скрыть подробности <span aria-hidden="true">⌃</span>'
+    : 'Подробнее <span aria-hidden="true">⌄</span>';
+}
+
+function toggleKpiDetails() {
+  state.kpiDetailsExpanded = !state.kpiDetailsExpanded;
+  updateKpiDetailsToggle();
+}
+
 function renderPlanning() {
   $('#sprintBoard').innerHTML = Array.from({length: 6}, (_, index) => {
     const sprint = index + 1;
@@ -564,6 +575,7 @@ function renderPlanning() {
   renderKpis();
   renderInitiatives();
   renderExcludedTasks();
+  updateKpiDetailsToggle();
 }
 
 function renderTasks() {
@@ -1900,6 +1912,8 @@ function bindEvents() {
     if (approveReplanButton) { approveReplan(approveReplanButton.dataset.approveReplan); return; }
     const retryReplanButton = event.target.closest('[data-retry-replan]');
     if (retryReplanButton) { retryReplan(retryReplanButton.dataset.retryReplan); return; }
+    const kpiToggle = event.target.closest('[data-toggle-kpi-details]');
+    if (kpiToggle) { toggleKpiDetails(); return; }
     if (event.target.closest('.catalog-skill-more')) return;
     if (event.target.closest('[data-close-sprint-dialog]')) { closeSprintCloseDialog(); return; }
     if (event.target.closest('[data-close-archive]')) { closeArchiveModal(); return; }
@@ -1932,7 +1946,6 @@ function bindEvents() {
       renderTeams();
       return;
     }
-    const homeSprint = event.target.closest('[data-home-sprint]'); if (homeSprint) { const sprint = Number(homeSprint.dataset.homeSprint); show('current-plan'); $(`[data-sprint-column="${sprint}"]`)?.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'}); return; }
     const planTask = event.target.closest('[data-plan-task]'); if (planTask) { closeRiskModal(); gotoTask(planTask.dataset.planTask); return; }
     const task = event.target.closest('[data-open-task]'); if (task) { closeRiskModal(); gotoTask(task.dataset.openTask); return; }
     const risk = event.target.closest('[data-open-risk]'); if (risk) { state.riskId = risk.dataset.openRisk; state.riskFilter = 'Все'; state.riskSearch = ''; state.riskModalOpen = true; show('risks'); return; }
@@ -2059,7 +2072,7 @@ async function initialize() {
     data.archiveReasons = archiveReasons;
     window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
       hydrate(plannerResult);
-      show('current-plan');
+      show('home');
     }, (updatedCatalog) => {
       data.historicalTasks = (updatedCatalog.tasks || [])
         .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
