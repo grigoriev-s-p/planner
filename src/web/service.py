@@ -543,31 +543,46 @@ class PlanningAPIService:
 
     @cached_property
     def kpi_baseline_plan(self) -> QuarterPlan:
-        """Immutable Week-0 snapshot adapted from the initial planner result."""
+        """Immutable Week-0 business pool plus its initial plan assignments."""
 
         items = []
         for task in self.tasks:
-            if task["status"] != "PLANNED" or not task["planned_sprints"]:
+            raw = self._raw_tasks[task["task_id"]]
+            if (
+                is_historical_done(raw)
+                or str(raw.get("status") or "").strip().casefold()
+                not in {"todo", "inprogress"}
+                or bool(raw.get("is_placeholder"))
+                or not task["initiative_id"]
+            ):
                 continue
-            allocations = tuple(
-                SprintAllocation(
-                    sprint_number=int(sprint),
-                    role_hours=tuple(
-                        RoleHoursAllocation(role, float(hours))
-                        for role, hours in sorted(role_hours.items())
-                    ),
+            planned = task["status"] == "PLANNED" and bool(task["planned_sprints"])
+            allocations = (
+                tuple(
+                    SprintAllocation(
+                        sprint_number=int(sprint),
+                        role_hours=tuple(
+                            RoleHoursAllocation(role, float(hours))
+                            for role, hours in sorted(role_hours.items())
+                        ),
+                    )
+                    for sprint, role_hours in sorted(
+                        task["role_hours_by_sprint"].items(),
+                        key=lambda item: int(item[0]),
+                    )
                 )
-                for sprint, role_hours in sorted(
-                    task["role_hours_by_sprint"].items(), key=lambda item: int(item[0])
-                )
+                if planned
+                else ()
             )
             items.append(
                 PlanItem(
                     task_id=task["task_id"],
                     initiative_id=task["initiative_id"],
                     story_points=float(task["story_points"] or 0.0),
-                    completion_sprint=int(task["completion_sprint"]),
-                    state=PlanState.PLANNED,
+                    completion_sprint=(
+                        int(task["completion_sprint"]) if planned else None
+                    ),
+                    state=PlanState.PLANNED if planned else PlanState.MOVED,
                     team_id=task["assigned_team_id"],
                     allocations=allocations,
                 )
@@ -738,6 +753,7 @@ class PlanningAPIService:
                         else "Rung не указан"
                     ),
                     "story_points": explanation.task_story_points,
+                    "remaining_story_points": explanation.task_story_points,
                     "original_team_id": explanation.original_team_id,
                     "assigned_team_id": explanation.assigned_team_id,
                     "team_reassigned": explanation.team_reassigned,
@@ -1505,7 +1521,7 @@ class PlanningAPIService:
             "kpis": self.kpis,
             "features": {
                 "plan_constructor": "AVAILABLE_EPHEMERAL",
-                "replanning": "NOT_IMPLEMENTED",
+                "replanning": "AVAILABLE",
                 "bus_factor": "AVAILABLE",
                 "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
             },

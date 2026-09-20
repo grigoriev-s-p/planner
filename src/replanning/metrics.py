@@ -79,8 +79,10 @@ def _require_same_quarter(*snapshots: QuarterPlan | ActualResults) -> None:
 
 
 def _baseline_by_initiative(original_plan: QuarterPlan) -> dict[str, set[str]]:
+    """Return every initiative/task in the immutable Week-0 business pool."""
+
     baseline: dict[str, set[str]] = {}
-    for item in original_plan.baseline_items():
+    for item in original_plan.items:
         baseline.setdefault(item.initiative_id, set()).add(item.task_id)
     return baseline
 

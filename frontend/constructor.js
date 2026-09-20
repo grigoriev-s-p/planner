@@ -165,12 +165,14 @@ window.planConstructor = (() => {
 
   function previewSprintCard(task, sprint) {
     const continuation = Number(task.start_sprint) < sprint;
+    const sprintSp = Number(task.sp_load_by_sprint?.[String(sprint)] || 0);
+    const sprintHours = Number(task.hours_by_sprint?.[String(sprint)] || 0);
     const helpers = (task.allocations || []).filter((item) => item.sprint === sprint && item.cross_team);
     const helperNote = helpers.length ? `<small class="preview-cross-team">+ ${new Set(helpers.map((item) => item.engineer_id)).size} специалист(а) из другой команды</small>` : '';
     const reassigned = task.team_reassigned && task.original_team_id
       ? `<small class="preview-reassigned">Исходная команда: ${esc(task.original_team_id)}</small>` : '';
     const changed = changedTaskEffects.some((item) => item.task_id === task.task_id);
-    return `<article class="preview-task-card ${continuation ? 'preview-continuation' : ''} ${changed ? 'task-card--just-added' : ''}" data-preview-task="${esc(task.task_id)}" data-preview-sprint="${sprint}"><div><b>${continuation ? '↳ ' : ''}${esc(task.task_id)}</b><span class="rung-badge">R${esc(task.rung)}</span></div><strong>${continuation ? 'Продолжение' : esc(task.title)}</strong><small>${esc(task.assigned_team_id || 'Команда не назначена')}</small>${reassigned}${helperNote}</article>`;
+    return `<article class="preview-task-card ${continuation ? 'preview-continuation' : ''} ${changed ? 'task-card--just-added' : ''}" data-preview-task="${esc(task.task_id)}" data-preview-sprint="${sprint}"><div><b>${continuation ? '↳ ' : ''}${esc(task.task_id)}</b><span class="rung-badge">R${esc(task.rung)}</span></div><strong>${continuation ? 'Продолжение' : esc(task.title)}</strong><small>Всего задачи: ${number(task.story_points)} SP</small><small>В Sprint ${sprint}: ${number(sprintSp)} SP</small><small>Часы в спринте: ${number(sprintHours)} ч</small><small>${esc(task.assigned_team_id || 'Команда не назначена')}</small>${reassigned}${helperNote}</article>`;
   }
 
   function previewCrossTeamRows(plan) {
@@ -539,7 +541,7 @@ window.planConstructor = (() => {
     const allTasks = catalogWithDraft('tasks');
     const tasks = allTasks.filter((task) => `${task.task_id} ${task.title} ${task.initiative_id || ''}`.toLowerCase().includes(taskQuery));
     const selectableTasks = allTasks.filter((task) => !isHistoricalDoneTask(task));
-    $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isHistoricalDoneTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b>${completed ? '<small>✓ Завершена до начала планирования</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
+    $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isHistoricalDoneTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b><small>R${esc(task.rung)} · ${number(task.story_points)} SP</small>${completed ? '<small>✓ Завершена до начала планирования</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
     updateSelectAllIndeterminate();
   }
 
@@ -751,11 +753,11 @@ window.planConstructor = (() => {
         skills: csvValues($c('[name="requirement_skills"]', row).value),
       }));
       const dependsOn = $$c('[name="dependency_id"]:checked', form).map((input) => input.value);
-      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, depends_on: dependsOn, source: existing?.source || 'draft'};
+      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: existing?.source || 'draft'};
       dependsOn.forEach((dependencyId) => {
         if (findDraft('tasks', dependencyId)) return;
         const source = findCatalog('tasks', dependencyId);
-        if (source && !isHistoricalDoneTask(source)) draft.tasks.push({...clone(source), team_id: null});
+        if (source && !isHistoricalDoneTask(source)) draft.tasks.push(clone(source));
       });
     }
     if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
@@ -784,7 +786,7 @@ window.planConstructor = (() => {
     button.disabled = true;
     button.textContent = 'Строим план…';
     try {
-      const tasks = draft.tasks.map((task) => ({...task, team_id: null}));
+      const tasks = draft.tasks.map((task) => ({...task}));
       const teams = draft.teams.map(({engineer_ids: _engineerIds, focus_factor: _legacyFocusFactor, ...team}) => team);
       const planResult = await api.buildConstructorPlan({teams, engineers: automaticEngineers(), tasks});
       showErrors([]);

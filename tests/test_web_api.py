@@ -151,8 +151,8 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(first_competency["bus_factor"], len(engineer_ids))
         self.assertEqual(len(engineer_ids), len(set(engineer_ids)))
 
-    def test_dashboard_explicitly_reports_unimplemented_features(self) -> None:
-        self.assertEqual(self.dashboard["features"]["replanning"], "NOT_IMPLEMENTED")
+    def test_dashboard_reports_available_product_features(self) -> None:
+        self.assertEqual(self.dashboard["features"]["replanning"], "AVAILABLE")
         self.assertEqual(self.dashboard["features"]["bus_factor"], "AVAILABLE")
         self.assertEqual(
             self.dashboard["features"]["initial_excel_upload"],
@@ -169,9 +169,28 @@ class ProductAPIIntegrationTests(unittest.TestCase):
 
         expected = payload["expected_kpi"]
         self.assertEqual(expected["completed_initiatives"], 2)
-        self.assertEqual(expected["baseline_initiatives"], 7)
-        self.assertEqual(expected["incomplete_initiatives"], 5)
-        self.assertAlmostEqual(expected["completion_percent"], 2 / 7 * 100)
+        week0_tasks = (
+            self.dashboard.get("_planning_state", {})
+            .get("tables", {})
+            .get("tasks", [])
+        )
+        initial_pool = {
+            item.get("initiative_id")
+            for item in week0_tasks
+            if item.get("initiative_id")
+            and str(item.get("status") or "").strip().casefold()
+            in {"todo", "inprogress"}
+            and not item.get("is_placeholder")
+        }
+        self.assertEqual(expected["baseline_initiatives"], len(initial_pool))
+        self.assertEqual(
+            expected["incomplete_initiatives"],
+            len(initial_pool) - expected["completed_initiatives"],
+        )
+        self.assertAlmostEqual(
+            expected["completion_percent"],
+            expected["completed_initiatives"] / len(initial_pool) * 100,
+        )
 
         quarter = payload["quarter_kpi"]
         self.assertFalse(quarter["has_actual"])
@@ -306,9 +325,10 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("window.planConstructor.openEngineerForm()", self.app)
         self.assertIn("window.planConstructor.openTeamForm()", self.app)
 
-    def test_engineer_catalog_opens_inline_profile_and_explains_hidden_skills(self) -> None:
-        self.assertIn("if (state.page === 'engineers')", self.app)
-        self.assertIn("openEmployee(engineerId);", self.app)
+    def test_engineer_catalog_opens_stable_profile_page_and_explains_hidden_skills(self) -> None:
+        self.assertIn("show('engineer-detail');", self.app)
+        self.assertIn("loadEngineerDetail(engineerId);", self.app)
+        self.assertIn("`/engineers/${encodeURIComponent(state.engineerId)}`", self.app)
         self.assertIn('class="catalog-skill-more"', self.app)
         self.assertIn('data-tooltip=', self.app)
         self.assertIn('data-engineer-sort="current_task"', self.html)
@@ -472,10 +492,11 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('href="/styles.css?v=', response.text)
         self.assertIn('src="/app.js?v=', response.text)
 
-    def test_development_notice_remains_only_on_unfinished_replanning_page(self) -> None:
-        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 1)
+    def test_replanning_page_no_longer_shows_unfinished_notice(self) -> None:
+        self.assertEqual(self.app.count("renderDevelopmentNotice('#"), 0)
         self.assertNotIn('id="risksDevelopmentNotice"', self.html)
         self.assertIn('id="recalcDevelopmentNotice"', self.html)
+        self.assertIn("submitReplanningFile", self.app)
 
     def test_risk_page_uses_three_actionable_alert_types(self) -> None:
         self.assertIn('data-risk-filter="Сроки"', self.html)

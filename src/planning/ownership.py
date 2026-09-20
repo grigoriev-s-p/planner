@@ -194,3 +194,25 @@ def evaluate_ownership_rows(
             )
 
     return _evaluate(owner_team_id, contributions())
+
+
+def merge_task_ownership(previous: TaskOwnership | None, current: TaskOwnership) -> TaskOwnership:
+    """Combine frozen historical allocations with a replanning allocation."""
+
+    if previous is None:
+        return current
+    by_sprint: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for item in (*previous.sprint_ownership, *current.sprint_ownership):
+        by_sprint[item.sprint][0] += item.owner_hours
+        by_sprint[item.sprint][1] += item.external_hours
+    return TaskOwnership(
+        owner_team_id=current.owner_team_id,
+        owner_hours=previous.owner_hours + current.owner_hours,
+        external_hours=previous.external_hours + current.external_hours,
+        owner_engineer_ids=tuple(sorted(set(previous.owner_engineer_ids) | set(current.owner_engineer_ids))),
+        external_engineer_ids=tuple(sorted(set(previous.external_engineer_ids) | set(current.external_engineer_ids))),
+        sprint_ownership=tuple(
+            SprintOwnership(sprint, values[0], values[1])
+            for sprint, values in sorted(by_sprint.items())
+        ),
+    )

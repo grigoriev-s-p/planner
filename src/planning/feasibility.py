@@ -256,6 +256,8 @@ class FeasibilityService:
         story_points_override: float | None = None,
         team_id_override: str | None = None,
         allow_cross_team: bool = True,
+        unavailable_engineer_ids: set[str] | None = None,
+        preferred_engineer_ids: set[str] | None = None,
     ) -> FeasibilityResult:
         reasons: list[FeasibilityReason] = []
         task = self._tasks.get(task_id)
@@ -420,19 +422,24 @@ class FeasibilityService:
         any_role_work_possible = not role_requirements
         all_roles_complete = True
         bucket_used_hours = self._bucket_used_hours(sprint_state, team_id)
+        shared_matching_buckets: dict[tuple[str, str], float] = {}
 
         for role, required_hours in role_requirements.items():
             required_skills = skill_requirements.get(role, set())
             # Organizers allow help across teams. Membership is a preference;
             # the canonical role, skills and personal hours remain constraints.
+            unavailable = unavailable_engineer_ids or set()
+            preferred = preferred_engineer_ids or set()
             role_profiles = sorted(
                 (
                     profile
                     for profile in self._profiles.values()
                     if role in profile.roles
                     and (allow_cross_team or profile.team_id == team_id)
+                    and profile.engineer_id not in unavailable
                 ),
                 key=lambda profile: (
+                    profile.engineer_id not in preferred,
                     profile.team_id != team_id,
                     -max(
                         calculate_engineer_capacity(
@@ -486,6 +493,10 @@ class FeasibilityService:
                     matching_ids.add(profile.engineer_id)
                     available_hours += remaining_hours
                     nominal_hours += capacity.nominal_hours
+                    key = (profile.engineer_id, profile.team_id)
+                    shared_matching_buckets[key] = max(
+                        shared_matching_buckets.get(key, 0.0), remaining_hours
+                    )
 
             deficit = max(required_hours - available_hours, 0.0)
             if available_hours > 0:
@@ -550,6 +561,26 @@ class FeasibilityService:
                 )
             )
 
+        # A profile may expose several roles, but its team capacity bucket can
+        # only be spent once. Per-role totals alone would otherwise claim that
+        # one 80-hour engineer can supply 80 hours for every listed role.
+        total_required_role_hours = sum(role_requirements.values())
+        total_shared_available = sum(shared_matching_buckets.values())
+        shared_deficit = max(total_required_role_hours - total_shared_available, 0.0)
+        if shared_deficit > 0 and all_roles_complete:
+            all_roles_complete = False
+            reasons.append(
+                FeasibilityReason(
+                    ReasonCode.INSUFFICIENT_ENGINEER_CAPACITY,
+                    {
+                        "role": "MULTIPLE_ROLES",
+                        "required_hours": total_required_role_hours,
+                        "available_hours": total_shared_available,
+                        "deficit_hours": shared_deficit,
+                    },
+                )
+            )
+
         team_work_possible = story_points == 0 or available_sp > 0
         can_start = dependencies_allow_start and team_work_possible and any_role_work_possible
         can_complete = dependencies_allow_start and sp_deficit == 0 and all_roles_complete
@@ -576,6 +607,8 @@ def check_task_feasibility(
     *,
     role_hours_override: Mapping[str, float] | None = None,
     story_points_override: float | None = None,
+    unavailable_engineer_ids: set[str] | None = None,
+    preferred_engineer_ids: set[str] | None = None,
 ) -> FeasibilityResult:
     """Public convenience API for one feasibility check."""
 
@@ -586,4 +619,6 @@ def check_task_feasibility(
         sprint_state,
         role_hours_override=role_hours_override,
         story_points_override=story_points_override,
+        unavailable_engineer_ids=unavailable_engineer_ids,
+        preferred_engineer_ids=preferred_engineer_ids,
     )

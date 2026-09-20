@@ -3,6 +3,8 @@
 const state = {
   page: 'home', taskId: null, taskSprint: null,
   teamId: null, engineerId: null, starTab: 'teams', riskId: null,
+  teamDetailTab: 'overview', teamReturnPage: 'teams',
+  engineerDetailTab: 'overview', engineerReturnPage: 'engineers',
   riskFilter: 'Все', riskSearch: '', riskModalOpen: false, skillTeam: 'all', skillRole: 'all', skillTech: 'all',
   competency: null, criticalOnly: false,
   taskReturnPage: 'current-plan', loading: true, error: null, archive: null,
@@ -14,6 +16,8 @@ const state = {
 const data = {
   plan: null, summary: {}, tasks: [], historicalTasks: [], initiatives: [], risks: [], teams: [],
   engineers: [], starMap: {teams: [], engineers: []}, kpis: null, features: {}, archiveReasons: {}, ready: false,
+  teamDetails: {}, teamHistories: {}, engineerDetails: {}, engineerHistories: {},
+  replanWorkflow: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -45,6 +49,8 @@ const historicalTaskFromCatalog = (task) => ({
   summary: 'Завершена до начала планирования.', outside_quarter: false, is_placeholder: false,
 });
 const currentSprint = () => Number(data.plan?.quarter?.current_sprint || 1);
+const hasPendingReplan = () => Boolean(data.replanWorkflow
+  && ['ACTUAL_SAVED', 'READY_FOR_REVIEW', 'REPLANNING_FAILED'].includes(data.replanWorkflow.status));
 const sprintBy = (sprint) => data.plan?.sprints?.find((item) => item.sprint_number === sprint);
 const taskSprints = (task) => task?.planned_sprints || [];
 const inQuarter = (task) => task?.status === 'PLANNED' && taskSprints(task).length > 0;
@@ -55,22 +61,24 @@ const sprintLabel = (task) => {
   if (!sprints.length) return task.status === 'DONE' ? 'Завершена до начала планирования' : 'Не включена в квартальный план';
   return sprints.length === 1 ? `Sprint ${sprints[0]}` : `Sprint ${sprints[0]}–${sprints.at(-1)}`;
 };
-const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Выполнен'}[sprintBy(sprint)?.status] || 'Запланирован');
+const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запланирован', DONE: 'Завершён', COMPLETED: 'Завершён'}[sprintBy(sprint)?.status] || 'Запланирован');
 const statusClass = (status) => ({DONE: 'done', PLANNED: 'planned', MOVED: 'moved', UNPLANNABLE: 'cancelled'}[status] || 'planned');
-const badge = (task) => `<span class="status ${statusClass(task.status)}">${escapeHtml(task.status_label)}</span>`;
+const badge = (task) => `<span class="status ${taskStatusClass(task)}">${escapeHtml(taskDisplayStatus(task))}</span>`;
 const taskDisplayStatus = (task) => {
+  const lifecycleStatus = String(task?.current_status || '').toUpperCase();
+  if (lifecycleStatus) return ({DONE: 'Завершена', COMPLETED: 'Завершена', IN_PROGRESS: 'В процессе', PLANNED: 'Запланирована', MOVED: 'Перенесена', UNPLANNABLE: 'Невыполнима', CANCELLED: 'Отменена'}[lifecycleStatus] || task?.current_status_label || lifecycleStatus);
   const sourceStatus = String(task?.source_status || '').replaceAll(' ', '').toUpperCase();
   if (sourceStatus === 'CANCELLED' || sourceStatus === 'CANCELED') return 'Отменена';
   if (task?.status === 'PLANNED' && sourceStatus === 'INPROGRESS') return 'В процессе';
-  return ({PLANNED: 'Запланирована', DONE: 'Выполнена', COMPLETED: 'Выполнена', IN_PROGRESS: 'В процессе', CANCELLED: 'Отменена', MOVED: 'Перенесена', UNPLANNABLE: 'Невыполнима'}[task?.status] || task?.status_label || 'Статус не указан');
+  return ({PLANNED: 'Запланирована', DONE: 'Завершена', COMPLETED: 'Завершена', IN_PROGRESS: 'В процессе', CANCELLED: 'Отменена', MOVED: 'Перенесена', UNPLANNABLE: 'Невыполнима'}[task?.status] || task?.status_label || 'Статус не указан');
 };
 const taskStatusClass = (task) => {
   const label = taskDisplayStatus(task);
-  return ({'Запланирована': 'planned', 'Выполнена': 'done', 'В процессе': 'work', 'Отменена': 'cancelled', 'Перенесена': 'moved', 'Невыполнима': 'cancelled'}[label] || 'planned');
+  return ({'Запланирована': 'planned', 'Завершена': 'done', 'В процессе': 'work', 'Отменена': 'cancelled', 'Перенесена': 'moved', 'Невыполнима': 'cancelled'}[label] || 'planned');
 };
 const taskStatusTooltip = (task) => ({
   'Запланирована': 'Задача выполнима и включена в квартальный план.',
-  'Выполнена': 'Задача выполнена.',
+  'Завершена': 'Задача завершена по фактическому результату спринта.',
   'В процессе': 'Задача находится в процессе выполнения.',
   'Отменена': 'Задача отменена.',
   'Перенесена': 'Задача перенесена за пределы текущего плана.',
@@ -333,23 +341,34 @@ async function submitArchive() {
 
 function pageLocation(page) {
   if (page === 'task-detail' && state.taskId) return `/tasks/${encodeURIComponent(state.taskId)}`;
+  if (page === 'team-detail' && state.teamId) return `/teams/${encodeURIComponent(state.teamId)}`;
+  if (page === 'engineer-detail' && state.engineerId) return `/engineers/${encodeURIComponent(state.engineerId)}`;
   if (page === 'tasks') return '/tasks';
+  if (page === 'teams') return '/teams';
+  if (page === 'engineers') return '/engineers';
   return page === 'home' ? '/' : `/#${page}`;
 }
 
 function routeFromLocation() {
-  const match = window.location.pathname.match(/^\/tasks\/([^/]+)\/?$/);
-  if (match) return {page: 'task-detail', taskId: decodeURIComponent(match[1])};
+  const taskMatch = window.location.pathname.match(/^\/tasks\/([^/]+)\/?$/);
+  if (taskMatch) return {page: 'task-detail', taskId: decodeURIComponent(taskMatch[1])};
+  const teamMatch = window.location.pathname.match(/^\/teams\/([^/]+)\/?$/);
+  if (teamMatch) return {page: 'team-detail', teamId: decodeURIComponent(teamMatch[1])};
+  const engineerMatch = window.location.pathname.match(/^\/engineers\/([^/]+)\/?$/);
+  if (engineerMatch) return {page: 'engineer-detail', engineerId: decodeURIComponent(engineerMatch[1])};
   if (window.location.pathname === '/tasks' || window.location.pathname === '/tasks/') return {page: 'tasks', taskId: null};
+  if (window.location.pathname === '/teams' || window.location.pathname === '/teams/') return {page: 'teams', teamId: null};
+  if (window.location.pathname === '/engineers' || window.location.pathname === '/engineers/') return {page: 'engineers', engineerId: null};
   const hashPage = window.location.hash.replace(/^#/, '');
-  const knownPages = new Set(['home', 'planning', 'current-plan', 'tasks', 'engineers', 'teams', 'risks', 'recalc', 'star']);
-  return {page: knownPages.has(hashPage) ? hashPage : 'home', taskId: null};
+  const knownPages = new Set(['home', 'planning', 'current-plan', 'current-sprint', 'tasks', 'engineers', 'teams', 'risks', 'recalc', 'star']);
+  return {page: knownPages.has(hashPage) ? hashPage : 'home', taskId: null, teamId: null};
 }
 
 function show(page, historyMode = 'push') {
+  if (page === 'recalc' && data.ready && !hasPendingReplan()) page = 'current-sprint';
   state.page = page;
   $$('.page').forEach((element) => element.classList.toggle('active', element.id === `page-${page}`));
-  $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === (page === 'task-detail' ? 'tasks' : page)));
+  $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === ({'task-detail': 'tasks', 'team-detail': 'teams', 'engineer-detail': 'engineers'}[page] || page)));
   closeEmployee();
   renderPage(page);
   if (historyMode) window.history[historyMode === 'replace' ? 'replaceState' : 'pushState']({page, taskId: state.taskId}, '', pageLocation(page));
@@ -361,7 +380,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
+  ({home: renderHome, planning: window.planConstructor.render, 'current-plan': renderPlanning, 'current-sprint': renderCurrentSprint, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'team-detail': renderTeamDetail, 'engineer-detail': renderEngineerDetail, 'task-detail': renderTaskDetail, risks: renderRisks, recalc: renderRecalc, star: renderStar})[page]?.();
 }
 
 function renderUnavailable() {
@@ -377,6 +396,10 @@ function renderUnavailable() {
   if ($('#teamsTableWrap')) $('#teamsTableWrap').hidden = true;
   if ($('#taskDetailState')) $('#taskDetailState').innerHTML = empty(message);
   if ($('#taskDetailContent')) $('#taskDetailContent').hidden = true;
+  if ($('#teamDetailState')) $('#teamDetailState').innerHTML = empty(message);
+  if ($('#teamDetailContent')) $('#teamDetailContent').hidden = true;
+  if ($('#engineerDetailState')) $('#engineerDetailState').innerHTML = empty(message);
+  if ($('#engineerDetailContent')) $('#engineerDetailContent').hidden = true;
 }
 
 function gotoTask(taskId) {
@@ -389,21 +412,20 @@ function gotoTask(taskId) {
 
 function gotoTeam(teamId) {
   if (!teamBy(teamId).team_id) return;
+  if (state.page !== 'team-detail') state.teamReturnPage = state.page;
   state.teamId = teamId;
-  state.starTab = 'teams';
-  show('star');
+  state.teamDetailTab = 'overview';
+  show('team-detail');
+  loadTeamDetail(teamId);
 }
 
 function gotoEmployee(engineerId) {
   if (!engineerBy(engineerId)) return;
+  if (state.page !== 'engineer-detail') state.engineerReturnPage = state.page;
   state.engineerId = engineerId;
-  if (state.page === 'engineers') {
-    openEmployee(engineerId);
-    return;
-  }
-  state.starTab = 'teams';
-  show('star');
-  openEmployee(engineerId);
+  state.engineerDetailTab = 'overview';
+  show('engineer-detail');
+  loadEngineerDetail(engineerId);
 }
 
 function renderHome() {
@@ -483,18 +505,31 @@ function renderKpis() {
     return;
   }
 
-  target.innerHTML = `<article class="expected-kpi-card"><div><span>Ожидаемое выполнение квартального плана</span><strong>${percent(expected.completion_percent)}</strong></div><div class="expected-kpi-copy"><p>Будут завершены ${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив исходного плана</p><small>Не будут завершены: ${number(expected.incomplete_initiatives)}</small></div></article>`;
+  target.innerHTML = `<article class="expected-kpi-card"><div><span>Ожидаемое выполнение квартального плана</span><strong>${percent(expected.completion_percent)}</strong></div><div class="expected-kpi-copy"><p>Будут завершены ${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив первоначального бизнес-пула</p><small>Не будут завершены: ${number(expected.incomplete_initiatives)}</small></div></article>`;
 }
 
 function renderPlanning() {
   $('#sprintBoard').innerHTML = Array.from({length: 6}, (_, index) => {
     const sprint = index + 1;
-    const tasks = data.tasks
-      .filter((task) => inQuarter(task) && taskSprints(task).includes(sprint))
-      .sort((left, right) => Number(right.rung || 0) - Number(left.rung || 0) || String(left.task_id).localeCompare(String(right.task_id), 'ru'))
-      .map((task) => taskSprints(task)[0] < sprint
-        ? `<button class="sprint-continuation" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b>↳ ${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span>Продолжение</span><small>${escapeHtml(task.assigned_team_id)}</small></button>`
-        : `<button class="sprint-card" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span><span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`)
+    const sprintData = sprintBy(sprint) || {tasks: [], presentation_state: sprint === currentSprint() ? 'CURRENT' : 'FUTURE'};
+    const closed = sprintData.presentation_state === 'CLOSED';
+    const sprintTasks = closed
+      ? (sprintData.tasks || []).map((row) => ({task: row, row}))
+      : data.tasks.filter((task) => inQuarter(task) && taskSprints(task).includes(sprint)).map((task) => ({task, row: task}));
+    const tasks = sprintTasks
+      .sort((left, right) => Number(right.task.rung || 0) - Number(left.task.rung || 0) || String(left.task.task_id).localeCompare(String(right.task.task_id), 'ru'))
+      .map(({task, row}) => {
+        const sprintSp = Number(row.sprint_capacity_sp_load ?? task.sp_load_by_sprint?.[String(sprint)] ?? 0);
+        const sprintHours = Number(row.sprint_allocated_hours ?? task.hours_by_sprint?.[String(sprint)] ?? 0);
+        const load = `<small>Всего: ${number(task.story_points)} SP</small><small>Sprint ${sprint}: ${number(sprintSp)} SP</small><small>${number(sprintHours)} ч</small>`;
+        if (closed) {
+          const outcome = row.outcome || {status: 'UNFINISHED', label: 'Не завершена'};
+          return `<button class="sprint-card historical ${attr(String(outcome.status || '').toLowerCase())}" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span><span class="status ${outcome.completed ? 'done' : 'work'}">${escapeHtml(outcome.label)}</span>${load}<span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`;
+        }
+        return taskSprints(task)[0] < sprint
+          ? `<button class="sprint-continuation" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b>↳ ${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span>Продолжение</span>${load}<small>${escapeHtml(task.assigned_team_id)}</small></button>`
+          : `<button class="sprint-card" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span>${load}<span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`;
+      })
       .join('') || '<div class="sprint-empty">Нет задач</div>';
     return `<section class="sprint-column ${sprint === currentSprint() ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><b>Sprint ${sprint}</b><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
   }).join('');
@@ -640,6 +675,168 @@ function renderTeams() {
   }).join('');
 }
 
+async function loadTeamDetail(teamId) {
+  if (data.teamDetails[teamId] && data.teamHistories[teamId]) return renderTeamDetail();
+  try {
+    const [detail, history] = await Promise.all([
+      window.postcodeApi.getTeam(teamId),
+      window.postcodeApi.getTeamHistory(teamId),
+    ]);
+    data.teamDetails[teamId] = detail;
+    data.teamHistories[teamId] = history;
+    if (state.page === 'team-detail' && state.teamId === teamId) renderTeamDetail();
+  } catch (error) {
+    data.teamDetails[teamId] = {load_error: error?.message || 'Не удалось загрузить страницу команды.'};
+    if (state.page === 'team-detail' && state.teamId === teamId) renderTeamDetail();
+  }
+}
+
+function teamTaskCard(task) {
+  const owner = task.participation_type === 'OWNER';
+  const roles = (task.roles || []).join(', ');
+  const remaining = Object.entries(task.remaining_role_hours || {}).map(([role, hours]) => `${escapeHtml(role)}: ${number(hours)} ч`).join(', ');
+  const carried = owner && Number(task.planned_sprints?.[0]) < Number(task.sprint) ? `<span class="tag orange">Перенесена из Sprint ${number(task.planned_sprints[0])}</span>` : '';
+  return `<article class="entity-work-card ${owner ? '' : 'cross-team'}"><div><button class="table-button" type="button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)} ↗</button><h3>${escapeHtml(task.title || 'Название не указано')}</h3><p>${owner ? `Владелец: ${escapeHtml(task.assigned_team_id || '—')}` : `Помощь для ${escapeHtml(task.owner_team_id || task.assigned_team_id || '—')}`}</p>${carried}</div><div class="entity-work-meta">${owner ? `<span>Исходно: ${number(task.original_story_points)} SP</span><span>Осталось: ${number(task.remaining_story_points)} SP</span><span>${remaining ? `Остаток: ${remaining}` : 'Остаток по ролям отсутствует'}</span>` : `<span>${escapeHtml(roles || 'Роль не указана')}</span><span>Планово: ${number(task.planned_hours)} ч</span>`}</div></article>`;
+}
+
+function renderTeamOverview(detail) {
+  const roleRows = detail.capacity?.roles || [];
+  const current = detail.current_tasks || [];
+  const received = detail.cross_team?.received || [];
+  return `<div class="entity-detail-grid"><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Sprint ${number(detail.current_sprint)}</h2><p class="hint">SP команды и плановые часы специалистов показаны раздельно.</p></div></div><div class="entity-capacity-list"><div class="entity-capacity-row primary"><span>Story Points</span><b>${number(detail.capacity?.sp?.used)} / ${number(detail.capacity?.sp?.capacity)} SP</b></div>${roleRows.map((row) => `<div class="entity-capacity-row"><span>${escapeHtml(row.role)}</span><b>${number(row.used_hours)} / ${number(row.capacity_hours)} ч</b></div>`).join('') || '<p class="hint">Нет данных о ролевой ёмкости.</p>'}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Текущая работа</h2><p class="hint">Owner-задачи и помощь другим командам.</p></div><span class="tag">${current.length}</span></div><div class="entity-work-list">${current.map(teamTaskCard).join('') || empty('В текущем спринте нет работы команды.')}</div></article></div><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Cross-team участие</h2><p class="hint">Плановая помощь в текущем спринте.</p></div></div><div class="entity-detail-grid"><div><h3>Команда предоставляет</h3>${(detail.cross_team?.provided || []).map(teamTaskCard).join('') || empty('Команда не предоставляет помощь.')}</div><div><h3>Команда получает</h3>${received.map((task) => `<article class="entity-work-card cross-team"><button class="table-button" type="button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)} ↗</button><p>Из команд: ${escapeHtml((task.source_team_ids || []).join(', '))}</p><b>Планово: ${number(task.planned_hours)} ч</b></article>`).join('') || empty('Внешняя помощь не требуется.')}</div></div></article>`;
+}
+
+function renderTeamTasks(detail) {
+  const current = detail.current_tasks || [];
+  const future = detail.future_sprints || [];
+  return `<article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Текущий спринт</h2><p class="hint">Утверждённые owner-задачи и cross-team участие.</p></div></div><div class="entity-work-list">${current.map(teamTaskCard).join('') || empty('Текущих задач нет.')}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Следующие спринты</h2><p class="hint">Только последний утверждённый план.</p></div></div><div class="future-sprint-list">${future.map((item) => `<details class="future-sprint"><summary><span>Sprint ${item.sprint}</span><b>${item.task_count} задач · ${number(item.capacity_sp_load)} SP</b></summary><div class="entity-work-list">${item.tasks.map((task) => `<article class="entity-work-card"><button class="table-button" type="button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)} ↗</button><h3>${escapeHtml(task.title)}</h3><p>${number(task.sprint_sp)} SP в спринте</p></article>`).join('') || empty('Задач нет.')}</div></details>`).join('')}</div></article>`;
+}
+
+function renderTeamMembers(detail) {
+  const rows = (detail.members || []).map((member) => `<tr><td><button class="table-button" type="button" data-open-employee="${attr(member.engineer_id)}">${escapeHtml(member.name || member.engineer_id)} ↗</button></td><td>${escapeHtml((member.roles || []).join(', ') || '—')}</td><td>${escapeHtml(member.grade || '—')}</td><td>${percent(Number(member.capacity_rate || 0) * 100)}</td><td>${number(member.capacity_hours)} ч</td><td>${number(member.planned_hours)} ч</td><td>${number(member.cross_team_planned_hours)} ч</td></tr>`);
+  return `<article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Состав команды</h2><p class="hint">Каждый bucket участия показан отдельно и не переносится между командами.</p></div></div><div class="table-scroll">${rows.length ? table(['Инженер', 'Роли', 'Grade', 'Участие', 'Ёмкость участия', 'План Sprint', 'Межкомандная помощь'], rows) : empty('В команде нет активных инженеров.')}</div></article>`;
+}
+
+function teamOutcomeLabel(outcome) {
+  if (!outcome) return 'Продолжается по плану';
+  return outcome.completed ? 'Завершена' : 'Не завершена';
+}
+
+function renderTeamHistory(detail) {
+  const history = data.teamHistories[detail.identity.team_id];
+  const sprints = history?.closed_sprints || [];
+  return `<div class="history-timeline">${sprints.map((item) => `<article class="panel history-sprint"><div class="panel-heading"><div><div class="eyebrow">ЗАКРЫТЫЙ СПРИНТ</div><h2>Sprint ${item.sprint}</h2><p class="hint">Approved revision ${item.planned_revision ?? '—'} → ${item.resulting_revision ?? '—'}</p></div></div><div class="history-columns"><div><h3>Owner-задачи</h3>${item.owner_tasks.map((task) => `<div class="history-row"><button class="table-button" type="button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)} ↗</button><span>${escapeHtml(teamOutcomeLabel(task.outcome))}</span>${task.outcome?.status === 'UNFINISHED' ? `<small>${escapeHtml(task.outcome.incomplete_reason || 'Причина не указана')} · остаток: ${Object.entries(task.outcome.remaining_role_hours || {}).map(([role, hours]) => `${escapeHtml(role)} ${number(hours)} ч`).join(', ')}</small>` : ''}</div>`).join('') || empty('Owner-задач не было.')}</div><div><h3>Cross-team</h3><p>Предоставлено планово: <b>${number(item.cross_team_provided.reduce((sum, row) => sum + Number(row.planned_hours || 0), 0))} ч</b></p><p>Получено планово: <b>${number(item.cross_team_received.reduce((sum, row) => sum + Number(row.planned_hours || 0), 0))} ч</b></p></div></div>${item.ownership_changes.length ? `<div class="history-changes"><h3>Изменение владельца</h3>${item.ownership_changes.map((change) => `<p><button class="table-button" type="button" data-open-task="${attr(change.task_id)}">${escapeHtml(change.task_id)} ↗</button> · ${escapeHtml(change.from_team_id)} → ${escapeHtml(change.to_team_id)}</p>`).join('')}</div>` : ''}${item.replanning_changes.length ? `<div class="history-changes"><h3>После перепланирования</h3>${item.replanning_changes.map((change) => `<p>${escapeHtml(change.task_id)} · ${escapeHtml((change.fields || [change.change]).join(', '))}</p>`).join('')}</div>` : ''}</article>`).join('') || empty('Закрытых спринтов пока нет.')}</div>`;
+}
+
+function renderTeamSkills(detail) {
+  const competencies = detail.competencies || [];
+  return `<article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Компетенции и Bus Factor</h2><p class="hint">Расчёт совпадает со Звёздной картой и использует уникальных активных инженеров.</p></div><button class="btn btn-outline" type="button" data-page="star">Открыть Звёздную карту ↗</button></div><div class="competency-card-grid">${competencies.map((item) => `<article class="competency-summary ${attr(item.risk_level)}"><div><h3>${escapeHtml(item.skill)}</h3><p>${escapeHtml(item.risk_label)}</p></div><b>BF ${number(item.bus_factor)}</b></article>`).join('') || empty('Нет данных о компетенциях.')}</div></article>`;
+}
+
+function renderTeamDetail() {
+  const detail = data.teamDetails[state.teamId];
+  const stateBox = $('#teamDetailState');
+  const content = $('#teamDetailContent');
+  if (!detail) {
+    $('#teamDetailTitle').textContent = teamBy(state.teamId).name || state.teamId || 'Команда';
+    stateBox.innerHTML = empty('Загружаем профиль команды…');
+    content.hidden = true;
+    return;
+  }
+  if (detail.load_error) {
+    stateBox.innerHTML = empty(detail.load_error);
+    content.hidden = true;
+    return;
+  }
+  content.hidden = false;
+  stateBox.innerHTML = '';
+  $('#teamDetailTitle').textContent = detail.identity?.name || detail.team_id;
+  $('#teamDetailMeta').textContent = `${detail.approved_revision ? `Approved Plan · Revision ${detail.approved_revision}` : 'Рабочий каталог'} · Текущий спринт: Sprint ${detail.current_sprint}`;
+  $('#teamDetailSummary').innerHTML = `<div><span>Инженеров</span><b>${number((detail.members || []).length)}</b></div><div><span>Текущих owner-задач</span><b>${number((detail.current_tasks || []).filter((item) => item.participation_type === 'OWNER').length)}</b></div><div><span>Cross-team участий</span><b>${number((detail.cross_team?.provided || []).length + (detail.cross_team?.received || []).length)}</b></div>`;
+  $$('[data-team-detail-tab]').forEach((button) => button.classList.toggle('active', button.dataset.teamDetailTab === state.teamDetailTab));
+  $('#teamDetailBody').innerHTML = ({overview: renderTeamOverview, tasks: renderTeamTasks, members: renderTeamMembers, history: renderTeamHistory, skills: renderTeamSkills}[state.teamDetailTab] || renderTeamOverview)(detail);
+}
+
+async function loadEngineerDetail(engineerId) {
+  if (data.engineerDetails[engineerId] && data.engineerHistories[engineerId]) return renderEngineerDetail();
+  try {
+    const [detail, history] = await Promise.all([
+      window.postcodeApi.getEngineer(engineerId),
+      window.postcodeApi.getEngineerHistory(engineerId),
+    ]);
+    data.engineerDetails[engineerId] = detail;
+    data.engineerHistories[engineerId] = history;
+    if (state.page === 'engineer-detail' && state.engineerId === engineerId) renderEngineerDetail();
+  } catch (error) {
+    data.engineerDetails[engineerId] = {load_error: error?.message || 'Не удалось загрузить страницу инженера.'};
+    if (state.page === 'engineer-detail' && state.engineerId === engineerId) renderEngineerDetail();
+  }
+}
+
+function engineerAllocationCard(item) {
+  const crossTeam = item.participation_type === 'CROSS_TEAM';
+  return `<article class="entity-work-card ${crossTeam ? 'cross-team' : ''}"><div><button class="table-button" type="button" data-open-task="${attr(item.task_id)}">${escapeHtml(item.task_id)} ↗</button><h3>${escapeHtml(item.task_title || 'Название не указано')}</h3><p>${escapeHtml(item.role || 'Роль не указана')} · Sprint ${number(item.sprint)}</p></div><div class="entity-work-meta"><span>Плановое участие</span><b>${number(item.allocated_hours)} ч</b><span>${crossTeam ? `Помощь ${escapeHtml(item.owner_team_id || 'другой команде')}` : escapeHtml(item.source_team_id || item.owner_team_id || 'Без команды')}</span></div></article>`;
+}
+
+function renderEngineerOverview(detail) {
+  const memberships = detail.memberships || [];
+  const current = detail.current_allocations || [];
+  return `<div class="entity-detail-grid"><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Участие в командах</h2><p class="hint">Capacity bucket каждого membership показан отдельно.</p></div></div><div class="entity-capacity-list">${memberships.map((membership) => {
+    const bucket = (detail.capacity_buckets || []).find((item) => item.team_id === membership.team_id) || membership;
+    return `<button class="profile-link" type="button" data-open-team="${attr(membership.team_id)}"><span>${escapeHtml(teamBy(membership.team_id).name || membership.team_id)}</span> · ${percent(Number(membership.capacity_rate || 0) * 100)} · ${number(membership.planned_hours)} / ${number(bucket.capacity_hours)} ч планово ↗</button>`;
+  }).join('') || empty('Инженер не состоит в активной команде.')}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Sprint ${number(detail.current_sprint)}</h2><p class="hint">Только плановые назначения из утверждённого плана.</p></div></div><div class="entity-capacity-list"><div class="entity-capacity-row primary"><span>Плановое участие</span><b>${number(current.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0))} ч</b></div><div class="entity-capacity-row"><span>Назначений</span><b>${number(current.length)}</b></div><div class="entity-capacity-row"><span>Cross-team назначений</span><b>${number(current.filter((item) => item.participation_type === 'CROSS_TEAM').length)}</b></div></div></article></div><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Текущая работа</h2><p class="hint">Часы обозначают плановое участие, а не фактические трудозатраты.</p></div></div><div class="entity-work-list">${current.map(engineerAllocationCard).join('') || empty('В текущем спринте назначений нет.')}</div></article>`;
+}
+
+function renderEngineerTasks(detail) {
+  const current = detail.current_allocations || [];
+  const futureBySprint = new Map();
+  (detail.future_allocations || []).forEach((item) => {
+    const sprint = Number(item.sprint);
+    if (!futureBySprint.has(sprint)) futureBySprint.set(sprint, []);
+    futureBySprint.get(sprint).push(item);
+  });
+  return `<article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Текущий спринт</h2><p class="hint">Плановые назначения из последней утверждённой ревизии.</p></div></div><div class="entity-work-list">${current.map(engineerAllocationCard).join('') || empty('Текущих назначений нет.')}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Следующие спринты</h2><p class="hint">Будущие назначения могут измениться после закрытия спринта и перепланирования.</p></div></div><div class="future-sprint-list">${[...futureBySprint.entries()].sort(([left], [right]) => left - right).map(([sprint, items]) => `<details class="future-sprint"><summary><span>Sprint ${sprint}</span><b>${items.length} назначений · ${number(items.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0))} ч</b></summary><div class="entity-work-list">${items.map(engineerAllocationCard).join('')}</div></details>`).join('') || empty('Будущих назначений нет.')}</div></article>`;
+}
+
+function renderEngineerHistory(detail) {
+  const history = data.engineerHistories[detail.identity.engineer_id];
+  const sprints = history?.closed_sprints || [];
+  return `<div class="history-timeline">${sprints.map((item) => `<article class="panel history-sprint"><div class="panel-heading"><div><div class="eyebrow">ЗАКРЫТЫЙ СПРИНТ</div><h2>Sprint ${item.sprint}</h2><p class="hint">Показано утверждённое плановое участие. Фактические часы не рассчитываются из плана.</p></div></div><div class="entity-work-list">${item.participations.map((row) => {
+    const remaining = Object.entries(row.outcome?.remaining_role_hours || {}).map(([role, hours]) => `${escapeHtml(role)}: ${number(hours)} ч`).join(', ');
+    return `<article class="entity-work-card ${row.participation_type === 'CROSS_TEAM' ? 'cross-team' : ''}"><div><button class="table-button" type="button" data-open-task="${attr(row.task_id)}">${escapeHtml(row.task_id)} ↗</button><h3>${escapeHtml(row.task_title || 'Название не указано')}</h3><p>${escapeHtml(row.role || 'Роль не указана')} · ${escapeHtml(row.source_team_id || 'Без команды')}${row.participation_type === 'CROSS_TEAM' ? ` → ${escapeHtml(row.owner_team_id)}` : ''}</p></div><div class="entity-work-meta"><span>Плановое участие</span><b>${number(row.planned_hours)} ч</b><span>Результат задачи: ${escapeHtml(teamOutcomeLabel(row.outcome))}</span>${row.outcome?.status === 'UNFINISHED' ? `<small>${escapeHtml(row.outcome.incomplete_reason || 'Причина не указана')}</small>${remaining ? `<small>По задаче осталось: ${remaining}</small>` : ''}` : ''}</div></article>`;
+  }).join('') || empty('В этом спринте плановых назначений не было.')}</div>${item.allocation_changes.length ? `<div class="history-changes"><h3>Изменения будущих назначений после перепланирования</h3>${item.allocation_changes.map((change) => `<p><button class="table-button" type="button" data-open-task="${attr(change.task_id)}">${escapeHtml(change.task_id)} ↗</button> · план обновлён</p>`).join('')}</div>` : ''}</article>`).join('') || empty('Закрытых спринтов пока нет.')}</div>`;
+}
+
+function renderEngineerSkills(detail) {
+  const criticality = detail.team_criticality || [];
+  return `<div class="entity-detail-grid"><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Роли и навыки</h2><p class="hint">Показаны значения из профиля инженера без добавления уровней владения.</p></div></div><h3>Роли</h3><div class="skill-tags">${(detail.roles || []).map((role) => `<span>${escapeHtml(role)}</span>`).join('') || '<span>Нет данных</span>'}</div><h3 class="needs-title">Навыки</h3><div class="skill-tags">${(detail.skills || []).map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Критичность для команд</h2><p class="hint">Тот же Bus Factor, который используется в Звёздной карте.</p></div></div><div class="competency-card-grid">${criticality.map((item) => `<button class="competency-summary ${attr(item.risk_level)}" type="button" data-open-team="${attr(item.team_id)}"><div><h3>${escapeHtml(item.team_name || item.team_id)} · ${escapeHtml(item.skill)}</h3><p>${escapeHtml(item.risk_label)}</p></div><b>BF ${number(item.bus_factor)}</b></button>`).join('') || empty('Критичные компетенции для команд не выявлены.')}</div></article></div>`;
+}
+
+function renderEngineerDetail() {
+  const detail = data.engineerDetails[state.engineerId];
+  const stateBox = $('#engineerDetailState');
+  const content = $('#engineerDetailContent');
+  if (!detail) {
+    $('#engineerDetailTitle').textContent = engineerBy(state.engineerId)?.name || state.engineerId || 'Инженер';
+    stateBox.innerHTML = empty('Загружаем профиль инженера…');
+    content.hidden = true;
+    return;
+  }
+  if (detail.load_error) {
+    stateBox.innerHTML = empty(detail.load_error);
+    content.hidden = true;
+    return;
+  }
+  content.hidden = false;
+  stateBox.innerHTML = '';
+  $('#engineerDetailTitle').textContent = detail.identity?.name || detail.engineer_id;
+  $('#engineerDetailMeta').textContent = `${detail.engineer_id} · ${(detail.roles || []).join(', ') || 'Роль не указана'} · ${(detail.memberships || []).map((item) => `${item.team_id} ${Number(item.capacity_rate || 0).toLocaleString('ru-RU')}`).join(' · ') || 'Без команды'} · ${detail.approved_revision ? `Approved Plan · Revision ${detail.approved_revision}` : 'Approved Plan'} · Sprint ${detail.current_sprint}`;
+  const planned = (detail.current_allocations || []).reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0);
+  $('#engineerDetailSummary').innerHTML = `<div><span>Команд</span><b>${number((detail.memberships || []).length)}</b></div><div><span>Capacity за спринт</span><b>${number(detail.capacity_hours)} ч</b></div><div><span>Плановое участие в Sprint ${number(detail.current_sprint)}</span><b>${number(planned)} ч</b></div>`;
+  $$('[data-engineer-detail-tab]').forEach((button) => button.classList.toggle('active', button.dataset.engineerDetailTab === state.engineerDetailTab));
+  $('#engineerDetailBody').innerHTML = ({overview: renderEngineerOverview, tasks: renderEngineerTasks, history: renderEngineerHistory, skills: renderEngineerSkills}[state.engineerDetailTab] || renderEngineerOverview)(detail);
+}
+
 function renderTaskDetail() {
   const task = taskBy(state.taskId);
   const content = $('#taskDetailContent');
@@ -666,7 +863,7 @@ function renderTaskDetail() {
   const teamValue = task.assigned_team_id
     ? `<button type="button" class="fact-link" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)} ↗</button>`
     : '<b>—</b>';
-  $('#taskFacts').innerHTML = `<div class="task-fact"><span>Команда</span>${teamValue}</div><div class="task-fact"><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div><div class="task-fact"><span>Rung</span>${rungBadge(task)}</div><div class="task-fact"><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div>${task.team_reassigned ? `<p class="task-team-note">Исходная команда: <b>${escapeHtml(task.original_team_id || '—')}</b></p>` : ''}`;
+  $('#taskFacts').innerHTML = `<div class="task-fact"><span>Команда</span>${teamValue}</div><div class="task-fact"><span>Спринт</span><b>${escapeHtml(sprintLabel(task))}</b></div><div class="task-fact"><span>Story Points задачи</span><b>${number(task.story_points)} SP</b></div><div class="task-fact"><span>Rung</span>${rungBadge(task)}</div><div class="task-fact"><span>Инициатива</span><b>${escapeHtml(task.initiative_id || '—')}</b></div>${task.team_reassigned ? `<p class="task-team-note">Исходная команда: <b>${escapeHtml(task.original_team_id || '—')}</b></p>` : ''}`;
   const incoming = task.dependencies?.incoming || [];
   const outgoing = task.dependencies?.outgoing || [];
   const dependencyLink = (taskId, title) => {
@@ -698,7 +895,8 @@ function renderTaskDetail() {
     ? `<div class="ownership-summary"><b>Команда выполняет ${number(ownership.owner_share_percent)}% трудозатрат</b><span>${number(ownership.owner_engineer_count)} инженера команды + ${number(ownership.external_engineer_count)} внешних специалиста</span><small>${escapeHtml(ownership.status_message || '')}</small></div>`
     : '';
   const sprintPicker = task.multi_sprint && selectedSprint ? `<label class="task-sprint-picker">Показать спринт<select id="taskSprintSelect">${sprints.map((sprint) => `<option value="${sprint}" ${sprint === selectedSprint ? 'selected' : ''}>Sprint ${sprint}</option>`).join('')}</select></label>` : '';
-  $('#taskHours').innerHTML = `<div class="panel-heading"><div><h2>Распределение ресурсов</h2><p class="hint">Фактические назначения planner-а${selectedSprint ? ` для Sprint ${selectedSprint}` : ''}.</p></div>${sprintPicker}</div>${ownershipSummary}<h3 class="needs-title">Основная команда — ${escapeHtml(task.assigned_team_id || '—')}</h3>${localAllocations.length ? performerRows(localAllocations, false) : empty('У основной команды нет назначенных часов.')}<h3 class="needs-title">Помощь других команд</h3>${externalAllocations.length ? performerRows(externalAllocations, true) : empty('Внешняя помощь не требуется.')}${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено'], allocationRows) : empty('Распределения ресурсов отсутствуют.')}`;
+  const sprintLoad = selectedSprint == null ? '' : `<p class="hint">Нагрузка Sprint ${selectedSprint}: <b>${number(task.sp_load_by_sprint?.[String(selectedSprint)] || 0)} SP</b>; отдельно назначено <b>${number(task.hours_by_sprint?.[String(selectedSprint)] || 0)} ч</b>. Всего у задачи: <b>${number(task.story_points)} SP</b>.</p>`;
+  $('#taskHours').innerHTML = `<div class="panel-heading"><div><h2>Распределение ресурсов</h2><p class="hint">Фактические назначения planner-а${selectedSprint ? ` для Sprint ${selectedSprint}` : ''}.</p>${sprintLoad}</div>${sprintPicker}</div>${ownershipSummary}<h3 class="needs-title">Основная команда — ${escapeHtml(task.assigned_team_id || '—')}</h3>${localAllocations.length ? performerRows(localAllocations, false) : empty('У основной команды нет назначенных часов.')}<h3 class="needs-title">Помощь других команд</h3>${externalAllocations.length ? performerRows(externalAllocations, true) : empty('Внешняя помощь не требуется.')}${allocationRows.length ? table(['Инженер', 'Роль', 'Исходная команда', 'Выделено'], allocationRows) : empty('Распределения ресурсов отсутствуют.')}`;
 }
 
 function riskEvidenceValue(item) {
@@ -825,11 +1023,307 @@ function renderRisks() {
 }
 
 function renderRecalc() {
-  renderDevelopmentNotice('#recalcDevelopmentNotice', 'Страница пока не завершена. Отображаемые данные и структура могут измениться.');
-  $('#recalcPlaceholder').hidden = false;
-  $('#recalcResult').hidden = true;
-  $('#runDemo').disabled = true;
-  $('#runDemo').textContent = 'Backend пересчёта не подключён';
+  const workflow = data.replanWorkflow;
+  if (!hasPendingReplan()) {
+    show('current-sprint', 'replace');
+    return;
+  }
+  $('#recalcTitle').textContent = `Изменения после Sprint ${number(workflow.sprint_number)}`;
+  $('#recalcSubtitle').textContent = 'Проверьте только изменения оставшегося плана и подтвердите новую редакцию.';
+  $('#recalcResult').hidden = false;
+  renderReplanWorkflow(workflow);
+}
+
+const REPLAN_CHANGE_LABELS = Object.freeze({
+  CARRY_OVER: 'Перенос незавершённой задачи',
+  TASK_COMPLETED: 'Задача завершена',
+  ADDED_TO_REMAINING_QUARTER: 'Добавлена в оставшийся план',
+  REMOVED_FROM_REMAINING_QUARTER: 'Не помещается в оставшийся квартал',
+  TASK_REMOVED: 'Убрана из плана',
+  SPRINT_CHANGED: 'Изменён спринт',
+  COMPLETION_CHANGED: 'Изменён срок завершения',
+  TEAM_CHANGED: 'Изменена команда-владелец',
+  ENGINEERS_CHANGED: 'Изменены назначения инженеров',
+  HOURS_CHANGED: 'Изменена нагрузка в часах',
+  SP_LOAD_CHANGED: 'Изменена SP-нагрузка',
+  CROSS_TEAM_CHANGED: 'Изменена межкомандная помощь',
+  ALLOCATION_CHANGED: 'Изменено распределение часов',
+  STATUS_CHANGED: 'Изменён статус',
+});
+
+function replanSprintValue(view) {
+  return (view?.planned_sprints || []).map((item) => `Sprint ${number(item)}`).join(', ') || 'Не запланирована';
+}
+
+function replanSpValue(view) {
+  return Object.values(view?.sp_load_by_sprint || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+}
+
+function replanAllocationChanges(changes) {
+  if (!changes?.length) return '';
+  const rows = changes.map((row) => {
+    const engineer = engineerBy(row.engineer_id)?.name || row.engineer_id || 'Инженер не указан';
+    const context = `Sprint ${number(row.sprint)} · ${escapeHtml(row.role || 'роль не указана')}${row.cross_team ? ` · cross-team ${escapeHtml(row.source_team_id)} → ${escapeHtml(row.owner_team_id)}` : ''}`;
+    if (row.kind === 'ADDED') return `<li class="added"><b>+</b><span>${escapeHtml(engineer)}<small>${context}</small></span><strong>${number(row.after_hours)} ч</strong></li>`;
+    if (row.kind === 'REMOVED') return `<li class="removed"><b>−</b><span>${escapeHtml(engineer)}<small>${context}</small></span><strong>${number(row.before_hours)} ч</strong></li>`;
+    return `<li><b>↻</b><span>${escapeHtml(engineer)}<small>${context}</small></span><strong>${number(row.before_hours)} → ${number(row.after_hours)} ч</strong></li>`;
+  }).join('');
+  return `<div class="replan-detail"><span>Назначения</span><ul class="replan-allocation-delta">${rows}</ul></div>`;
+}
+
+function replanChangeCard(change) {
+  const fields = new Set(change.fields || []);
+  const before = change.before;
+  const after = change.after;
+  const carry = change.carry_over;
+  const removed = fields.has('REMOVED_FROM_REMAINING_QUARTER') || fields.has('TASK_REMOVED') || carry?.outcome === 'EXCLUDED';
+  const added = fields.has('ADDED_TO_REMAINING_QUARTER') && !carry;
+  const details = [];
+  if (carry) {
+    const destination = carry.outcome === 'SCHEDULED' ? replanSprintValue(after) : 'Не запланирована в оставшемся квартале';
+    details.push(`<div class="replan-detail"><span>Перенос</span><b>Sprint ${number(carry.closed_sprint)} → ${escapeHtml(destination)}</b></div>`);
+    const roles = Object.entries(carry.remaining_role_hours || {}).map(([role, hours]) => `${escapeHtml(role)} · ${number(hours)} ч`).join(', ');
+    details.push(`<div class="replan-detail"><span>Остаток</span><b>${roles || 'Не указан'}${carry.remaining_story_points == null ? '' : ` · ${number(carry.remaining_story_points)} SP`}</b></div>`);
+    if (carry.incomplete_reason) details.push(`<div class="replan-detail"><span>Факт Sprint ${number(carry.closed_sprint)}</span><b>${escapeHtml(carry.incomplete_reason)}</b></div>`);
+  } else if (added) {
+    details.push(`<div class="replan-detail"><span>Планирование</span><b>Добавлена · ${escapeHtml(replanSprintValue(after))}${after?.rung == null ? '' : ` · R${number(after.rung)}`}</b></div>`);
+  } else if (removed) {
+    details.push(`<div class="replan-detail"><span>Планирование</span><b>${escapeHtml(replanSprintValue(before))} → Не запланирована в оставшемся квартале</b></div>`);
+  } else if (fields.has('SPRINT_CHANGED') || fields.has('COMPLETION_CHANGED')) {
+    details.push(`<div class="replan-detail"><span>Sprint</span><b>${escapeHtml(replanSprintValue(before))} → ${escapeHtml(replanSprintValue(after))}</b></div>`);
+  }
+  if (fields.has('TEAM_CHANGED')) details.push(`<div class="replan-detail"><span>Команда</span><b>${escapeHtml(before?.team_id || 'Не указана')} → ${escapeHtml(after?.team_id || 'Не указана')}</b></div>`);
+  details.push(replanAllocationChanges(change.allocation_changes));
+  if (fields.has('HOURS_CHANGED')) details.push(`<div class="replan-detail"><span>Всего часов</span><b>${number(before?.total_hours)} → ${number(after?.total_hours)} ч</b></div>`);
+  if (fields.has('SP_LOAD_CHANGED')) details.push(`<div class="replan-detail"><span>SP-нагрузка</span><b>${number(replanSpValue(before))} → ${number(replanSpValue(after))} SP</b></div>`);
+  if (fields.has('CROSS_TEAM_CHANGED')) details.push('<div class="replan-detail"><span>Cross-team</span><b>Изменён состав межкомандной помощи</b></div>');
+  if (fields.has('STATUS_CHANGED') && !added && !removed && !carry) details.push(`<div class="replan-detail"><span>Статус планирования</span><b>${escapeHtml(before?.status || '—')} → ${escapeHtml(after?.status || '—')}</b></div>`);
+  const tags = [...fields].map((field) => `<span>${escapeHtml(REPLAN_CHANGE_LABELS[field] || field)}</span>`).join('');
+  return `<article class="replan-change-card ${removed ? 'critical' : ''}"><div class="replan-change-card-heading"><div><b>${escapeHtml(change.task_id)}</b><h3>${escapeHtml(change.title || 'Название не указано')}</h3></div><div class="replan-change-tags">${tags}</div></div><div class="replan-change-details">${details.filter(Boolean).join('')}</div>${change.reason ? `<p class="replan-change-reason">${escapeHtml(change.reason)}</p>` : ''}</article>`;
+}
+
+function renderReplanWorkflow(workflow) {
+  const target = $('#recalcResult');
+  if (workflow.status === 'REPLANNING_FAILED') {
+    target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">ФАКТ СОХРАНЁН</div><h2>Пересчёт не завершён</h2><p>Результаты Sprint ${number(workflow.sprint_number)} сохранены. Утверждённый план не изменён.</p></div><span class="status moved">Нужен повтор</span></div><div class="replan-error">${escapeHtml(workflow.error || 'Неизвестная ошибка пересчёта.')}</div><button class="btn btn-blue" type="button" data-retry-replan="${attr(workflow.workflow_id)}">Повторить пересчёт</button></article>`;
+    return;
+  }
+  if (workflow.status !== 'READY_FOR_REVIEW') {
+    target.innerHTML = `<article class="panel"><h2>Фактические результаты сохранены</h2><p>Статус пересчёта: ${escapeHtml(workflow.status)}.</p></article>`;
+    return;
+  }
+  const diff = workflow.diff || {};
+  const changes = diff.affected_elements || diff.changed_tasks || [];
+  const isQuarterClose = workflow.kind === 'QUARTER_CLOSE_REVIEW';
+  const content = changes.length
+    ? `<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
+    : '<div class="replan-no-changes"><b>Изменений в плане не требуется</b><p>Фактический результат сохранён, а оставшийся план бизнес-эквивалентен утверждённому.</p></div>';
+  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} уже сохранён. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-page="current-sprint">Вернуться к текущему спринту</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length ? 'Утвердить изменения' : 'Подтвердить без изменений'}</button></div></article>`;
+}
+
+async function retryReplan(workflowId) {
+  try {
+    data.replanWorkflow = await window.postcodeApi.retryReplanDraft(workflowId);
+    renderRecalc();
+    showToast(data.replanWorkflow.status === 'READY_FOR_REVIEW' ? 'Черновик пересчёта готов к проверке.' : 'Повторный пересчёт не завершён.');
+  } catch (error) {
+    showToast(`Не удалось повторить пересчёт: ${error?.message || error}`);
+  }
+}
+
+async function approveReplan(workflowId) {
+  try {
+    await window.postcodeApi.approveReplanDraft(workflowId);
+    const dashboard = await window.postcodeApi.getDashboard();
+    hydrate(dashboard);
+    data.replanWorkflow = {workflow_id: workflowId, status: 'APPROVED'};
+    show('current-sprint');
+    showToast('Новый план утверждён. Открыт текущий спринт.');
+  } catch (error) {
+    showToast(`Не удалось утвердить план: ${error?.message || error}`);
+  }
+}
+
+function renderCurrentSprint() {
+  const sprint = currentSprint();
+  const pendingReview = data.replanWorkflow
+    && ['READY_FOR_REVIEW', 'REPLANNING_FAILED', 'ACTUAL_SAVED'].includes(data.replanWorkflow.status)
+    && Number(data.replanWorkflow.sprint_number) === sprint;
+  const quarterDone = data.plan?.quarter?.current_sprint === 6
+    && data.plan?.sprints?.every((item) => item.status === 'COMPLETED');
+  const sprintRows = sprintBy(sprint)?.tasks || [];
+  const sprintTasks = sprintRows.map((row) => taskBy(row.task_id)).filter(Boolean);
+  const allocations = sprintTasks.flatMap((task) => (task.allocations || [])
+    .filter((row) => Number(row.sprint) === sprint)
+    .map((row) => ({...row, task_id: task.task_id, task_title: task.title, owner_team_id: task.assigned_team_id})));
+  const teamIds = new Set([
+    ...sprintTasks.map((task) => task.assigned_team_id),
+    ...allocations.flatMap((row) => [row.owner_team_id, row.source_team_id]),
+  ].filter(Boolean));
+  const totalSp = sprintRows.reduce((sum, row) => sum + Number(row.capacity_sp_load || 0), 0);
+  const totalHours = allocations.reduce((sum, row) => sum + Number(row.allocated_hours || 0), 0);
+  $('#openSprintCloseDialog').disabled = quarterDone || pendingReview;
+  $('#currentSprintIntro').textContent = pendingReview
+    ? `Sprint ${sprint} закрыт · ожидается проверка нового плана`
+    : quarterDone
+    ? 'Sprint 6 завершён. Квартальный workflow закрыт.'
+    : `Sprint ${sprint} · ${sprintTasks.length} задач · ${teamIds.size} команд`;
+  if (pendingReview) {
+    $('#currentSprintNotice').innerHTML = '<aside class="development-notice pending-review-notice" role="status"><span class="development-icon">↻</span><div><b>Требуется подтверждение изменений плана</b><p>Факт спринта сохранён. Проверьте черновик пересчёта и подтвердите новую редакцию.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Посмотреть изменения</button></aside>';
+  } else if (quarterDone) {
+    $('#currentSprintNotice').innerHTML = '<aside class="development-notice" role="status"><span class="development-icon">✓</span><div><b>Квартал завершён</b><p>Спринт 6 зафиксирован. Новый спринт не создаётся.</p></div></aside>';
+  } else $('#currentSprintNotice').innerHTML = '';
+
+  $('#currentSprintSummary').innerHTML = [
+    ['Спринт', sprint], ['Задач', sprintTasks.length], ['Команд', teamIds.size], ['Нагрузка', `${number(totalSp)} SP`], ['Назначено', `${number(totalHours)} ч`],
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
+  $('#currentSprintTaskCount').textContent = `${sprintTasks.length}`;
+  $('#currentSprintTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
+    const taskAllocations = allocations.filter((row) => row.task_id === task.task_id);
+    const roles = task.role_hours_by_sprint?.[String(sprint)] || {};
+    const people = taskAllocations.map((row) => `<li><span><b>${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</b><small>${escapeHtml(row.role)}${row.cross_team ? ` · помощь ${escapeHtml(row.source_team_id)} → ${escapeHtml(row.owner_team_id)}` : ''}</small></span><strong>${number(row.allocated_hours)} ч</strong></li>`).join('');
+    const dependencies = (task.dependencies?.incoming || []).filter((item) => !item.satisfied).map((item) => item.status_message).filter(Boolean);
+    const detail = (task.reason_blocks || []).flatMap((block) => block.details || []).slice(0, 2);
+    return `<article class="current-sprint-task"><div class="current-sprint-task-heading"><div><button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}</button><h3>${escapeHtml(task.title)}</h3></div>${task.assigned_team_id ? `<button class="table-button" type="button" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)} ↗</button>` : '<span>Команда не указана</span>'}</div><div class="current-sprint-task-meta"><span>${number(task.story_points)} SP</span><span>${Object.keys(roles).map(escapeHtml).join(', ') || 'Роли не указаны'}</span><span>${number(task.hours_by_sprint?.[String(sprint)] || 0)} ч</span></div><ul class="current-sprint-people">${people || '<li><span>Назначения сотрудников отсутствуют</span></li>'}</ul>${dependencies.length || detail.length ? `<details><summary>Ограничения и пояснения</summary>${[...dependencies, ...detail].map((item) => `<p>${escapeHtml(item)}</p>`).join('')}</details>` : ''}</article>`;
+  }).join('') : empty(quarterDone ? 'Квартал завершён.' : 'В текущем спринте нет задач.');
+
+  const involvedTeamIds = [...teamIds];
+  $('#currentSprintTeamLoad').innerHTML = involvedTeamIds.length ? involvedTeamIds.map((teamId) => {
+    const team = teamBy(teamId);
+    const sp = teamSprintResource(teamId, sprint);
+    const usedHours = Number(team.source_used_hours_by_sprint?.[String(sprint)] || 0);
+    const capacityHours = Number(team.member_capacity_hours || 0);
+    const roleHours = {};
+    allocations.filter((row) => row.source_team_id === teamId).forEach((row) => { roleHours[row.role] = Number(roleHours[row.role] || 0) + Number(row.allocated_hours || 0); });
+    return `<section class="current-sprint-team-card"><h3><button class="table-button" type="button" data-open-team="${attr(teamId)}">${escapeHtml(team.name || teamId)} ↗</button></h3><div class="team-load-line"><span>SP команды</span><b>${number(sp.used)} / ${number(sp.capacity)} SP</b></div>${meter(sp.used, sp.capacity)}<div class="team-load-line"><span>Часы сотрудников</span><b>${number(usedHours)} / ${number(capacityHours)} ч</b></div>${meter(usedHours, capacityHours)}<div class="team-role-load">${Object.entries(roleHours).map(([role, hours]) => `<span><b>${escapeHtml(role)}</b>${number(hours)} ч запланировано</span>`).join('') || '<span>Назначений по ролям нет</span>'}</div></section>`;
+  }).join('') : empty('В текущем спринте нет задействованных команд.');
+
+  const crossTeam = allocations.filter((row) => row.cross_team);
+  $('#currentSprintCrossTeam').innerHTML = crossTeam.length ? crossTeam.map((row) => `<article class="current-sprint-help"><button type="button" class="table-button" data-open-employee="${attr(row.engineer_id)}">${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</button><span>${escapeHtml(row.source_team_id)} → ${escapeHtml(row.owner_team_id)}</span><span>${escapeHtml(row.role)}</span><button type="button" class="table-button" data-open-task="${attr(row.task_id)}">${escapeHtml(row.task_id)}</button><strong>${number(row.allocated_hours)} ч</strong></article>`).join('') : empty('Межкомандная помощь в текущем спринте не используется.');
+
+  const laterTasks = data.tasks.filter((task) => inQuarter(task) && !taskSprints(task).includes(sprint) && taskSprints(task).some((item) => item > sprint));
+  $('#currentSprintLaterTasks').innerHTML = laterTasks.length ? laterTasks.map((task) => {
+    const planned = taskSprints(task).find((item) => item > sprint);
+    const backendReason = (task.reason_blocks || []).flatMap((block) => block.details || [block.title]).find(Boolean)
+      || (task.reasons || []).map((item) => item.message).find(Boolean)
+      || task.summary;
+    return `<article class="current-sprint-later"><div><button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}</button><b>${escapeHtml(task.title)}</b></div><span>Запланирована на Sprint ${number(planned)}</span><p>${escapeHtml(backendReason || 'Причина указана в объяснении planner-а.')}</p></article>`;
+  }).join('') : empty('Все задачи утверждённого плана либо уже прошли, либо находятся в текущем спринте.');
+}
+
+function renderSprintCloseDialog() {
+  const sprint = currentSprint();
+  const sprintTasks = (sprintBy(sprint)?.tasks || []).map((row) => taskBy(row.task_id)).filter(Boolean);
+  const dueTasks = sprintTasks.filter((task) => Number(task.completion_sprint) === sprint);
+  $('#sprintCloseTitle').textContent = `Завершение Sprint ${sprint}`;
+  $('#sprintCloseSubtitle').textContent = 'Зафиксируйте фактический результат текущего спринта.';
+  $('#sprintCloseDueCount').textContent = `Задач, которые должны завершиться: ${dueTasks.length}`;
+  $('#sprintCloseTasks').innerHTML = dueTasks.length ? dueTasks.map((task) => {
+    const requirements = task.role_requirements || {};
+    const sprintHours = task.role_hours_by_sprint?.[String(sprint)] || {};
+    const roles = Object.fromEntries(Object.keys(requirements).map((role) => [role, sprintHours[role] ?? requirements[role]]));
+    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}"><label class="sprint-close-check"><input type="checkbox" data-task-unfinished disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><p>Остаток по ролям</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
+  }).join('') : empty('В этом спринте нет задач с плановым завершением.');
+  $('#sprintUnfinishedSection').hidden = true;
+  $$('input[name="allTasksCompleted"]').forEach((input) => { input.checked = false; });
+  $('#sprintCloseError').hidden = true;
+  $('#confirmCloseCurrentSprint').disabled = true;
+}
+
+function syncSprintCloseControls() {
+  const unfinishedEnabled = $('input[name="allTasksCompleted"]:checked')?.value === 'no';
+  $('#sprintUnfinishedSection').hidden = !unfinishedEnabled;
+  $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
+    const checkbox = $('[data-task-unfinished]', card);
+    checkbox.disabled = !unfinishedEnabled;
+    const taskEnabled = unfinishedEnabled && checkbox.checked;
+    $('.sprint-close-task-fields', card).hidden = !taskEnabled;
+    $('[data-task-reason]', card).disabled = !taskEnabled;
+    $$('[data-fact-role]', card).forEach((input) => { input.disabled = !taskEnabled; });
+  });
+}
+
+function openSprintCloseDialog() {
+  renderSprintCloseDialog();
+  $('#sprintCloseDialog').showModal();
+}
+
+function closeSprintCloseDialog() {
+  $('#sprintCloseDialog').close();
+}
+
+function roleHoursForTask(task, sprint) {
+  const future = {};
+  Object.entries(task.role_hours_by_sprint || {}).forEach(([sprintKey, roles]) => {
+    if (Number(sprintKey) > sprint) Object.entries(roles || {}).forEach(([role, hours]) => { future[role] = Number(future[role] || 0) + Number(hours || 0); });
+  });
+  return Object.keys(future).length ? future : {...(task.role_hours_by_sprint?.[String(sprint)] || task.role_requirements || {})};
+}
+
+async function closeCurrentSprint(event) {
+  event?.preventDefault();
+  const sprint = currentSprint();
+  const completionAnswer = $('input[name="allTasksCompleted"]:checked')?.value;
+  if (!completionAnswer) return;
+  const byTask = new Map();
+  if (completionAnswer === 'no') {
+    $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
+      if (!$('[data-task-unfinished]', card)?.checked) return;
+      const remaining = {};
+      $$('[data-fact-role]', card).forEach((input) => { const value = Number(input.value); if (value > 0) remaining[input.dataset.factRole] = value; });
+      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_role_hours: remaining, remaining_engineer_allocations: {}, unavailable_next_sprint: false, unavailable_engineer_ids: []});
+    });
+  }
+  const results = [...byTask.values()];
+  if (completionAnswer === 'no' && results.length === 0) {
+    $('#sprintCloseError').textContent = 'Выберите хотя бы одну незавершённую задачу.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  if (results.some((row) => !row.incomplete_reason)) {
+    $('#sprintCloseError').textContent = 'Для каждой незавершённой задачи выберите причину.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  if (results.some((row) => !row.task_completed && !Object.values(row.remaining_role_hours).some((hours) => Number(hours) > 0))) {
+    $('#sprintCloseError').textContent = 'Для каждой незавершённой задачи укажите остаток часов хотя бы по одной роли.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  const button = $('#confirmCloseCurrentSprint');
+  button.disabled = true;
+  let result;
+  try {
+    result = await window.postcodeApi.closeSprint({
+      sprint_number: sprint,
+      all_completed: completionAnswer === 'yes',
+      results,
+    });
+  } catch (error) {
+    $('#sprintCloseError').textContent = `Не удалось закрыть спринт: ${error?.message || error}`;
+    $('#sprintCloseError').hidden = false;
+    button.disabled = false;
+    return;
+  }
+
+  closeSprintCloseDialog();
+  if (result.replanning_required === false) {
+    data.replanWorkflow = null;
+    try {
+      const dashboard = await window.postcodeApi.getDashboard();
+      hydrate(dashboard);
+      show('current-sprint');
+      showToast(result.quarter_completed
+        ? 'Sprint 6 завершён. Квартал закрыт.'
+        : `Sprint ${sprint} завершён. Текущий спринт — Sprint ${number(result.current_sprint)}.`);
+    } catch (error) {
+      showToast(`Спринт сохранён, но экран не обновился: ${error?.message || error}. Обновите страницу.`);
+    }
+    return;
+  }
+  data.replanWorkflow = result;
+  show('recalc');
+  showToast(result.status === 'READY_FOR_REVIEW' ? 'Факт сохранён. Проверьте черновик нового плана.' : 'Факт сохранён, но пересчёт нужно повторить.');
 }
 
 function renderStar() {
@@ -901,7 +1395,7 @@ function renderStarTeams() {
     ? [['Инженеров', busTeam.engineer_count, 'neutral'], ['Компетенций', busTeam.competency_count, 'neutral'], ['BF = 1', summary.single_owner_count, 'critical'], ['Требуют внимания', summary.warning_count, 'warning'], ['Устойчивое покрытие', summary.healthy_count, 'healthy']]
     : [['Инженеров', busTeam.engineer_count, 'neutral'], ['Компетенции', 'Нет данных', 'neutral']];
   $('#teamMetrics').innerHTML = metrics.map(([label, value, tone]) => `<div class="bf-summary-item ${tone}"><span>${escapeHtml(label)}</span><b>${typeof value === 'number' ? number(value) : escapeHtml(value)}</b></div>`).join('');
-  $('#teamLifecycleActions').innerHTML = `${archiveState(team)}${team.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="team" data-archive-id="${attr(team.team_id)}" data-current-plan-reference="${active.length > 0 || engineers.length > 0}">Удалить</button></div>`}`;
+  $('#teamLifecycleActions').innerHTML = `${archiveState(team)}<div class="entity-actions"><button class="btn btn-outline" type="button" data-open-team="${attr(team.team_id)}">Открыть страницу команды ↗</button>${team.archived ? '' : `<button class="btn btn-danger" type="button" data-archive-entity="team" data-archive-id="${attr(team.team_id)}" data-current-plan-reference="${active.length > 0 || engineers.length > 0}">Удалить</button>`}</div>`;
   $('#teamMembers').innerHTML = engineers.length ? table(['Сотрудник', 'Роли', 'Grade', 'Доступно', 'Занято', 'Свободно'], engineers.map((engineer) => `<tr><td><button type="button" class="table-button" data-open-employee="${attr(engineer.engineer_id)}">${escapeHtml(engineer.engineer_id)} ↗</button></td><td>${escapeHtml(engineer.roles.join(', '))}</td><td>${escapeHtml(engineer.grade)}</td><td>${number(engineer.capacity_hours)} ч</td><td>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</td><td>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</td></tr>`)) : empty('В команде нет инженеров.');
   $('#teamWorkload').innerHTML = `<div class="forecast-number" style="font-size:52px">${memberCapacity ? Math.round(sourceUsed / memberCapacity * 100) : 0}%</div>${meter(sourceUsed, memberCapacity)}<div class="resource-line"><span>Доступно участникам</span><b>${number(memberCapacity)} ч</b></div><div class="resource-line"><span>Использовано участниками</span><b>${number(sourceUsed)} ч</b></div><div class="resource-line"><span>Работа задач выбранной команды</span><b>${number(team.task_work_hours_by_sprint?.[String(sprint)])} ч</b></div><div class="resource-line"><span>SP команды</span><b>${number(resource.used)} / ${number(resource.capacity)} SP</b></div>`;
   $('#teamTasks').innerHTML = active.length ? table(['Задача', 'Инициатива', 'Период', 'Статус'], active.map((task) => `<tr><td>${tButton(task)}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${escapeHtml(sprintLabel(task))}</td><td>${badge(task)}</td></tr>`)) : empty('Текущих задач нет.');
@@ -982,8 +1476,9 @@ function bindEvents() {
   $('#skillRole').addEventListener('change', (event) => { state.skillRole = event.target.value; renderStarSkills(); });
   $('#skillTech').addEventListener('change', (event) => { state.skillTech = event.target.value; renderStarSkills(); });
   $('#criticalOnly').addEventListener('change', (event) => { state.criticalOnly = event.target.checked; renderStarSkills(); });
-  $('#chooseFact').addEventListener('click', () => $('#factInput').click());
-  $('#factInput').addEventListener('change', (event) => { const file = event.target.files?.[0]; $('#uploadFileStatus').textContent = file ? `Выбран файл: ${file.name}. Backend пересчёта не подключён, файл не обработан.` : 'Файл не выбран'; });
+  $('#openSprintCloseDialog').addEventListener('click', openSprintCloseDialog);
+  $('#sprintCloseForm').addEventListener('submit', closeCurrentSprint);
+  $('#sprintCloseDialog').addEventListener('click', (event) => { if (event.target === $('#sprintCloseDialog')) closeSprintCloseDialog(); });
   $('#archiveForm').addEventListener('submit', (event) => { event.preventDefault(); submitArchive(); });
   $('#archiveReason').addEventListener('change', updateArchiveConfirmation);
   $('#archiveReasonText').addEventListener('input', updateArchiveConfirmation);
@@ -994,7 +1489,12 @@ function bindEvents() {
   $('#riskDialog')?.addEventListener('close', () => { state.riskModalOpen = false; renderRisks(); });
   $('#riskSearch')?.addEventListener('input', (event) => { state.riskSearch = event.target.value; renderRisks(); });
   document.addEventListener('click', (event) => {
+    const approveReplanButton = event.target.closest('[data-approve-replan]');
+    if (approveReplanButton) { approveReplan(approveReplanButton.dataset.approveReplan); return; }
+    const retryReplanButton = event.target.closest('[data-retry-replan]');
+    if (retryReplanButton) { retryReplan(retryReplanButton.dataset.retryReplan); return; }
     if (event.target.closest('.catalog-skill-more')) return;
+    if (event.target.closest('[data-close-sprint-dialog]')) { closeSprintCloseDialog(); return; }
     if (event.target.closest('[data-close-archive]')) { closeArchiveModal(); return; }
     const archive = event.target.closest('[data-archive-entity]');
     if (archive) { openArchiveModal(archive.dataset.archiveEntity, archive.dataset.archiveId, archive.dataset.currentPlanReference === 'true'); return; }
@@ -1032,12 +1532,20 @@ function bindEvents() {
     const filter = event.target.closest('[data-risk-filter]'); if (filter) { state.riskFilter = filter.dataset.riskFilter; renderRisks(); return; }
     const riskRow = event.target.closest('[data-risk-id]'); if (riskRow) { state.riskId = riskRow.dataset.riskId; openRiskModal(riskRow.dataset.riskId); renderRisks(); return; }
     const competency = event.target.closest('[data-star-competency]'); if (competency) { state.competency = competency.dataset.starCompetency; renderStarTeams(); $('#competencyDetail')?.scrollIntoView({behavior: 'smooth', block: 'nearest'}); return; }
+    const teamBack = event.target.closest('[data-team-back]'); if (teamBack) { show(state.teamReturnPage || 'teams'); return; }
+    const teamDetailTab = event.target.closest('[data-team-detail-tab]'); if (teamDetailTab) { state.teamDetailTab = teamDetailTab.dataset.teamDetailTab; renderTeamDetail(); return; }
+    const engineerBack = event.target.closest('[data-engineer-back]'); if (engineerBack) { show(state.engineerReturnPage || 'engineers'); return; }
+    const engineerDetailTab = event.target.closest('[data-engineer-detail-tab]'); if (engineerDetailTab) { state.engineerDetailTab = engineerDetailTab.dataset.engineerDetailTab; renderEngineerDetail(); return; }
     const team = event.target.closest('[data-open-team]'); if (team) { closeRiskModal(); gotoTeam(team.dataset.openTeam); return; }
     const employee = event.target.closest('[data-open-employee]'); if (employee) { gotoEmployee(employee.dataset.openEmployee); return; }
     const backToTeam = event.target.closest('[data-employee-team]'); if (backToTeam) { closeEmployee(); gotoTeam(backToTeam.dataset.employeeTeam); return; }
     const starTab = event.target.closest('[data-star-tab]'); if (starTab) { state.starTab = starTab.dataset.starTab; renderStar(); return; }
   });
-  document.addEventListener('change', (event) => { if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); } });
+  document.addEventListener('change', (event) => {
+    if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); return; }
+    if (event.target.matches('[data-task-unfinished]')) { syncSprintCloseControls(); return; }
+    if (event.target.name === 'allTasksCompleted') { syncSprintCloseControls(); $('#confirmCloseCurrentSprint').disabled = false; $('#sprintCloseError').hidden = true; }
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { closeArchiveModal(); closeRiskModal(); closeEmployee(); }
     const taskRow = event.target.closest?.('[data-task-row]');
@@ -1050,12 +1558,20 @@ function bindEvents() {
   window.addEventListener('popstate', () => {
     const route = routeFromLocation();
     state.taskId = route.taskId || state.taskId;
+    state.teamId = route.teamId || state.teamId;
+    state.engineerId = route.engineerId || state.engineerId;
     state.taskSprint = null;
     show(route.page, false);
+    if (route.page === 'team-detail' && state.teamId) loadTeamDetail(state.teamId);
+    if (route.page === 'engineer-detail' && state.engineerId) loadEngineerDetail(state.engineerId);
   });
 }
 
 function hydrate(payload) {
+  data.teamDetails = {};
+  data.teamHistories = {};
+  data.engineerDetails = {};
+  data.engineerHistories = {};
   data.plan = payload.plan;
   data.summary = payload.summary;
   data.tasks = payload.tasks || [];
@@ -1070,7 +1586,8 @@ function hydrate(payload) {
   state.loading = false;
   state.error = null;
   if (!state.taskId) state.taskId = data.tasks.find((task) => task.status === 'PLANNED')?.task_id || data.tasks[0]?.task_id || null;
-  state.teamId = data.starMap.teams?.[0]?.team_id || data.teams[0]?.team_id || null;
+  if (!state.teamId) state.teamId = data.starMap.teams?.[0]?.team_id || data.teams[0]?.team_id || null;
+  if (!state.engineerId) state.engineerId = data.engineers[0]?.engineer_id || null;
   state.competency = null;
   state.riskSearch = '';
   state.riskModalOpen = false;
@@ -1081,17 +1598,21 @@ async function initialize() {
   bindEvents();
   const initialRoute = routeFromLocation();
   state.taskId = initialRoute.taskId;
+  state.teamId = initialRoute.teamId;
+  state.engineerId = initialRoute.engineerId;
   show(initialRoute.page, 'replace');
   try {
-    const [dashboard, constructorCatalog, archiveReasons] = await Promise.all([
+    const [dashboard, constructorCatalog, archiveReasons, replanWorkflow] = await Promise.all([
       window.postcodeApi.getDashboard(),
       window.postcodeApi.getConstructorCatalog(),
       window.postcodeApi.getArchiveReasons(),
+      window.postcodeApi.getReplanDraft(),
     ]);
     data.historicalTasks = (constructorCatalog.tasks || [])
       .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
       .map(historicalTaskFromCatalog);
     hydrate(dashboard);
+    data.replanWorkflow = replanWorkflow.status === 'NONE' ? null : replanWorkflow;
     data.archiveReasons = archiveReasons;
     window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
       hydrate(plannerResult);
@@ -1101,7 +1622,10 @@ async function initialize() {
         .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
         .map(historicalTaskFromCatalog);
     });
-    renderPage(state.page);
+    if (hasPendingReplan() && state.page === 'home') show('recalc');
+    else renderPage(state.page);
+    if (state.page === 'team-detail' && state.teamId) loadTeamDetail(state.teamId);
+    if (state.page === 'engineer-detail' && state.engineerId) loadEngineerDetail(state.engineerId);
   } catch (error) {
     state.loading = false;
     state.error = error?.message || 'неизвестная ошибка';

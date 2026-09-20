@@ -74,6 +74,93 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 
 
 class ConstructorDomainTests(unittest.TestCase):
+    def test_manual_scenario_preserves_owner_and_baseline_dates(self) -> None:
+        payload = scenario_payload()
+        payload["tasks"][0].update({
+            "team_id": "Team-A",
+            "planned_start": "2026-01-12",
+            "deadline": "2026-02-20",
+        })
+
+        task = scenario_tables(ConstructorScenario(**payload))["tasks"][0]
+
+        self.assertEqual(task["team_id"], "Team-A")
+        self.assertEqual(task["planned_start"], "2026-01-12")
+        self.assertEqual(task["deadline"], "2026-02-20")
+
+    def test_best_keeps_absolute_higher_rung_priority(self) -> None:
+        payload = scenario_payload()
+        payload["teams"][0]["expected_velocity_sp"] = 1.25
+        payload["tasks"] = [
+            {
+                "task_id": "HIGH", "title": "High", "initiative_id": "I-H",
+                "team_id": "Team-A", "status": "ToDo", "rung": 10,
+                "story_points": 6,
+                "role_requirements": [{"role": "Backend", "required_hours": 60, "skills": []}],
+                "depends_on": [],
+            },
+            *[
+                {
+                    "task_id": f"LOW-{index}", "title": "Low", "initiative_id": f"I-L{index}",
+                    "team_id": "Team-A", "status": "ToDo", "rung": 5,
+                    "story_points": 3,
+                    "role_requirements": [{"role": "Backend", "required_hours": 30, "skills": []}],
+                    "depends_on": [],
+                }
+                for index in (1, 2)
+            ],
+        ]
+
+        draft = RecommendationDraft(build_constructor_plan(ConstructorScenario(**payload)))
+        best = {task["task_id"]: task for task in draft.optimized_plan["tasks"]}
+
+        self.assertEqual(best["HIGH"]["status"], "PLANNED")
+        self.assertNotEqual(best["LOW-1"]["status"], "PLANNED")
+        self.assertNotEqual(best["LOW-2"]["status"], "PLANNED")
+
+    def test_best_and_kpi_baseline_stay_stable_across_draft_actions(self) -> None:
+        draft = RecommendationDraft(
+            build_constructor_plan(ConstructorScenario(**self.cross_team_payload(task_count=2)))
+        )
+        best_fingerprint = draft.best_fingerprint
+        baseline = deepcopy(draft.base_plan["kpis"])
+        recommendation_ids = list(draft.recommendations)
+        self.assertTrue(recommendation_ids)
+
+        draft.apply(recommendation_ids[0])
+        self.assertEqual(draft.best_fingerprint, best_fingerprint)
+        self.assertEqual(
+            draft.current_plan["kpis"]["expected_kpi"]["baseline_initiatives"],
+            baseline["expected_kpi"]["baseline_initiatives"],
+        )
+        draft.undo(recommendation_ids[0])
+        self.assertEqual(draft.best_fingerprint, best_fingerprint)
+        draft.apply_all()
+        self.assertEqual(draft.current_plan, draft.optimized_plan)
+        self.assertEqual(draft.best_fingerprint, best_fingerprint)
+
+    def test_recommendations_use_start_date_after_type_and_rung(self) -> None:
+        draft = object.__new__(RecommendationDraft)
+        draft.base_plan = {"tasks": [
+            {"task_id": "LATE", "baseline_start_date": "2026-02-01"},
+            {"task_id": "EARLY", "baseline_start_date": "2026-01-01"},
+            {"task_id": "HELP", "baseline_start_date": "2025-12-01"},
+        ]}
+        draft.accepted = []
+        draft.rejected = set()
+        draft._all_recommendations = {
+            item["recommendation_id"]: item
+            for item in [
+                {"recommendation_id": "late", "type": "TASK_REASSIGNMENT", "rung": 10, "task_id": "LATE", "requires": []},
+                {"recommendation_id": "early", "type": "TASK_REASSIGNMENT", "rung": 10, "task_id": "EARLY", "requires": []},
+                {"recommendation_id": "help", "type": "CROSS_TEAM_HELP", "rung": 100, "task_id": "HELP", "requires": []},
+            ]
+        }
+
+        draft._refresh_available()
+
+        self.assertEqual(list(draft.recommendations), ["early", "late", "help"])
+
     @staticmethod
     def cross_team_payload(task_count: int = 1) -> dict:
         engineers = []
@@ -545,7 +632,7 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(current_after_approval.status_code, 200)
         self.assertEqual(
             current_after_approval.json()["plan"]["quarter"]["plan_version"],
-            "constructor-draft",
+            draft["plan"]["quarter"]["plan_version"],
         )
         self.assertEqual(
             [task["task_id"] for task in current_after_approval.json()["tasks"]],

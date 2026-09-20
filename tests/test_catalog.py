@@ -186,6 +186,29 @@ class CatalogMergeTests(unittest.TestCase):
         self.repo.merge_tables({"tasks": [catalog_tables()["tasks"][0]]})
         self.assertIn("TASK-OLD", {row["task_id"] for row in self.repo.tables()["tasks"]})
 
+    def test_linked_data_conflict_is_reported_without_overwrite(self) -> None:
+        result = self.repo.merge_tables({
+            "task_role_effort": [
+                {"task_id": "TASK-A", "role": "Backend", "required_hours": 24}
+            ],
+            "engineer_skills": [
+                {"engineer_id": "E-1", "technology": "Java"}
+            ],
+        })
+
+        self.assertEqual(
+            [row for row in self.repo.tables()["task_role_effort"] if row["task_id"] == "TASK-A"],
+            [{"task_id": "TASK-A", "role": "Backend", "required_hours": 8}],
+        )
+        self.assertEqual(
+            [row for row in self.repo.tables()["engineer_skills"] if row["engineer_id"] == "E-1"],
+            [{"engineer_id": "E-1", "technology": "Python"}],
+        )
+        self.assertEqual(
+            {(item["table"], item["entity_id"]) for item in result.conflicts},
+            {("task_role_effort", "TASK-A"), ("engineer_skills", "E-1")},
+        )
+
 
 class HistoricalDependencyTests(unittest.TestCase):
     def test_done_catalog_blocker_is_not_required_in_selection(self) -> None:

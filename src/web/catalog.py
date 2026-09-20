@@ -204,8 +204,104 @@ class CatalogRepository:
                     FOREIGN KEY (table_name, row_key)
                         REFERENCES catalog_rows(table_name, row_key)
                 );
+                CREATE TABLE IF NOT EXISTS plan_snapshots (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    revision INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS current_plan_snapshot (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    snapshot_id INTEGER NOT NULL,
+                    FOREIGN KEY (snapshot_id) REFERENCES plan_snapshots(snapshot_id)
+                );
+                CREATE TABLE IF NOT EXISTS replan_workflows (
+                    workflow_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+
+    def save_approved_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Append an immutable approved snapshot and make it current."""
+
+        saved = deepcopy(dict(payload))
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            previous = connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) FROM plan_snapshots"
+            ).fetchone()[0]
+            revision = int(previous) + 1
+            cursor = connection.execute(
+                "INSERT INTO plan_snapshots(revision,payload,created_at) VALUES(?,?,?)",
+                (revision, _json_payload(saved), now),
+            )
+            snapshot_id = int(cursor.lastrowid)
+            saved["approved_snapshot"] = {
+                "snapshot_id": snapshot_id,
+                "revision": revision,
+                "created_at": now,
+            }
+            connection.execute(
+                "UPDATE plan_snapshots SET payload=? WHERE snapshot_id=?",
+                (_json_payload(saved), snapshot_id),
+            )
+            connection.execute(
+                "INSERT INTO current_plan_snapshot(singleton,snapshot_id) VALUES(1,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET snapshot_id=excluded.snapshot_id",
+                (snapshot_id,),
+            )
+        return saved
+
+    def load_approved_plan(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT snapshots.payload FROM current_plan_snapshot current "
+                "JOIN plan_snapshots snapshots ON snapshots.snapshot_id=current.snapshot_id "
+                "WHERE current.singleton=1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def approved_plan_history(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM plan_snapshots ORDER BY revision"
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def save_replan_workflow(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist one sprint-close/replan lifecycle independently of Approved Plan."""
+
+        saved = deepcopy(dict(payload))
+        workflow_id = _text(saved.get("workflow_id"))
+        if not workflow_id:
+            raise ValueError("workflow_id is required")
+        now = datetime.now(timezone.utc).isoformat()
+        saved["updated_at"] = now
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO replan_workflows(workflow_id,payload,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(workflow_id) DO UPDATE SET "
+                "payload=excluded.payload,updated_at=excluded.updated_at",
+                (workflow_id, _json_payload(saved), now),
+            )
+        return saved
+
+    def load_replan_workflow(self, workflow_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM replan_workflows WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def latest_replan_workflow(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM replan_workflows ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def _seed_if_empty(
         self, tables: Mapping[str, Iterable[Mapping[str, Any]]]
@@ -826,12 +922,33 @@ class CatalogRepository:
         }
         for table_name, (entity_type, field) in linked_specs.items():
             rows_to_insert[table_name] = []
+            current_groups = self._groups(current.get(table_name, []), field)
+            incoming_groups = self._groups(materialized.get(table_name, []), field)
             for row in materialized.get(table_name, []):
                 entity_id = _text(row.get(field))
                 if entity_id in new_entity_ids.get(entity_type, set()):
                     rows_to_insert[table_name].append(row)
                 else:
                     kept[table_name] = kept.get(table_name, 0) + 1
+            for entity_id, incoming_rows in incoming_groups.items():
+                if entity_id in new_entity_ids.get(entity_type, set()):
+                    continue
+                saved_rows = current_groups.get(entity_id, [])
+                if sorted(_comparison_payload(row) for row in saved_rows) == sorted(
+                    _comparison_payload(row) for row in incoming_rows
+                ):
+                    continue
+                warnings.append(
+                    f"Связанные данные {entity_id} в {table_name} отличаются. "
+                    "Данные из Excel не применены."
+                )
+                conflicts.append({
+                    "table": table_name,
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "saved": [dict(row) for row in saved_rows],
+                    "excel": [dict(row) for row in incoming_rows],
+                })
 
         independent_tables = set(materialized) - set(rows_to_insert)
         for table_name in independent_tables:

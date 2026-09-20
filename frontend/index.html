@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260919-7">
+  <link rel="stylesheet" href="/styles.css?v=20260920-12">
 </head>
 <body>
   <div class="shell">
@@ -15,11 +15,11 @@
         <button type="button" class="nav-link active" data-page="home">Главная</button>
         <button type="button" class="nav-link" data-page="planning">Планирование</button>
         <button type="button" class="nav-link" data-page="current-plan">Текущий план</button>
+        <button type="button" class="nav-link" data-page="current-sprint">Текущий спринт</button>
         <button type="button" class="nav-link" data-page="tasks">Задачи</button>
         <button type="button" class="nav-link" data-page="engineers">Инженеры</button>
         <button type="button" class="nav-link" data-page="teams">Команды</button>
         <button type="button" class="nav-link" data-page="risks">Риски</button>
-        <button type="button" class="nav-link" data-page="recalc">Пересчёт плана</button>
         <button type="button" class="nav-link" data-page="star">Звёздная карта</button>
       </nav>
     </header>
@@ -29,7 +29,7 @@
         <div class="hero home-hero"><div class="hero-copy"><h1 id="homeTitle">План на виду.<br><em>Команда в фокусе.</em></h1><p>Шесть спринтов, работающие задачи и риски — одна точка входа в сервис.</p><button class="btn btn-white" type="button" data-page="current-plan">Открыть текущий план <span>↗</span></button></div><div class="hero-graphic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="abstract-card one">✦</div><div class="abstract-card two">◎</div><div class="abstract-card three">▦</div></div></div>
         <div class="section-heading"><h2>Шесть спринтов</h2><button class="text-button" type="button" data-page="current-plan">Текущий план <span>↗</span></button></div>
         <div id="homeSprints" class="home-sprints"></div>
-        <div class="recalc-banner"><span class="recalc-banner-icon">↻</span><div><h3>Завершили спринт?</h3><p>Перейдите к загрузке факта и посмотрите сценарий пересчёта плана.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Пересчитать план →</button></div>
+        <div class="recalc-banner"><span class="recalc-banner-icon">↻</span><div><h3>Завершили спринт?</h3><p>Откройте текущий спринт и зафиксируйте только фактические отклонения.</p></div><button class="btn btn-blue" type="button" data-page="current-sprint">Открыть текущий спринт →</button></div>
         <div class="two-cols home-sections"><article class="panel"><div class="panel-heading"><h2>Текущие задачи</h2></div><div id="homeTasks" class="stack"></div></article><article class="panel"><div class="panel-heading"><h2>Ключевые риски</h2><button class="text-button" data-page="risks" type="button">Все риски ↗</button></div><div id="homeRisks" class="stack"></div></article></div>
         <div class="star-banner"><div class="star-banner-icon">✳</div><div><h2>Узнайте, кто в чём силён</h2><p>Команды, инженеры, технологии, занятость и Bus Factor.</p></div><button class="btn btn-blue" type="button" data-page="star">Посмотреть звёздную карту ↗</button></div>
       </section>
@@ -82,6 +82,17 @@
         <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
       </section>
 
+      <section class="page" id="page-current-sprint" aria-labelledby="currentSprintTitle">
+        <div class="current-sprint-toolbar"><button class="btn btn-outline" type="button" data-page="current-plan">← К текущему плану</button><button class="btn btn-danger-outline" type="button" id="openSprintCloseDialog">Завершить спринт</button></div>
+        <div class="page-intro planning-hero current-sprint-hero"><div><div class="eyebrow">ТЕКУЩЕЕ СОСТОЯНИЕ</div><h1 id="currentSprintTitle">Текущий спринт</h1><p id="currentSprintIntro">Задачи, команды и запланированная загрузка.</p></div><div class="page-intro-icon">✓</div></div>
+        <div id="currentSprintNotice"></div>
+        <div id="currentSprintSummary" class="current-sprint-summary"></div>
+        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Задачи спринта</h2><p class="hint">Утверждённая работа текущего спринта и назначения сотрудников.</p></div><span class="tag" id="currentSprintTaskCount">0</span></div><div id="currentSprintTasks" class="current-sprint-task-list"></div></article>
+        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Загрузка команд</h2><p class="hint">Story Points и человеко-часы показаны раздельно.</p></div></div><div id="currentSprintTeamLoad" class="current-sprint-team-grid"></div></article>
+        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Помощь другим командам</h2><p class="hint">Только реальные cross-team назначения текущего спринта.</p></div></div><div id="currentSprintCrossTeam" class="current-sprint-help-list"></div></article>
+        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Не в текущем спринте</h2><p class="hint">Задачи утверждённого квартального плана, запланированные позже.</p></div></div><div id="currentSprintLaterTasks" class="current-sprint-later-list"></div></article>
+      </section>
+
       <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
         <div class="page-intro tasks-list-hero"><div><h1 id="tasksListTitle">Задачи</h1><p>Все задачи текущего набора: приоритет, команда, инициатива и положение в квартальном плане.</p></div><div class="page-intro-icon" aria-hidden="true">✓</div></div>
         <article class="panel tasks-list-panel">
@@ -118,6 +129,22 @@
         </article>
       </section>
 
+      <section class="page" id="page-engineer-detail" aria-labelledby="engineerDetailTitle">
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-engineer-back>← Назад</button></div>
+        <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ ИНЖЕНЕРА</div><h1 id="engineerDetailTitle">Инженер</h1><p id="engineerDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◉</div></div>
+        <div id="engineerDetailState" aria-live="polite"></div>
+        <div id="engineerDetailContent" hidden>
+          <div class="entity-detail-summary" id="engineerDetailSummary"></div>
+          <div class="subnav entity-detail-tabs" role="tablist" aria-label="Разделы страницы инженера">
+            <button class="subtab active" type="button" data-engineer-detail-tab="overview">Обзор</button>
+            <button class="subtab" type="button" data-engineer-detail-tab="tasks">Задачи</button>
+            <button class="subtab" type="button" data-engineer-detail-tab="history">История</button>
+            <button class="subtab" type="button" data-engineer-detail-tab="skills">Навыки</button>
+          </div>
+          <div id="engineerDetailBody"></div>
+        </div>
+      </section>
+
       <section class="page" id="page-teams" aria-labelledby="teamsListTitle">
         <div class="page-intro entity-list-hero"><div><h1 id="teamsListTitle">Команды</h1><p>Состав, производительность, загрузка и устойчивость команд текущего плана.</p></div><div class="page-intro-icon" aria-hidden="true">◆</div></div>
         <article class="panel entity-list-panel">
@@ -134,6 +161,23 @@
             <th><button class="sort-button" type="button" data-team-sort="bus_factor">Риски BF <span aria-hidden="true"></span></button></th>
           </tr></thead><tbody id="teamsTableBody"></tbody></table></div>
         </article>
+      </section>
+
+      <section class="page" id="page-team-detail" aria-labelledby="teamDetailTitle">
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-team-back>← Назад</button></div>
+        <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h1 id="teamDetailTitle">Команда</h1><p id="teamDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◆</div></div>
+        <div id="teamDetailState" aria-live="polite"></div>
+        <div id="teamDetailContent" hidden>
+          <div class="entity-detail-summary" id="teamDetailSummary"></div>
+          <div class="subnav entity-detail-tabs" role="tablist" aria-label="Разделы страницы команды">
+            <button class="subtab active" type="button" data-team-detail-tab="overview">Обзор</button>
+            <button class="subtab" type="button" data-team-detail-tab="tasks">Задачи</button>
+            <button class="subtab" type="button" data-team-detail-tab="members">Состав</button>
+            <button class="subtab" type="button" data-team-detail-tab="history">История</button>
+            <button class="subtab" type="button" data-team-detail-tab="skills">Компетенции</button>
+          </div>
+          <div id="teamDetailBody"></div>
+        </div>
       </section>
 
       <section class="page" id="page-task-detail" aria-labelledby="taskDetailTitle">
@@ -155,7 +199,7 @@
         <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
       </section>
 
-      <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ЗАВЕРШЕНИЕ СПРИНТА</div><h1 id="recalcTitle">Пересчёт плана</h1><p>Сценарий загрузки факта и пересмотра оставшейся части квартала.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcDevelopmentNotice"></div><div class="recalc-warning"><b>Функция ещё не подключена.</b> Backend пересчёта и обработка файла факта не реализованы. Выбор файла не означает, что его данные обработаны.</div><article class="panel upload-card"><div><div class="eyebrow">ФАКТ ЗАВЕРШЁННОГО СПРИНТА</div><h2>Загрузите фактические результаты</h2><p>После появления backend эта форма будет запускать пересчёт оставшейся части квартала с сохранением исходного плана недели 0.</p><div class="upload-filename" id="uploadFileStatus">Файл не выбран</div></div><div class="upload-actions"><input type="file" id="factInput" accept=".csv,.json,.xlsx,.xls" hidden><button class="btn btn-blue" type="button" id="chooseFact">Выбрать файл факта</button><button class="btn btn-outline" type="button" id="runDemo" disabled>Backend пересчёта не подключён</button></div></article><div id="recalcPlaceholder" class="panel empty-recalc"><span class="big-icon">↗</span><h2>Как будет работать пересчёт</h2><p>Факт завершённого спринта → новый актуальный план → изменения и причины решений. Исходный план недели 0 останется неизменным.</p></div><div id="recalcResult" hidden></div></section>
+      <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ПРОВЕРКА ИЗМЕНЕНИЙ</div><h1 id="recalcTitle">Изменения плана</h1><p id="recalcSubtitle">Проверьте изменения перед утверждением нового плана.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcResult" hidden></div></section>
 
       <section class="page" id="page-star" aria-labelledby="starTitle"><div class="page-intro"><div><div class="eyebrow">TEAM INTELLIGENCE</div><h1 id="starTitle">Звёздная карта</h1><p>Покрытие компетенций команды, кадровые риски и люди, от которых зависит результат.</p></div><div class="page-intro-icon">✳</div></div><div class="subnav" role="tablist" aria-label="Разделы звёздной карты"><button class="subtab active" data-star-tab="teams" type="button" role="tab" aria-selected="true">Карта команды</button><button class="subtab" data-star-tab="skills" type="button" role="tab" aria-selected="false">Навыки</button><button class="subtab" data-star-tab="distribution" type="button" role="tab" aria-selected="false">Распределение</button></div>
         <div id="starTeams" class="star-view active"><div class="panel team-selector"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h2>Выберите команду</h2><p class="hint">Карта и список рисков обновятся вместе.</p></div><div class="team-selector-control"><label for="starTeamSelect">Команда</label><select id="starTeamSelect" aria-label="Выбрать команду"></select></div></div><div id="teamMetrics" class="bf-summary"></div><div id="teamLifecycleActions"></div><div class="bus-factor-layout"><article class="panel competency-map-panel"><div class="panel-heading"><div><div class="eyebrow">КОМАНДА × КОМПЕТЕНЦИИ</div><h2>Карта покрытия</h2></div><button class="info-tip" type="button" aria-label="Что такое Bus Factor" data-tooltip="Bus Factor показывает, сколько инженеров способны покрыть конкретную компетенцию. Чем меньше значение, тем выше зависимость команды от отдельных специалистов.">i</button></div><div id="competencyMap" class="competency-map" aria-live="polite"></div><div id="competencyDetail" class="competency-detail" aria-live="polite"></div></article><aside class="panel bus-risk-panel"><div class="eyebrow">ПРИОРИТЕТЫ</div><h2>Риски и Bus Factor</h2><p class="hint">От наиболее уязвимых компетенций к устойчивым.</p><div id="busRiskList" class="bus-risk-list"></div></aside></div><div class="two-cols"><article class="panel"><div class="eyebrow">СОСТАВ</div><h2>Специалисты</h2><div class="table-scroll" id="teamMembers"></div></article><article class="panel"><div class="eyebrow">ЗАГРУЗКА · ЧАСЫ</div><h2>Доступность команды</h2><div id="teamWorkload"></div></article></div><article class="panel"><div class="eyebrow">ЗАДАЧИ И ИНИЦИАТИВЫ</div><h2>Текущая работа</h2><div id="teamTasks" class="table-scroll"></div></article></div>
@@ -175,6 +219,17 @@
       </div>
     </dialog>
     <dialog class="constructor-dialog" id="constructorDialog"><form method="dialog"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form><div id="constructorDialogContent"></div></dialog>
+    <dialog class="sprint-close-dialog" id="sprintCloseDialog" aria-labelledby="sprintCloseTitle">
+      <form id="sprintCloseForm">
+        <header class="sprint-close-header"><div><div class="eyebrow">ФАКТИЧЕСКОЕ ЗАВЕРШЕНИЕ</div><h2 id="sprintCloseTitle">Завершение спринта</h2><p id="sprintCloseSubtitle"></p></div><button class="drawer-close" type="button" data-close-sprint-dialog aria-label="Закрыть">×</button></header>
+        <div class="sprint-close-body">
+          <section class="sprint-close-question"><h3>Все задачи завершены согласно плану?</h3><p id="sprintCloseDueCount"></p><div class="sprint-answer-options"><label><input type="radio" name="allTasksCompleted" value="yes"><span>Да</span></label><label><input type="radio" name="allTasksCompleted" value="no"><span>Нет</span></label></div></section>
+          <section id="sprintUnfinishedSection" hidden><div class="sprint-close-section-heading"><div><h3>Какие задачи не были завершены?</h3><p>Выберите задачи с плановым завершением в этом спринте и укажите остаток работы.</p></div></div><div id="sprintCloseTasks" class="sprint-close-task-list"></div></section>
+          <div id="sprintCloseError" class="constructor-errors" hidden></div>
+        </div>
+        <footer class="sprint-close-actions"><button class="btn btn-outline" type="button" data-close-sprint-dialog>Отмена</button><button class="btn btn-blue" type="submit" id="confirmCloseCurrentSprint">Завершить спринт</button></footer>
+      </form>
+    </dialog>
     <dialog class="risk-dialog" id="riskDialog" aria-labelledby="riskDialogTitle">
       <div class="risk-dialog-shell">
         <form method="dialog" class="risk-dialog-close-form"><button class="drawer-close" value="cancel" aria-label="Закрыть">×</button></form>
@@ -199,8 +254,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260919-7"></script>
-  <script src="/constructor.js?v=20260919-7"></script>
-  <script src="/app.js?v=20260919-7"></script>
+  <script src="/api.js?v=20260919-9"></script>
+  <script src="/constructor.js?v=20260919-9"></script>
+  <script src="/app.js?v=20260920-11"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections.abc import Mapping
 
 from .models import FeasibilityResult
 from .ownership import TaskOwnership
@@ -26,6 +27,7 @@ def allocate_available_hours(
     max_total_hours: float = float("inf"),
     prior_ownership: TaskOwnership | None = None,
     enforce_owner_majority: bool = False,
+    preferred_engineer_hours: Mapping[str, float] | None = None,
 ) -> AllocationOutcome:
     """Prefer local engineers, then free hours and engineer_id within each role.
 
@@ -41,6 +43,10 @@ def allocate_available_hours(
         by_role.setdefault(engineer.required_role, []).append(engineer)
 
     assigned_by_bucket: dict[tuple[str, str], float] = {}
+    preferred_hours = {
+        str(engineer_id): max(float(hours), 0.0)
+        for engineer_id, hours in (preferred_engineer_hours or {}).items()
+    }
     role_allocations: dict[str, float] = {}
     engineer_allocations: list[EngineerTaskAllocation] = []
     task_team = feasibility.team_capacity.team_id if feasibility.team_capacity else None
@@ -59,6 +65,7 @@ def allocate_available_hours(
         candidates = sorted(
             by_role.get(role, []),
             key=lambda item: (
+                item.engineer_id not in preferred_hours,
                 item.source_team_id != task_team,
                 -max(
                     item.available_hours
@@ -75,7 +82,17 @@ def allocate_available_hours(
             bucket = (engineer.engineer_id, engineer.source_team_id)
             already_assigned = assigned_by_bucket.get(bucket, 0.0)
             available = max(engineer.available_hours - already_assigned, 0.0)
-            hours = min(role_remaining - allocated, available)
+            if engineer.engineer_id in preferred_hours:
+                preferred_used = sum(
+                    row.hours
+                    for row in engineer_allocations
+                    if row.engineer_id == engineer.engineer_id
+                )
+                available = min(
+                    available,
+                    max(preferred_hours[engineer.engineer_id] - preferred_used, 0.0),
+                )
+            hours = round(min(role_remaining - allocated, available), 10)
             if hours <= 0:
                 continue
             assigned_by_bucket[bucket] = already_assigned + hours

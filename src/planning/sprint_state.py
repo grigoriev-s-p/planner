@@ -34,7 +34,11 @@ class SprintLedger:
             warnings=list(self.warnings),
         )
 
-    def feasibility_state(self, completed_tasks: dict[str, int]) -> SprintState:
+    def feasibility_state(
+        self,
+        completed_tasks: dict[str, int],
+        actual_completed_tasks: dict[str, int] | None = None,
+    ) -> SprintState:
         return SprintState(
             sprint_number=self.sprint_number,
             team_sp_used=dict(self.team_sp_used),
@@ -44,6 +48,7 @@ class SprintLedger:
                 for engineer_id, team_hours in self.engineer_team_hours_used.items()
             },
             completed_tasks=dict(completed_tasks),
+            actual_completed_tasks=dict(actual_completed_tasks or {}),
         )
 
     def add_allocation(self, team_id: str, allocation: TaskAllocation) -> None:
