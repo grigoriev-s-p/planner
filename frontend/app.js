@@ -562,17 +562,19 @@ function renderExcludedTasks() {
 function renderKpis() {
   const target = $('#planKpis');
   const expected = data.kpis?.expected_kpi;
-  if (!target || !expected) {
+  const quarter = data.kpis?.quarter_kpi;
+  if (!target || !expected || !quarter) {
     if (target) target.innerHTML = empty('KPI пока недоступны.');
     return;
   }
-
-  if (expected.completion_percent == null) {
-    target.innerHTML = `<article class="expected-kpi-card unavailable"><div><span>Ожидаемое выполнение квартального плана</span><strong>—</strong></div><p>Нет данных для расчёта.</p></article>`;
-    return;
-  }
-
-  target.innerHTML = `<article class="expected-kpi-card"><div><span>Ожидаемое выполнение квартального плана</span><strong>${percent(expected.completion_percent)}</strong></div><div class="expected-kpi-copy"><p>Будут завершены ${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив первоначального бизнес-пула</p><small>Не будут завершены: ${number(expected.incomplete_initiatives)}</small></div></article>`;
+  const quarterStatus = quarter.status === 'ON_TARGET' ? 'В норме' : quarter.status === 'BELOW_TARGET' ? 'Ниже нормы' : quarter.status === 'ABOVE_TARGET' ? 'Выше нормы' : 'Факта пока нет';
+  target.innerHTML = `<article class="management-kpi-card pi-kpi-card ${attr(quarter.status || 'UNAVAILABLE')}">
+    <div class="management-kpi-head"><span>PI Predictability</span><small>Норма 80–100%</small></div>
+    <div class="pi-kpi-comparison">
+      <section class="pi-kpi-side forecast"><span>Прогноз</span><strong>${expected.completion_percent == null ? '—' : percent(expected.completion_percent)}</strong><p>${number(expected.completed_initiatives)} из ${number(expected.baseline_initiatives)} инициатив по текущему плану</p></section>
+      <section class="pi-kpi-side actual"><span>На текущий момент</span><strong>${quarter.completion_percent == null ? '—' : percent(quarter.completion_percent)}</strong><p>${quarter.has_actual ? `${number(quarter.completed_initiatives || 0)} из ${number(quarter.baseline_initiatives)} · ${escapeHtml(quarterStatus)}` : 'Появится после завершения первого спринта'}</p></section>
+    </div>
+  </article>`;
 }
 
 function updateKpiDetailsToggle() {
@@ -620,6 +622,7 @@ function renderPlanning() {
     const sprint = index + 1;
     const sprintData = sprintBy(sprint) || {tasks: [], presentation_state: sprint === currentSprint() ? 'CURRENT' : 'FUTURE'};
     const closed = sprintData.presentation_state === 'CLOSED';
+    const sprintKpi = (data.kpis?.sprint_kpis || []).find((item) => Number(item.sprint) === sprint && item.has_actual);
     const sprintTasks = closed
       ? (sprintData.tasks || []).map((row) => ({task: row, row}))
       : data.tasks.filter((task) => inQuarter(task) && taskSprints(task).includes(sprint)).map((task) => ({task, row: task}));
@@ -638,7 +641,8 @@ function renderPlanning() {
           : `<button class="sprint-card" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span>${load}<span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`;
       })
       .join('') || '<div class="sprint-empty">Нет задач</div>';
-    return `<section class="sprint-column ${sprint === currentSprint() ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><b>Sprint ${sprint}</b><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
+    const kpiBadge = sprintKpi ? `<span class="sprint-column-kpi ${attr(sprintKpi.status || 'UNAVAILABLE')}" title="Sprint Say/Do Ratio">KPI ${sprintKpi.completion_percent == null ? '—' : percent(sprintKpi.completion_percent)}</span>` : '';
+    return `<section class="sprint-column ${sprint === currentSprint() ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><div class="sprint-column-title"><b>Sprint ${sprint}</b>${kpiBadge}</div><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
   }).join('');
   activateSprintScrollbars();
   renderPlanRiskSummary();
@@ -1526,31 +1530,30 @@ function renderCurrentSprint() {
 function renderSprintCloseDialog() {
   const sprint = currentSprint();
   const sprintTasks = (sprintBy(sprint)?.tasks || []).map((row) => taskBy(row.task_id)).filter(Boolean);
-  const dueTasks = sprintTasks.filter((task) => Number(task.completion_sprint) === sprint);
   $('#sprintCloseTitle').textContent = `Завершение Sprint ${sprint}`;
   $('#sprintCloseSubtitle').textContent = 'Зафиксируйте фактический результат текущего спринта.';
-  $('#sprintCloseDueCount').textContent = `Задач, которые должны завершиться: ${dueTasks.length}`;
-  $('#sprintCloseTasks').innerHTML = dueTasks.length ? dueTasks.map((task) => {
-    const requirements = task.role_requirements || {};
-    const sprintHours = task.role_hours_by_sprint?.[String(sprint)] || {};
-    const roles = Object.fromEntries(Object.keys(requirements).map((role) => [role, sprintHours[role] ?? requirements[role]]));
-    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}"><label class="sprint-close-check"><input type="checkbox" data-task-unfinished disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><p>Остаток по ролям</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
-  }).join('') : empty('В этом спринте нет задач с плановым завершением.');
+  $('#sprintCloseDueCount').textContent = `Задач в спринте: ${sprintTasks.length}`;
+  $('#sprintCloseTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
+    const roles = roleHoursForTask(task, sprint);
+    const startingSp = Number(task.remaining_story_points ?? task.story_points ?? 0);
+    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="0.01" max="${attr(startingSp)}" step="0.1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>Не более ${number(startingSp)} SP. Выполненное будет рассчитано автоматически.</small></div><p>Сколько ещё потребуется времени</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
+  }).join('') : empty('В этом спринте нет задач.');
   $('#sprintUnfinishedSection').hidden = true;
-  $$('input[name="allTasksCompleted"]').forEach((input) => { input.checked = false; });
+  $$('input[name="hasPlanDeviations"]').forEach((input) => { input.checked = false; });
   $('#sprintCloseError').hidden = true;
   $('#confirmCloseCurrentSprint').disabled = true;
 }
 
 function syncSprintCloseControls() {
-  const unfinishedEnabled = $('input[name="allTasksCompleted"]:checked')?.value === 'no';
-  $('#sprintUnfinishedSection').hidden = !unfinishedEnabled;
+  const deviationsEnabled = $('input[name="hasPlanDeviations"]:checked')?.value === 'yes';
+  $('#sprintUnfinishedSection').hidden = !deviationsEnabled;
   $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
-    const checkbox = $('[data-task-unfinished]', card);
-    checkbox.disabled = !unfinishedEnabled;
-    const taskEnabled = unfinishedEnabled && checkbox.checked;
+    const checkbox = $('[data-task-deviation]', card);
+    checkbox.disabled = !deviationsEnabled;
+    const taskEnabled = deviationsEnabled && checkbox.checked;
     $('.sprint-close-task-fields', card).hidden = !taskEnabled;
     $('[data-task-reason]', card).disabled = !taskEnabled;
+    $('[data-fact-sp]', card).disabled = !taskEnabled;
     $$('[data-fact-role]', card).forEach((input) => { input.disabled = !taskEnabled; });
   });
 }
@@ -1564,6 +1567,20 @@ function closeSprintCloseDialog() {
   $('#sprintCloseDialog').close();
 }
 
+function showSprintResult(kpi) {
+  if (!kpi) return;
+  const status = kpi.status === 'ON_TARGET' ? 'В пределах бизнес-нормы' : kpi.status === 'BELOW_TARGET' ? 'Ниже бизнес-нормы' : kpi.status === 'ABOVE_TARGET' ? 'Выше бизнес-нормы' : 'Недостаточно данных';
+  const transferredSp = kpi.transferred_sp ?? kpi.remaining_sp;
+  $('#sprintResultTitle').textContent = `Итоги Sprint ${number(kpi.sprint)}`;
+  $('#sprintResultContent').innerHTML = `<div class="sprint-result-score ${attr(kpi.status)}"><span>Sprint Say/Do</span><strong>${kpi.completion_percent == null ? '—' : percent(kpi.completion_percent)}</strong><p>${escapeHtml(status)} · норма ${number(kpi.target_min_percent)}–${number(kpi.target_max_percent)}%</p></div><div class="sprint-result-metrics"><div><span>Было запланировано</span><b>${number(kpi.baseline_sp)} SP</b></div><div><span>Реально выполнено</span><b>${number(kpi.actual_sp)} SP</b></div><div class="transferred"><span>Перенесено</span><b>${number(transferredSp)} SP</b></div></div>`;
+  $('#sprintResultDialog').showModal();
+}
+
+function closeSprintResult() {
+  const dialog = $('#sprintResultDialog');
+  if (dialog?.open) dialog.close();
+}
+
 function roleHoursForTask(task, sprint) {
   const future = {};
   Object.entries(task.role_hours_by_sprint || {}).forEach(([sprintKey, roles]) => {
@@ -1575,25 +1592,30 @@ function roleHoursForTask(task, sprint) {
 async function closeCurrentSprint(event) {
   event?.preventDefault();
   const sprint = currentSprint();
-  const completionAnswer = $('input[name="allTasksCompleted"]:checked')?.value;
-  if (!completionAnswer) return;
+  const deviationAnswer = $('input[name="hasPlanDeviations"]:checked')?.value;
+  if (!deviationAnswer) return;
   const byTask = new Map();
-  if (completionAnswer === 'no') {
+  if (deviationAnswer === 'yes') {
     $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
-      if (!$('[data-task-unfinished]', card)?.checked) return;
+      if (!$('[data-task-deviation]', card)?.checked) return;
       const remaining = {};
       $$('[data-fact-role]', card).forEach((input) => { const value = Number(input.value); if (value > 0) remaining[input.dataset.factRole] = value; });
-      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_role_hours: remaining, remaining_engineer_allocations: {}, unavailable_next_sprint: false, unavailable_engineer_ids: []});
+      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_story_points: Number($('[data-fact-sp]', card)?.value), starting_story_points: Number(card.dataset.startingSp), remaining_role_hours: remaining, remaining_engineer_allocations: {}, unavailable_next_sprint: false, unavailable_engineer_ids: []});
     });
   }
   const results = [...byTask.values()];
-  if (completionAnswer === 'no' && results.length === 0) {
-    $('#sprintCloseError').textContent = 'Выберите хотя бы одну незавершённую задачу.';
+  if (deviationAnswer === 'yes' && results.length === 0) {
+    $('#sprintCloseError').textContent = 'Выберите хотя бы одну задачу с отклонением.';
     $('#sprintCloseError').hidden = false;
     return;
   }
   if (results.some((row) => !row.incomplete_reason)) {
-    $('#sprintCloseError').textContent = 'Для каждой незавершённой задачи выберите причину.';
+    $('#sprintCloseError').textContent = 'Для каждой задачи выберите причину отклонения.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  if (results.some((row) => !(row.remaining_story_points > 0) || row.remaining_story_points > row.starting_story_points)) {
+    $('#sprintCloseError').textContent = 'Для каждой задачи укажите остаток SP больше 0 и не больше её текущего объёма.';
     $('#sprintCloseError').hidden = false;
     return;
   }
@@ -1608,7 +1630,7 @@ async function closeCurrentSprint(event) {
   try {
     result = await window.postcodeApi.closeSprint({
       sprint_number: sprint,
-      all_completed: completionAnswer === 'yes',
+      all_completed: deviationAnswer === 'no',
       results,
     });
   } catch (error) {
@@ -1628,6 +1650,7 @@ async function closeCurrentSprint(event) {
       showToast(result.quarter_completed
         ? 'Sprint 6 завершён. Квартал закрыт.'
         : `Sprint ${sprint} завершён. Текущий спринт — Sprint ${number(result.current_sprint)}.`);
+      showSprintResult(result.sprint_result?.kpi);
     } catch (error) {
       showToast(`Спринт сохранён, но экран не обновился: ${error?.message || error}. Обновите страницу.`);
     }
@@ -1636,9 +1659,11 @@ async function closeCurrentSprint(event) {
   data.replanWorkflow = result;
   show('recalc');
   showToast(result.status === 'READY_FOR_REVIEW' ? 'Факт сохранён. Проверьте черновик нового плана.' : 'Факт сохранён, но пересчёт нужно повторить.');
+  showSprintResult(result.sprint_result?.kpi);
 }
 
 function renderRisks() {
+  updateRiskStatusIndicators();
   $$('[data-risk-hub-tab]', $('#page-risks')).forEach((button) => {
     const active = button.dataset.riskHubTab === state.riskHubTab;
     button.classList.toggle('active', active);
@@ -1648,6 +1673,24 @@ function renderRisks() {
   if (state.riskHubTab === 'teams') { closeRiskModal(); renderStarTeams(); }
   if (state.riskHubTab === 'risks') renderRiskList();
   if (state.riskHubTab === 'skills') { closeRiskModal(); renderStarSkills(); }
+}
+
+function updateRiskStatusIndicators() {
+  const risks = Array.isArray(data.risks) ? data.risks : [];
+  const hasRisks = risks.length > 0;
+  const title = hasRisks ? `Есть активные риски: ${risks.length}` : 'Активных рисков нет';
+  $$('[data-page="risks"]').forEach((element) => {
+    element.classList.toggle('risk-nav-has-risks', hasRisks);
+    element.classList.toggle('risk-nav-clear', !hasRisks);
+    element.dataset.riskCount = String(risks.length);
+    element.title = title;
+  });
+  $$('[data-risk-hub-tab="risks"]').forEach((element) => {
+    element.classList.toggle('risk-tab-has-risks', hasRisks);
+    element.classList.toggle('risk-tab-clear', !hasRisks);
+    element.dataset.riskCount = String(risks.length);
+    element.title = title;
+  });
 }
 
 function busRiskTag(competency) {
@@ -2168,6 +2211,8 @@ function bindEvents() {
   $('#openSprintCloseDialog').addEventListener('click', openSprintCloseDialog);
   $('#sprintCloseForm').addEventListener('submit', closeCurrentSprint);
   $('#sprintCloseDialog').addEventListener('click', (event) => { if (event.target === $('#sprintCloseDialog')) closeSprintCloseDialog(); });
+  $('#confirmSprintResult').addEventListener('click', closeSprintResult);
+  $('#sprintResultDialog').addEventListener('click', (event) => { if (event.target === $('#sprintResultDialog')) closeSprintResult(); });
   $('#archiveForm').addEventListener('submit', (event) => { event.preventDefault(); submitArchive(); });
   $('#archiveReason').addEventListener('change', updateArchiveConfirmation);
   $('#archiveReasonText').addEventListener('input', updateArchiveConfirmation);
@@ -2283,8 +2328,8 @@ function bindEvents() {
     if (event.target.id === 'developmentRoleFilter') { state.developmentRole = event.target.value; renderDevelopment(); return; }
     if (event.target.id === 'developmentSkillFilter') { state.developmentSkill = event.target.value; renderDevelopment(); return; }
     if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); return; }
-    if (event.target.matches('[data-task-unfinished]')) { syncSprintCloseControls(); return; }
-    if (event.target.name === 'allTasksCompleted') { syncSprintCloseControls(); $('#confirmCloseCurrentSprint').disabled = false; $('#sprintCloseError').hidden = true; }
+    if (event.target.matches('[data-task-deviation]')) { syncSprintCloseControls(); return; }
+    if (event.target.name === 'hasPlanDeviations') { syncSprintCloseControls(); $('#confirmCloseCurrentSprint').disabled = false; $('#sprintCloseError').hidden = true; }
   });
   document.addEventListener('input', (event) => {
     if (event.target.id !== 'engineerTaskSearch') return;
@@ -2337,6 +2382,7 @@ function hydrate(payload) {
   data.tasks = payload.tasks || [];
   data.initiatives = payload.initiatives || [];
   data.risks = payload.risks || [];
+  updateRiskStatusIndicators();
   data.teams = payload.teams || [];
   data.engineers = payload.engineers || [];
   data.starMap = payload.star_map || {teams: [], engineers: []};

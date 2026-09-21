@@ -200,9 +200,16 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertLess(risk_tabs.index('data-risk-hub-tab="teams"'), risk_tabs.index('data-risk-hub-tab="skills"'))
         self.assertIn('class="subtab active" data-risk-hub-tab="risks"', risk_tabs)
         self.assertIn("riskHubTab: 'risks'", app_source)
+        self.assertIn('risk-nav-has-risks', app_source)
+        self.assertIn('risk-tab-has-risks', app_source)
+        self.assertIn('updateRiskStatusIndicators();', app_source)
+        self.assertIn('.nav-link.risk-nav-has-risks', styles)
+        self.assertIn('.nav-link.risk-nav-clear', styles)
         self.assertNotIn('data-risk-hub-tab="distribution"', html)
         self.assertNotIn('id="starDistribution"', html)
         self.assertIn("data.starMap?.company", app_source)
+        self.assertIn("step=\"0.01\" inputmode=\"decimal\"", (frontend / "constructor.js").read_text(encoding="utf-8"))
+        self.assertIn("constructor-dropdown-menu.opens-up", styles)
         self.assertIn("item.scope === 'company' ? 'Вся компания'", app_source)
         self.assertIn('disabled aria-disabled="true"', app_source)
         self.assertIn("width:min(360px,calc(100% - 36px))", styles)
@@ -651,7 +658,7 @@ class FrontendRefinementTests(unittest.TestCase):
         initiatives_position = self.html.index('class="initiative-grid"')
         self.assertLess(board_position, kpi_position)
         self.assertLess(kpi_position, initiatives_position)
-        self.assertIn("Ожидаемый KPI плана", self.html)
+        self.assertIn("KPI эффективности планирования", self.html)
 
     def test_kpi_details_use_one_collapsed_inline_toggle(self) -> None:
         self.assertIn('id="toggleKpiDetails"', self.html)
@@ -679,9 +686,16 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("expected.completion_percent", render_kpis)
         self.assertIn("expected.completed_initiatives", render_kpis)
         self.assertIn("expected.baseline_initiatives", render_kpis)
+        self.assertIn("quarter.completion_percent", render_kpis)
+        self.assertIn("pi-kpi-comparison", render_kpis)
         self.assertNotIn("sprint_kpis", render_kpis)
         self.assertNotIn("Факт ещё не загружен", render_kpis)
-        self.assertNotIn("Sprint", render_kpis)
+        self.assertNotIn("Sprint Say/Do Ratio", render_kpis)
+        planning_board = self.app.split("function renderPlanning()", 1)[1].split(
+            "function renderTasks()", 1
+        )[0]
+        self.assertIn("data.kpis?.sprint_kpis", planning_board)
+        self.assertIn("sprint-column-kpi", planning_board)
         self.assertNotIn("baseline_id", self.html + render_kpis)
         planning_html = self.html.split('id="page-current-plan"', 1)[1].split(
             'id="page-tasks"', 1

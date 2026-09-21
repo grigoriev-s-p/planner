@@ -65,6 +65,9 @@ def _outcome(task: dict[str, Any], sprint_number: int, actual: dict[str, Any] | 
         "label": label,
         "completed": status == "COMPLETED",
         "incomplete_reason": (actual or {}).get("incomplete_reason"),
+        "starting_story_points": (actual or {}).get("starting_story_points"),
+        "completed_story_points": (actual or {}).get("completed_story_points"),
+        "remaining_story_points": (actual or {}).get("remaining_story_points"),
         "remaining_role_hours": deepcopy((actual or {}).get("remaining_role_hours") or {}),
     }
 

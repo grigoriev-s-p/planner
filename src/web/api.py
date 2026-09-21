@@ -51,6 +51,7 @@ from .entity_projections import (
     build_team_projection,
 )
 from .lifecycle import capture_closed_sprint, project_lifecycle
+from .kpi_projection import project_management_kpis, sprint_kpi
 from .engineer_workspace import build_engineer_workspace
 from src.planning.task_states import is_historical_done
 
@@ -92,6 +93,7 @@ class ActualTaskResultRequest(BaseModel):
     task_id: str
     task_completed: bool = False
     incomplete_reason: str | None = None
+    remaining_story_points: float | None = Field(default=None, ge=0)
     remaining_role_hours: dict[str, float] = Field(default_factory=dict)
     remaining_engineer_allocations: dict[str, float] = Field(default_factory=dict)
     employee_deviation: dict[str, object] | None = None
@@ -107,6 +109,7 @@ class SprintActualRequest(BaseModel):
 
 class ConstructorUploadDecisionRequest(BaseModel):
     decisions: dict[str, Literal["KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"]] = Field(default_factory=dict)
+    existing_decisions: dict[str, Literal["KEEP_CURRENT", "UPDATE"]] = Field(default_factory=dict)
 
 
 class SkillExtractionRequest(BaseModel):
@@ -365,6 +368,25 @@ class PlanDraftStore:
         unknown = sorted(set(task_ids) - known_ids)
         if unknown:
             raise ValueError("Неизвестные task_id в факте: " + ", ".join(unknown))
+        current_tasks = _task_map(approved)
+        sprint_task_ids = {
+            str(row.get("task_id"))
+            for row in next(
+                (
+                    sprint.get("tasks") or []
+                    for sprint in (approved.get("plan") or {}).get("sprints") or []
+                    if int(sprint.get("sprint_number") or 0) == sprint_number
+                ),
+                [],
+            )
+            if row.get("task_id")
+        }
+        outside_sprint = sorted(set(task_ids) - sprint_task_ids)
+        if outside_sprint:
+            raise ValueError(
+                f"В факт Sprint {sprint_number} переданы задачи из других спринтов: "
+                + ", ".join(outside_sprint)
+            )
         if all_completed and any(not row.get("task_completed") for row in results):
             raise ValueError(
                 "При all_completed=true нельзя передавать незавершённые задачи."
@@ -392,6 +414,24 @@ class PlanDraftStore:
                 raise ValueError(
                     f"Для незавершённой задачи {row.get('task_id')} укажите причину."
                 )
+            remaining_sp = row.get("remaining_story_points")
+            if not row.get("task_completed") and remaining_sp is not None:
+                task = current_tasks.get(str(row.get("task_id"))) or {}
+                remaining_sp_value = float(remaining_sp)
+                available_sp = float(
+                    task.get("remaining_story_points")
+                    if task.get("remaining_story_points") is not None
+                    else task.get("story_points") or 0.0
+                )
+                if remaining_sp_value <= 0:
+                    raise ValueError(
+                        f"Для задачи {row.get('task_id')} укажите положительный остаток SP."
+                    )
+                if remaining_sp_value > available_sp + 1e-9:
+                    raise ValueError(
+                        f"Остаток {remaining_sp_value:g} SP для {row.get('task_id')} "
+                        f"превышает текущий объём {available_sp:g} SP."
+                    )
 
     def _save_replan_workflow(self, workflow: dict) -> dict:
         saved = deepcopy(workflow)
@@ -467,6 +507,7 @@ class PlanDraftStore:
                     "completed_count": len(completed_ids),
                     "unfinished_count": len(unfinished_ids),
                     "task_results": actual_rows,
+                    "kpi": sprint_kpi(candidate, int(workflow["sprint_number"])),
                 },
                 "error": None,
             })
@@ -505,6 +546,17 @@ class PlanDraftStore:
                 **deepcopy(supplied.get(task_id) or {}),
                 "task_id": task_id,
                 "task_completed": True,
+                "starting_story_points": float(
+                    tasks[task_id].get("remaining_story_points")
+                    if tasks[task_id].get("remaining_story_points") is not None
+                    else tasks[task_id].get("story_points") or 0.0
+                ),
+                "completed_story_points": float(
+                    tasks[task_id].get("remaining_story_points")
+                    if tasks[task_id].get("remaining_story_points") is not None
+                    else tasks[task_id].get("story_points") or 0.0
+                ),
+                "remaining_story_points": 0.0,
                 "remaining_role_hours": {},
                 "remaining_engineer_allocations": {},
                 "unavailable_next_sprint": False,
@@ -577,6 +629,7 @@ class PlanDraftStore:
             "trigger": "SPRINT_CLOSE_NO_REPLAN",
             "workflow_id": workflow["workflow_id"],
         }
+        candidate = project_management_kpis(candidate)
         saved = self.replace_approved(candidate)
         workflow.update({
             "status": "SPRINT_CLOSED",
@@ -591,6 +644,7 @@ class PlanDraftStore:
                 "completed_count": len(due_ids),
                 "unfinished_count": 0,
                 "task_results": [deepcopy(actual_by_task[key]) for key in sorted(actual_by_task)],
+                "kpi": sprint_kpi(candidate, sprint_number),
             },
             "draft_plan": None,
             "diff": None,
@@ -873,6 +927,7 @@ def _current_dashboard() -> dict:
     history = plan_drafts.history() if approved is not None else []
     current = project_lifecycle(current, history)
     current = _apply_canonical_expected_initiatives(current)
+    current = project_management_kpis(current)
     current.setdefault("features", {})["replanning"] = "AVAILABLE"
     return current
 
@@ -1682,6 +1737,7 @@ def continue_constructor_plan_upload(
             build_constructor_plan_from_prepared(
                 prepared, get_catalog_repository(),
                 archive_decisions=(request.decisions if request else None),
+                existing_decisions=(request.existing_decisions if request else None),
             )
         )
     except ConstructorDatasetUploadError as error:

@@ -287,19 +287,31 @@ window.planConstructor = (() => {
     return items.map((item) => {
       const decision = pendingDatasetUpload.archiveDecisions[item.decision_key] || 'KEEP_ARCHIVED';
       const reason = [item.archived_at ? `Архивирована: ${item.archived_at}` : '', item.archive_reason_label, item.archive_reason_text].filter(Boolean).join(' · ');
-      return `<article class="archive-entity-row" data-archive-entity-row data-archive-type="${esc(item.entity_type)}" data-archive-search="${esc(`${item.entity_id} ${item.display_name}`.toLowerCase())}"><label class="archive-entity-select"><input type="checkbox" data-archive-select="${esc(item.decision_key)}"><span></span></label><div class="archive-entity-copy"><div class="archive-entity-heading"><b>${esc(item.entity_label)} · ${esc(item.entity_id)}</b><strong>${esc(item.display_name)}</strong></div>${reason ? `<small>${esc(reason)}</small>` : ''}<details class="archive-compare"><summary>Сравнить данные</summary>${archiveComparison(item)}</details></div><select data-archive-decision="${esc(item.decision_key)}"><option value="KEEP_ARCHIVED" ${decision === 'KEEP_ARCHIVED' ? 'selected' : ''}>Оставить в архиве</option><option value="RESTORE" ${decision === 'RESTORE' ? 'selected' : ''}>Восстановить</option><option value="RESTORE_UPDATE" ${decision === 'RESTORE_UPDATE' ? 'selected' : ''}>Восстановить и обновить</option></select></article>`;
+      return `<article class="archive-entity-row" data-import-entity-row data-archive-type="${esc(item.entity_type)}" data-archive-search="${esc(`${item.entity_id} ${item.display_name}`.toLowerCase())}"><label class="archive-entity-select"><input type="checkbox" data-archive-select="${esc(item.decision_key)}"><span></span></label><div class="archive-entity-copy"><div class="archive-entity-heading"><b>${esc(item.entity_label)} · ${esc(item.entity_id)}</b><strong>${esc(item.display_name)}</strong></div>${reason ? `<small>${esc(reason)}</small>` : ''}<details class="archive-compare"><summary>Сравнить данные</summary>${archiveComparison(item)}</details></div><select data-archive-decision="${esc(item.decision_key)}"><option value="KEEP_ARCHIVED" ${decision === 'KEEP_ARCHIVED' ? 'selected' : ''}>Оставить в архиве</option><option value="RESTORE" ${decision === 'RESTORE' ? 'selected' : ''}>Восстановить</option><option value="RESTORE_UPDATE" ${decision === 'RESTORE_UPDATE' ? 'selected' : ''}>Восстановить и обновить</option></select></article>`;
+    }).join('');
+  }
+
+  function existingEntityRows(items) {
+    pendingDatasetUpload.existingDecisions ||= Object.fromEntries(items.map((item) => [item.decision_key, 'KEEP_CURRENT']));
+    return items.map((item) => {
+      const decision = pendingDatasetUpload.existingDecisions[item.decision_key] || 'KEEP_CURRENT';
+      return `<article class="archive-entity-row" data-import-entity-row data-archive-type="${esc(item.entity_type)}" data-archive-search="${esc(`${item.entity_id} ${item.display_name}`.toLowerCase())}"><label class="archive-entity-select"><input type="checkbox" data-existing-select="${esc(item.decision_key)}"><span></span></label><div class="archive-entity-copy"><div class="archive-entity-heading"><b>${esc(item.entity_label)} · ${esc(item.entity_id)}</b><strong>${esc(item.display_name)}</strong></div><small>В Excel найдена запись с тем же ID, но с отличающимися данными.</small><details class="archive-compare"><summary>Сравнить данные</summary>${archiveComparison(item)}</details></div><select data-existing-decision="${esc(item.decision_key)}"><option value="KEEP_CURRENT" ${decision === 'KEEP_CURRENT' ? 'selected' : ''}>Оставить текущее</option><option value="UPDATE" ${decision === 'UPDATE' ? 'selected' : ''}>Обновить из Excel</option></select></article>`;
     }).join('');
   }
 
   function updateArchiveImportSummary() {
     const items = pendingDatasetUpload?.audit?.archived_entities || [];
+    const existingItems = pendingDatasetUpload?.audit?.existing_entities || [];
     const decisions = pendingDatasetUpload?.archiveDecisions || {};
+    const existingDecisions = pendingDatasetUpload?.existingDecisions || {};
     const counts = {KEEP_ARCHIVED: 0, RESTORE: 0, RESTORE_UPDATE: 0};
+    const existingCounts = {KEEP_CURRENT: 0, UPDATE: 0};
     items.forEach((item) => { counts[decisions[item.decision_key] || 'KEEP_ARCHIVED'] += 1; });
-    const selected = $$c('[data-archive-select]:checked').length;
+    existingItems.forEach((item) => { existingCounts[existingDecisions[item.decision_key] || 'KEEP_CURRENT'] += 1; });
+    const selected = $$c('[data-archive-select]:checked, [data-existing-select]:checked').length;
     const summary = pendingDatasetUpload?.audit?.import_summary || {};
     const target = $c('#archiveImportSummary');
-    if (target) target.innerHTML = `<span>Новые записи: <b>${number(summary.new)}</b></span><span>Активные записи: <b>${number(summary.active_existing)}</b></span><span>Архивные записи: <b>${number(items.length)}</b></span><span>Из архивных: <b>оставить ${counts.KEEP_ARCHIVED}</b> · <b>восстановить ${counts.RESTORE}</b> · <b>обновить ${counts.RESTORE_UPDATE}</b></span>`;
+    if (target) target.innerHTML = `<span>Новые записи: <b>${number(summary.new)}</b></span><span>Совпадения ID: <b>${number(existingItems.length)}</b></span><span>Из существующих: <b>оставить ${existingCounts.KEEP_CURRENT}</b> · <b>обновить ${existingCounts.UPDATE}</b></span>${items.length ? `<span>Архивные записи: <b>${number(items.length)}</b></span><span>Из архивных: <b>оставить ${counts.KEEP_ARCHIVED}</b> · <b>восстановить ${counts.RESTORE}</b> · <b>обновить ${counts.RESTORE_UPDATE}</b></span>` : ''}`;
     const selectedCount = $c('#archiveSelectedCount');
     if (selectedCount) selectedCount.textContent = `Выбрано: ${selected}`;
   }
@@ -307,7 +319,7 @@ window.planConstructor = (() => {
   function filterArchiveRows() {
     const query = ($c('#archiveEntitySearch')?.value || '').trim().toLowerCase();
     const type = $c('#archiveEntityTypeFilter')?.value || '';
-    $$c('[data-archive-entity-row]').forEach((row) => {
+    $$c('[data-import-entity-row]').forEach((row) => {
       row.hidden = Boolean((query && !row.dataset.archiveSearch.includes(query)) || (type && row.dataset.archiveType !== type));
     });
   }
@@ -323,21 +335,34 @@ window.planConstructor = (() => {
     updateArchiveImportSummary();
   }
 
+  function applyExistingBulk(decision) {
+    const selected = $$c('[data-existing-select]:checked').map((input) => input.dataset.existingSelect);
+    selected.forEach((key) => { pendingDatasetUpload.existingDecisions[key] = decision; });
+    $$c('[data-existing-decision]').forEach((select) => {
+      if (selected.includes(select.dataset.existingDecision)) select.value = decision;
+    });
+    updateArchiveImportSummary();
+  }
+
   function renderArchivePreflight(preflight) {
     const audit = preflight.audit || {};
     const items = audit.archived_entities || [];
+    const existingItems = audit.existing_entities || [];
     pendingDatasetUpload.archiveDecisions = Object.fromEntries(items.map((item) => [item.decision_key, 'KEEP_ARCHIVED']));
-    $c('#dataPreflightTitle').textContent = 'Обнаружены архивные записи';
-    $c('#dataPreflightSubtitle').textContent = 'Некоторые записи из Excel уже существуют в каталоге, но находятся в архиве. Выберите, как поступить с каждой из них.';
+    pendingDatasetUpload.existingDecisions = Object.fromEntries(existingItems.map((item) => [item.decision_key, 'KEEP_CURRENT']));
+    $c('#dataPreflightTitle').textContent = 'Проверка совпадений по ID';
+    $c('#dataPreflightSubtitle').textContent = 'Для записей, которые уже есть в базе, выберите: оставить текущую версию или обновить её данными из Excel.';
     const critical = Number(audit.summary?.critical || 0);
     const counters = [];
     if (critical) counters.push(`<span class="preflight-counter critical">${issueCountLabel(critical, 'критическая ошибка', 'критические ошибки', 'критических ошибок')}</span>`);
     $c('#dataPreflightSummary').innerHTML = counters.join('');
-    const types = [...new Set(items.map((item) => item.entity_type))];
+    const types = [...new Set([...items, ...existingItems].map((item) => item.entity_type))];
     const labels = {task: 'Задачи', team: 'Команды', engineer: 'Инженеры'};
-    const otherIssues = (audit.groups || []).flatMap((group) => group.items || []).filter((item) => item.code !== 'ARCHIVED_ENTITY_IN_UPLOAD');
+    const otherIssues = (audit.groups || []).flatMap((group) => group.items || []).filter((item) => !['ARCHIVED_ENTITY_IN_UPLOAD', 'CATALOG_ENTITY_CONFLICT'].includes(item.code));
     const issueBlock = otherIssues.length ? `<details class="archive-other-issues"><summary>Другие результаты проверки (${otherIssues.length})</summary><div>${otherIssues.map((item) => `<p><b>${esc(item.title)}</b> — ${esc(item.message)}</p>`).join('')}</div></details>` : '';
-    $c('#dataPreflightGroups').innerHTML = `<div class="archive-import-toolbar"><input id="archiveEntitySearch" type="search" placeholder="Поиск по ID или названию"><select id="archiveEntityTypeFilter"><option value="">Все типы</option>${types.map((type) => `<option value="${esc(type)}">${labels[type] || esc(type)}</option>`).join('')}</select><span id="archiveSelectedCount">Выбрано: 0</span><div class="archive-bulk-actions"><button class="btn btn-outline" type="button" data-archive-bulk="KEEP_ARCHIVED">Оставить в архиве</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE">Восстановить</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE_UPDATE">Восстановить и обновить</button></div></div><div class="archive-entity-list">${archiveEntityRows(items)}</div><div class="archive-import-summary" id="archiveImportSummary"></div>${issueBlock}<div class="archive-import-error" id="archiveImportError" hidden></div>`;
+    const existingSection = existingItems.length ? `<section class="import-decision-section"><h3>Уже есть в активной базе</h3><div class="archive-bulk-actions"><button class="btn btn-outline" type="button" data-existing-bulk="KEEP_CURRENT">Оставить выбранные текущими</button><button class="btn btn-outline" type="button" data-existing-bulk="UPDATE">Обновить выбранные из Excel</button></div><div class="archive-entity-list">${existingEntityRows(existingItems)}</div></section>` : '';
+    const archiveSection = items.length ? `<section class="import-decision-section"><h3>Найдены в архиве</h3><div class="archive-bulk-actions"><button class="btn btn-outline" type="button" data-archive-bulk="KEEP_ARCHIVED">Оставить в архиве</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE">Восстановить</button><button class="btn btn-outline" type="button" data-archive-bulk="RESTORE_UPDATE">Восстановить и обновить</button></div><div class="archive-entity-list">${archiveEntityRows(items)}</div></section>` : '';
+    $c('#dataPreflightGroups').innerHTML = `<div class="archive-import-toolbar"><input id="archiveEntitySearch" type="search" placeholder="Поиск по ID или названию"><select id="archiveEntityTypeFilter"><option value="">Все типы</option>${types.map((type) => `<option value="${esc(type)}">${labels[type] || esc(type)}</option>`).join('')}</select><span id="archiveSelectedCount">Выбрано: 0</span></div>${existingSection}${archiveSection}<div class="archive-import-summary" id="archiveImportSummary"></div>${issueBlock}<div class="archive-import-error" id="archiveImportError" hidden></div>`;
     $c('#dataPreflightActions').innerHTML = critical
       ? '<button class="btn btn-outline" type="button" data-close-data-preflight>Закрыть</button><button class="btn btn-blue" type="button" data-replace-data-file>Загрузить исправленный файл</button>'
       : '<button class="btn btn-outline" type="button" data-close-data-preflight>Отмена</button><button class="btn btn-blue" type="button" data-continue-data-preflight>Продолжить импорт</button>';
@@ -350,7 +375,7 @@ window.planConstructor = (() => {
   function renderDataPreflight(preflight) {
     pendingDatasetUpload = preflight;
     const audit = preflight.audit || {summary: {}, groups: []};
-    if ((audit.archived_entities || []).length) {
+    if ((audit.archived_entities || []).length || (audit.existing_entities || []).length) {
       renderArchivePreflight(preflight);
       return;
     }
@@ -385,9 +410,10 @@ window.planConstructor = (() => {
     const planned = (planResult.tasks || []).filter((task) => task.status === 'PLANNED').length;
     const merge = planResult.uploaded_dataset?.catalog_merge || {};
     const total = (values) => Object.values(values || {}).reduce((sum, value) => sum + Number(value || 0), 0);
-    const importResult = merge.archived_entities?.length
-      ? `Импорт завершён · добавлено ${Number(merge.summary?.new ?? total(merge.added))}, восстановлено ${total(merge.restored)}, обновлено ${total(merge.restored_updated)}, оставлено в архиве ${total(merge.kept_archived)}`
-      : `Предварительный план готов · ${planned} задач вошли в квартал`;
+    const removedDuplicates = Number(planResult.uploaded_dataset?.data_preflight?.deduplication?.removed_total || 0);
+    const importResult = merge.archived_entities?.length || Number(merge.summary?.active_existing || 0)
+      ? `Импорт завершён · добавлено ${Number(merge.summary?.new ?? total(merge.added))}, обновлено ${total(merge.updated) + total(merge.restored_updated)}, оставлено текущее ${Math.max(Number(merge.summary?.active_existing || 0) - total(merge.updated), 0)}, восстановлено ${total(merge.restored)}, оставлено в архиве ${total(merge.kept_archived)}${removedDuplicates ? `, удалено дублей ${removedDuplicates}` : ''}`
+      : `Предварительный план готов · ${planned} задач вошли в квартал${removedDuplicates ? ` · удалено дублей ${removedDuplicates}` : ''}`;
     setDatasetStatus(`${filename} · ${importResult}`, 'success');
     previewPlan = planResult;
     pendingDatasetUpload = null;
@@ -405,7 +431,8 @@ window.planConstructor = (() => {
     setDatasetStatus('Проверка принята. Строим предварительный план…');
     try {
       const decisions = pendingDatasetUpload.archiveDecisions || {};
-      const result = await api.continueConstructorDataset(pendingDatasetUpload.upload_id, decisions);
+      const existingDecisions = pendingDatasetUpload.existingDecisions || {};
+      const result = await api.continueConstructorDataset(pendingDatasetUpload.upload_id, decisions, existingDecisions);
       const filename = pendingDatasetUpload.file?.name || 'Excel';
       closeDataPreflight();
       acceptUploadedPlan(result, filename);
@@ -734,6 +761,17 @@ window.planConstructor = (() => {
     $c('#constructorDependencyChips').innerHTML = selected.map((input) => `<span>${esc(input.value)}</span>`).join('');
   }
 
+  function updateDependencyMenuPlacement() {
+    const toggle = $c('#constructorDependencyToggle');
+    const menu = $c('#constructorDependencyMenu');
+    if (!toggle || !menu || menu.hidden) return;
+    const toggleRect = toggle.getBoundingClientRect();
+    const menuHeight = menu.getBoundingClientRect().height;
+    const spaceBelow = window.innerHeight - toggleRect.bottom;
+    const spaceAbove = toggleRect.top;
+    menu.classList.toggle('opens-up', spaceBelow < menuHeight && spaceAbove > spaceBelow);
+  }
+
   function openForm(type, id = null) {
     const dialog = $c('#constructorDialog');
     const item = id ? clone(findDraft(type, id)) : null;
@@ -745,7 +783,7 @@ window.planConstructor = (() => {
     if (type === 'engineers') {
       const engineer = item || {engineer_id: '', name: '', assignments: [{team_id: '', role: '', grade: '', capacity_rate: 1}], skills: []};
       const assignment = engineer.assignments?.[0] || {team_id: '', role: '', grade: '', capacity_rate: 1};
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.05" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.01" inputmode="decimal" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], required_skills: [], depends_on: []};
@@ -959,6 +997,12 @@ window.planConstructor = (() => {
         updateArchiveImportSummary();
         return;
       }
+      const existingDecision = event.target.closest('[data-existing-decision]');
+      if (existingDecision && pendingDatasetUpload) {
+        pendingDatasetUpload.existingDecisions[existingDecision.dataset.existingDecision] = existingDecision.value;
+        updateArchiveImportSummary();
+        return;
+      }
       if (event.target.id === 'archiveEntityTypeFilter') { filterArchiveRows(); return; }
       const selectAll = event.target.closest('[data-constructor-select-all]');
       if (selectAll) {
@@ -990,10 +1034,13 @@ window.planConstructor = (() => {
       if (event.target.id !== 'constructorDependencySearch') return;
       const query = event.target.value.trim().toLowerCase();
       $$c('[data-dependency-option]').forEach((option) => { option.hidden = !option.dataset.search.includes(query); });
+      updateDependencyMenuPlacement();
     });
     document.addEventListener('click', (event) => {
       const archiveBulk = event.target.closest('[data-archive-bulk]');
       if (archiveBulk && pendingDatasetUpload) { applyArchiveBulk(archiveBulk.dataset.archiveBulk); return; }
+      const existingBulk = event.target.closest('[data-existing-bulk]');
+      if (existingBulk && pendingDatasetUpload) { applyExistingBulk(existingBulk.dataset.existingBulk); return; }
       if (event.target.closest('[data-close-data-preflight]')) { closeDataPreflight(); return; }
       if (event.target.closest('[data-replace-data-file]')) {
         closeDataPreflight();
@@ -1051,7 +1098,12 @@ window.planConstructor = (() => {
       if (dependencyToggle && dependencyMenu) {
         dependencyMenu.hidden = !dependencyMenu.hidden;
         dependencyToggle.setAttribute('aria-expanded', String(!dependencyMenu.hidden));
-        if (!dependencyMenu.hidden) $c('#constructorDependencySearch')?.focus();
+        if (!dependencyMenu.hidden) {
+          updateDependencyMenuPlacement();
+          $c('#constructorDependencySearch')?.focus();
+        } else {
+          dependencyMenu.classList.remove('opens-up');
+        }
         return;
       }
       if (dependencyMenu && !event.target.closest('.constructor-dependency-picker')) dependencyMenu.hidden = true;

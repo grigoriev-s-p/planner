@@ -67,8 +67,8 @@ window.postcodeApi = (() => {
       headers: {'Content-Type': 'application/octet-stream'},
       body: file,
     }),
-    continueConstructorDataset: (uploadId, decisions = {}) => request(`/api/plan-constructor/plan/upload/${encodeURIComponent(uploadId)}/continue`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decisions}),
+    continueConstructorDataset: (uploadId, decisions = {}, existingDecisions = {}) => request(`/api/plan-constructor/plan/upload/${encodeURIComponent(uploadId)}/continue`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decisions, existing_decisions: existingDecisions}),
     }),
     buildConstructorPlan: (scenario) => request('/api/plan-constructor/plan', {
       method: 'POST',
