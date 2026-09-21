@@ -1653,7 +1653,14 @@ def approve_constructor_plan(request: DraftApprovalRequest) -> dict:
     """Promote the reviewed draft without invoking the planner again."""
 
     try:
-        return plan_drafts.approve(request.draft_id)
+        approved = plan_drafts.approve(request.draft_id)
+        star_map = approved.get("star_map")
+        if isinstance(star_map, dict):
+            star_map["company"] = _company_star_map_team(
+                star_map.get("engineers", []),
+                star_map.get("teams", []),
+            )
+        return approved
     except KeyError as error:
         raise HTTPException(
             status_code=409,
