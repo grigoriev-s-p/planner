@@ -22,6 +22,7 @@ from .constructor import (
     PreparedConstructorUpload,
     ScenarioValidationError,
     build_constructor_catalog,
+    build_catalog_snapshot,
     build_constructor_plan,
     build_constructor_plan_from_prepared,
     prepare_constructor_workbook,
@@ -40,8 +41,10 @@ from .catalog import (
     ArchiveConflictError,
     ArchiveValidationError,
     CatalogNotFoundError,
+    CatalogConflictError,
     get_catalog_repository,
 )
+from src.star_map import StarMapService
 from .recommendations import RecommendationDraft
 from .replanning import build_remaining_horizon_plan, _immutable_task_baseline, _task_map
 from .entity_projections import (
@@ -120,6 +123,47 @@ class SkillExtractionRequest(BaseModel):
     rejected: list[str] = Field(default_factory=list)
 
 
+class CatalogEngineerCreateRequest(BaseModel):
+    engineer_id: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, max_length=200)
+    team_id: str | None = Field(default=None, max_length=120)
+    role: str = Field(min_length=1, max_length=200)
+    grade: str | None = Field(default=None, max_length=120)
+    capacity_rate: float = Field(default=1, gt=0, le=1)
+    skills: list[str] = Field(default_factory=list)
+
+
+class CatalogTeamCreateRequest(BaseModel):
+    team_id: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, max_length=200)
+    engineer_ids: list[str] = Field(default_factory=list)
+    # A manually created team has no historical velocity yet, so its initial
+    # per-sprint capacity is entered explicitly by the user.
+    capacity_sp: float | None = Field(default=None, ge=0)
+
+
+class CatalogMembershipRequest(BaseModel):
+    team_id: str = Field(min_length=1, max_length=120)
+    capacity_rate: float = Field(gt=0, le=1)
+    role: str | None = Field(default=None, max_length=200)
+    grade: str | None = Field(default=None, max_length=120)
+
+
+class CatalogTaskCreateRequest(BaseModel):
+    task_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=500)
+    initiative_id: str | None = Field(default=None, max_length=120)
+    team_id: str | None = Field(default=None, max_length=120)
+    status: Literal["ToDo", "InProgress", "Done"] = "ToDo"
+    rung: float = 0
+    story_points: float = Field(ge=0)
+    planned_start: str | None = Field(default=None, max_length=50)
+    deadline: str | None = Field(default=None, max_length=50)
+    role_requirements: list[dict] = Field(default_factory=list)
+    required_skills: list[dict] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+
+
 def _with_official_week0_kpi_denominator(payload: dict) -> dict:
     """Anchor KPI to every active initiative in the stored Week-0 task pool."""
 
@@ -185,6 +229,7 @@ class PlanDraftStore:
         self._replan_workflows: dict[str, dict] = {}
         self._repository_provider = repository_provider
         self._persistent_loaded = repository_provider is None
+        self._draft_catalog_revisions: dict[str, int] = {}
 
     def _persist(self, payload: dict) -> dict:
         if self._repository_provider is None:
@@ -197,14 +242,32 @@ class PlanDraftStore:
         draft = RecommendationDraft(payload)
         with self._lock:
             self._drafts = {draft_id: draft}
-        return draft.snapshot(draft_id)
+            revision = (
+                int(self._repository_provider().revision())
+                if self._repository_provider is not None
+                else 0
+            )
+            self._draft_catalog_revisions = {draft_id: revision}
+        snapshot = draft.snapshot(draft_id)
+        snapshot.setdefault("draft", {})["catalog_revision"] = revision
+        snapshot["draft"]["catalog_stale"] = False
+        return snapshot
 
     def snapshot(self, draft_id: str) -> dict:
         with self._lock:
             draft = self._drafts.get(draft_id)
             if draft is None:
                 raise KeyError(draft_id)
-            return draft.snapshot(draft_id)
+            snapshot = draft.snapshot(draft_id)
+            built_revision = self._draft_catalog_revisions.get(draft_id, 0)
+            current_revision = (
+                int(self._repository_provider().revision())
+                if self._repository_provider is not None
+                else built_revision
+            )
+            snapshot.setdefault("draft", {})["catalog_revision"] = built_revision
+            snapshot["draft"]["catalog_stale"] = built_revision != current_revision
+            return snapshot
 
     def apply(self, draft_id: str, recommendation_id: str) -> dict:
         with self._lock:
@@ -259,6 +322,12 @@ class PlanDraftStore:
             draft = self._drafts.get(draft_id)
             if draft is None:
                 raise KeyError(draft_id)
+            if self._repository_provider is not None:
+                built_revision = self._draft_catalog_revisions.get(draft_id, 0)
+                if built_revision != int(self._repository_provider().revision()):
+                    raise ValueError(
+                        "Каталог изменился после построения плана. Постройте план заново перед утверждением."
+                    )
             approved = draft.snapshot(draft_id)
             approved["draft"] = {
                 **approved.get("draft", {}),
@@ -320,6 +389,7 @@ class PlanDraftStore:
             self._drafts = {}
             self._approved = None
             self._replan_workflows = {}
+            self._draft_catalog_revisions = {}
             self._persistent_loaded = True
 
     @staticmethod
@@ -993,6 +1063,190 @@ def _catalog_service() -> PlanningAPIService:
     )
 
 
+def _catalog_snapshot() -> dict:
+    repository = get_catalog_repository()
+    return build_catalog_snapshot(
+        repository.active_planning_tables(),
+        archived_task_ids=repository.archived_ids("task"),
+        revision=repository.revision(),
+    )
+
+
+def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
+    """Overlay current master data while preserving approved allocations."""
+
+    approved_engineers = {item["engineer_id"]: item for item in payload.get("engineers", [])}
+    engineers = []
+    for profile in catalog.get("engineers", []):
+        engineer_id = profile["engineer_id"]
+        current = deepcopy(approved_engineers.get(engineer_id) or {})
+        assignments = list(profile.get("assignments") or [])
+        free = profile.get("free_assignment")
+        buckets = [
+            {
+                "team_id": item.get("team_id"),
+                "capacity_rate": float(item.get("capacity_rate") or 0),
+                "capacity_hours": 80.0 * float(item.get("capacity_rate") or 0),
+            }
+            for item in assignments
+        ]
+        if free:
+            buckets.append({
+                "team_id": None,
+                "capacity_rate": float(free.get("capacity_rate") or 0),
+                "capacity_hours": 80.0 * float(free.get("capacity_rate") or 0),
+            })
+        roles = sorted({
+            item.get("role") for item in [*assignments, *([free] if free else [])]
+            if item.get("role")
+        }, key=str.casefold)
+        capacity = sum(float(item["capacity_hours"]) for item in buckets)
+        used = current.get("used_hours_by_sprint") or {str(sprint): 0.0 for sprint in range(1, 7)}
+        engineers.append({
+            **current,
+            "engineer_id": engineer_id,
+            "name": profile.get("name") or engineer_id,
+            "roles": roles,
+            "grade": ", ".join(sorted({
+                str(item.get("grade")) for item in [*assignments, *([free] if free else [])]
+                if item.get("grade")
+            })) or None,
+            "team_ids": sorted({item["team_id"] for item in assignments if item.get("team_id")}),
+            "capacity_buckets": buckets,
+            "capacity_hours": capacity,
+            "used_hours_by_sprint": used,
+            "free_hours_by_sprint": {
+                str(sprint): max(capacity - float(used.get(str(sprint), 0)), 0.0)
+                for sprint in range(1, 7)
+            },
+            "skills": list(profile.get("skills") or []),
+            "allocations": list(current.get("allocations") or []),
+        })
+
+    approved_teams = {item["team_id"]: item for item in payload.get("teams", [])}
+    assignments_by_engineer = {
+        item["engineer_id"]: item.get("assignments") or []
+        for item in catalog.get("engineers", [])
+    }
+    teams = []
+    for team in catalog.get("teams", []):
+        team_id = team["team_id"]
+        current = deepcopy(approved_teams.get(team_id) or {})
+        members = [item for item in engineers if team_id in item.get("team_ids", [])]
+        catalog_capacity = team.get("capacity_sp")
+        current_capacity = current.get("capacity_sp")
+        effective_capacity = current_capacity if current_capacity is not None else catalog_capacity
+        # Plans created before manual-capacity support may contain a persisted
+        # zero for a newly added team. Prefer the catalog bootstrap value in
+        # that case so reopening the team does not erase its entered capacity.
+        if (
+            catalog_capacity is not None
+            and float(catalog_capacity or 0) > 0
+            and float(effective_capacity or 0) <= 0
+        ):
+            effective_capacity = catalog_capacity
+        empty_sprints = {
+            str(sprint): {
+                "capacity": float(effective_capacity or 0),
+                "used": 0.0,
+                "remaining": float(effective_capacity or 0),
+            }
+            for sprint in range(1, 7)
+        }
+        current_sprints = current.get("sp_by_sprint") or {}
+        has_current_capacity = any(
+            float((resource or {}).get("capacity") or 0) > 0
+            for resource in current_sprints.values()
+        )
+        teams.append({
+            **current,
+            "team_id": team_id,
+            "name": team.get("name") or team_id,
+            "member_ids": sorted(item["engineer_id"] for item in members),
+            "roles": sorted({
+                assignment["role"]
+                for item in members
+                for assignment in assignments_by_engineer.get(item["engineer_id"], [])
+                if assignment.get("team_id") == team_id and assignment.get("role")
+            }, key=str.casefold),
+            "technologies": sorted({skill for item in members for skill in item.get("skills", [])}, key=str.casefold),
+            "average_velocity_sp": team.get("expected_velocity_sp"),
+            "capacity_sp": effective_capacity,
+            "sp_by_sprint": (
+                current_sprints
+                if current_sprints and (has_current_capacity or catalog_capacity is None)
+                else empty_sprints
+            ),
+            "member_capacity_hours": sum(
+                bucket["capacity_hours"]
+                for item in members
+                for bucket in item.get("capacity_buckets", [])
+                if bucket.get("team_id") == team_id
+            ),
+        })
+
+    approved_tasks = {item["task_id"]: item for item in payload.get("tasks", [])}
+    tasks = []
+    for item in catalog.get("tasks", []):
+        task_id = item["task_id"]
+        current = deepcopy(approved_tasks.get(task_id) or {})
+        requirements = {
+            row["role"]: float(row.get("required_hours") or 0)
+            for row in item.get("role_requirements", [])
+            if row.get("role")
+        }
+        if current:
+            tasks.append({
+                **current,
+                "title": item.get("title") or current.get("title"),
+                "source_status": item.get("status"),
+                "original_team_id": item.get("team_id"),
+                "role_requirements": requirements or current.get("role_requirements", {}),
+                "required_skills": list(item.get("required_skills") or []),
+            })
+            continue
+        tasks.append({
+            "task_id": task_id,
+            "title": item.get("title") or task_id,
+            "description": item.get("title") or task_id,
+            "initiative_id": item.get("initiative_id"),
+            "status": "CATALOG",
+            "status_label": "Не включена в утверждённый план",
+            "source_status": item.get("status"),
+            "rung": item.get("rung"),
+            "priority_label": f"Rung {item.get('rung', 0):g}",
+            "story_points": item.get("story_points"),
+            "remaining_story_points": item.get("story_points"),
+            "original_team_id": item.get("team_id"),
+            "assigned_team_id": None,
+            "team_reassigned": False,
+            "planned_sprints": [],
+            "start_sprint": None,
+            "completion_sprint": None,
+            "multi_sprint": False,
+            "sp_load_by_sprint": {},
+            "hours_by_sprint": {},
+            "role_hours_by_sprint": {},
+            "role_requirements": requirements,
+            "required_skills": list(item.get("required_skills") or []),
+            "dependencies": {"incoming": [], "outgoing": []},
+            "allocations": [],
+            "ownership": None,
+            "reasons": [],
+            "reason_blocks": [],
+            "risks": [],
+            "recommendations": [],
+            "summary": "Сущность каталога; в утверждённый план не включена.",
+            "outside_quarter": True,
+            "is_placeholder": False,
+        })
+    payload["engineers"] = engineers
+    payload["teams"] = teams
+    payload["tasks"] = tasks
+    payload["catalog_revision"] = catalog.get("catalog_revision", 0)
+    return payload
+
+
 def _catalog_data_state() -> str:
     tables = get_catalog_repository().tables()
     return "READY" if any(tables.values()) else "UNINITIALIZED"
@@ -1002,12 +1256,39 @@ def _with_lifecycle(payload: dict, entity_type: str, entity_id: str) -> dict:
     return {**payload, **get_catalog_repository().lifecycle(entity_type, entity_id)}
 
 
+def _empty_current_dashboard() -> dict:
+    return {
+        "status": "EMPTY",
+        "data_state": _catalog_data_state(),
+        "message": "Квартальный план ещё не построен",
+        "plan": {
+            "quarter": {"sprint_count": 6, "current_sprint": 1, "plan_version": None},
+            "summary": {"total_tasks": 0},
+            "sprints": [
+                {"sprint_number": sprint, "status": "PLANNED", "tasks": [], "teams": [], "role_resources": []}
+                for sprint in range(1, 7)
+            ],
+            "tasks": [], "allocations": [], "initiatives": [],
+        },
+        "summary": {"total_tasks": 0, "plan_version": None},
+        "tasks": [], "initiatives": [], "risks": [], "teams": [], "engineers": [],
+        "star_map": {"current_sprint": 1, "teams": [], "engineers": [], "skills": [], "roles": []},
+        "kpis": {},
+        "features": {
+            "plan_constructor": "AVAILABLE_EPHEMERAL",
+            "replanning": "AVAILABLE",
+            "bus_factor": "AVAILABLE",
+            "initial_excel_upload": "AVAILABLE_PERSISTENT_CATALOG",
+        },
+    }
+
+
 def _current_dashboard() -> dict:
     # The persistent working catalog is the source of the current plan after a
     # restart as well; an approved in-memory draft still takes precedence.
     approved = plan_drafts.approved()
     current = _current_plan_without_historical_done(
-        approved or deepcopy(_catalog_service().dashboard)
+        approved or _empty_current_dashboard()
     )
     history = plan_drafts.history() if approved is not None else []
     current = project_lifecycle(current, history)
@@ -1265,9 +1546,145 @@ def _company_star_map_team(engineers: list[dict], teams: list[dict]) -> dict:
     }
 
 
+def _active_star_map(
+    active_tables: dict[str, list[dict]],
+    catalog: dict,
+    approved_star: dict | None,
+    approved_tasks: list[dict],
+) -> dict:
+    """Build current Star Map/BF from catalog without running the planner."""
+
+    approved_star = approved_star or {}
+    current_sprint = int(approved_star.get("current_sprint") or 1)
+    base = StarMapService(
+        engineers=active_tables.get("engineers", []),
+        engineer_skills=active_tables.get("engineer_skills", []),
+        tasks=approved_tasks,
+        current_sprint=current_sprint,
+    ).payload()
+    bus = build_bus_factor_payload(active_tables)
+    bus_by_team = {item.get("team_id"): item for item in bus.get("teams", [])}
+    profiles = {item["engineer_id"]: item for item in catalog.get("engineers", [])}
+    engineer_by_id = {item["engineer_id"]: item for item in base.get("engineers", [])}
+    for engineer_id, profile in profiles.items():
+        target = engineer_by_id.get(engineer_id)
+        if target is None:
+            free = profile.get("free_assignment") or {}
+            target = {
+                "engineer_id": engineer_id,
+                "roles": [free.get("role")] if free.get("role") else [],
+                "grade": free.get("grade"),
+                "team_ids": [],
+                "skills": list(profile.get("skills") or []),
+                "capacity_buckets": [],
+                "capacity_hours": 0.0,
+                "used_hours": 0.0,
+                "free_hours": 0.0,
+                "allocations": [],
+                "quarter_allocations": [],
+                "reserve_candidates": [],
+            }
+            base.setdefault("engineers", []).append(target)
+            engineer_by_id[engineer_id] = target
+        target["name"] = profile.get("name") or engineer_id
+        target["skills"] = list(profile.get("skills") or [])
+        target["memberships"] = list(profile.get("assignments") or [])
+
+    old_teams = {item.get("team_id"): item for item in approved_star.get("teams", [])}
+    base_teams = {item.get("team_id"): item for item in base.get("teams", [])}
+    for team_row in catalog.get("teams", []):
+        team_id = team_row["team_id"]
+        team = base_teams.setdefault(team_id, {
+            "team_id": team_id, "member_ids": [], "member_count": 0,
+            "capacity_hours": 0.0, "used_hours": 0.0, "free_hours": 0.0,
+            "skill_coverage": [], "role_coverage": [], "cross_team_links": [],
+        })
+        team["team_name"] = team_row.get("name") or team_id
+        bus_team = bus_by_team.get(team_id, {})
+        technologies = []
+        for item in bus_team.get("competencies", []):
+            holders = sorted({
+                str(holder.get("engineer_id")) for holder in item.get("engineers", [])
+                if holder.get("engineer_id")
+            })
+            technologies.append({
+                "technology": item.get("skill"),
+                "team_bus_factor": int(item.get("bus_factor") or len(holders)),
+                "organization_bus_factor": int(item.get("organization_bus_factor") or len(holders)),
+                "engineer_ids": holders,
+                "engineer_count": len(holders),
+                "quarter_relevant": False,
+                "quarter_engineer_ids": [],
+                "helpers": [],
+            })
+        roles: dict[str, set[str]] = {}
+        for row in active_tables.get("engineers", []):
+            if str(row.get("team_id") or "") != team_id or not row.get("role"):
+                continue
+            roles.setdefault(str(row["role"]), set()).add(str(row.get("engineer_id")))
+        role_entries = [{
+            "competency": role,
+            "role": role,
+            "team_bus_factor": len(ids),
+            "organization_bus_factor": len({
+                str(row.get("engineer_id")) for row in active_tables.get("engineers", [])
+                if str(row.get("role") or "") == role
+            }),
+            "engineer_ids": sorted(ids),
+            "engineer_count": len(ids),
+            "quarter_relevant": False,
+            "quarter_engineer_ids": [],
+            "helpers": [],
+        } for role, ids in sorted(roles.items())]
+        old_quarter = ((old_teams.get(team_id, {}).get("competency_modes") or {}).get("quarter") or {})
+        required_skills = {item.get("technology") for item in old_quarter.get("technologies", [])}
+        required_roles = {item.get("role") or item.get("competency") for item in old_quarter.get("roles", [])}
+        for item in technologies:
+            item["quarter_relevant"] = item.get("technology") in required_skills
+            item["quarter_engineer_ids"] = item["engineer_ids"] if item["quarter_relevant"] else []
+        for item in role_entries:
+            item["quarter_relevant"] = item.get("role") in required_roles
+            item["quarter_engineer_ids"] = item["engineer_ids"] if item["quarter_relevant"] else []
+
+        def mode(rows_roles, rows_skills):
+            entries = [*rows_roles, *rows_skills]
+            return {"roles": rows_roles, "technologies": rows_skills, "entries": entries, "zone_counts": {
+                "critical": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) <= 1),
+                "limited": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) == 2),
+                "stable": sum(1 for item in entries if int(item.get("team_bus_factor") or 0) >= 3),
+                "total": len(entries),
+            }}
+        modes = {
+            "all": mode(role_entries, technologies),
+            "quarter": mode(
+                [item for item in role_entries if item["quarter_relevant"]],
+                [item for item in technologies if item["quarter_relevant"]],
+            ),
+        }
+        team["competencies"] = bus_team.get("competencies", [])
+        team["competency_count"] = len(modes["all"]["entries"])
+        team["bus_factor_available"] = bool(modes["all"]["entries"])
+        team["summary"] = bus_team.get("summary", {})
+        team["status"] = bus_team.get("status", "INSUFFICIENT_DATA")
+        team["message"] = bus_team.get("message")
+        team["competency_modes"] = modes
+        team["graph_competencies"] = modes["quarter"]["technologies"] or technologies
+    base["teams"] = [base_teams[key] for key in sorted(base_teams)]
+    base["engineers"] = sorted(base.get("engineers", []), key=lambda item: item.get("engineer_id", ""))
+    base["bus_factor"] = {"available": bus.get("status") == "AVAILABLE", "method": bus.get("method")}
+    base["status"] = bus.get("status", "INSUFFICIENT_DATA")
+    base["method"] = bus.get("method", "existing_bus_factor_service")
+    base["bus_factor_status"] = base["status"]
+    base["company"] = _company_star_map_team(base["engineers"], base["teams"])
+    return base
+
+
 def _dashboard_with_lifecycle() -> dict:
     payload = _current_dashboard()
+    approved_tasks = payload.get("tasks", []) if plan_drafts.approved() is not None else []
     repository = get_catalog_repository()
+    catalog = _catalog_snapshot()
+    payload = _overlay_catalog_entities(payload, catalog)
     for collection, entity_type, id_field in (
         ("tasks", "task", "task_id"),
         ("teams", "team", "team_id"),
@@ -1289,77 +1706,16 @@ def _dashboard_with_lifecycle() -> dict:
     # Keep the immutable current plan untouched while making the Star Map use
     # the active catalog for current Bus Factor membership.
     if isinstance(payload.get("star_map"), dict):
+        payload["star_map"] = _active_star_map(
+            repository.active_planning_tables(), catalog, payload.get("star_map"), approved_tasks
+        )
         has_approved_plan = plan_drafts.approved() is not None
         payload["star_map"]["quarter_demand_status"] = (
             "AVAILABLE" if has_approved_plan else "NO_APPROVED_PLAN"
         )
-        active_tables = repository.active_planning_tables()
-        active_bus = build_bus_factor_payload(active_tables)
-        payload["star_map"]["status"] = active_bus.get("status", payload["star_map"].get("status"))
-        payload["star_map"]["bus_factor_status"] = active_bus.get(
-            "status", payload["star_map"].get("bus_factor_status")
-        )
-        payload["star_map"]["bus_factor"] = {
-            **(payload["star_map"].get("bus_factor") or {}),
-            "available": active_bus.get("status") == "AVAILABLE",
-            "method": active_bus.get("method"),
-        }
-        active_team_by_id = {item.get("team_id"): item for item in active_bus.get("teams", [])}
-        active_engineer_ids = {
-            str(row.get("engineer_id"))
-            for row in active_tables.get("engineers", [])
-            if row.get("engineer_id")
-        }
-        payload["star_map"]["engineers"] = [
-            item for item in payload["star_map"].get("engineers", [])
-            if item.get("engineer_id") in active_engineer_ids
-        ]
-        filtered_teams = []
-        for team in payload["star_map"].get("teams", []):
-            active_team = active_team_by_id.get(team.get("team_id"))
-            if active_team is None:
-                continue
-            team["member_ids"] = [
-                engineer_id
-                for engineer_id in team.get("member_ids", [])
-                if engineer_id in active_engineer_ids
-            ]
-            team["member_count"] = len(set(team["member_ids"]))
-            team["engineer_count"] = team["member_count"]
-            team["competencies"] = active_team.get("competencies", [])
-            team["competency_count"] = active_team.get("competency_count", len(team["competencies"]))
-            team["bus_factor_available"] = active_team.get("bus_factor_available", False)
-            team["summary"] = active_team.get("summary", {})
-            team["status"] = active_team.get("status", team.get("status"))
-            team["message"] = active_team.get("message")
-            active_skills = {
-                item.get("skill"): item for item in team["competencies"]
-            }
-            for mode in (team.get("competency_modes") or {}).values():
-                if not isinstance(mode, dict):
-                    continue
-                for item in mode.get("technologies", []):
-                    source = active_skills.get(item.get("technology"))
-                    if source is None:
-                        item["engineer_ids"] = []
-                        item["team_bus_factor"] = 0
-                    else:
-                        item["engineer_ids"] = [
-                            holder.get("engineer_id")
-                            for holder in source.get("engineers", [])
-                            if holder.get("engineer_id") in active_engineer_ids
-                        ]
-                        item["team_bus_factor"] = len(set(item["engineer_ids"]))
-                for item in mode.get("roles", []):
-                    item["engineer_ids"] = [
-                        engineer_id
-                        for engineer_id in item.get("engineer_ids", [])
-                        if engineer_id in active_engineer_ids
-                    ]
-                    item["team_bus_factor"] = len(set(item["engineer_ids"]))
-            if not has_approved_plan:
-                modes = team.get("competency_modes") or {}
-                modes["quarter"] = {
+        if not has_approved_plan:
+            for team in payload["star_map"].get("teams", []):
+                team["competency_modes"]["quarter"] = {
                     "roles": [],
                     "technologies": [],
                     "entries": [],
@@ -1367,12 +1723,10 @@ def _dashboard_with_lifecycle() -> dict:
                 }
                 team["quarter_demand_status"] = "NO_APPROVED_PLAN"
                 team["quarter_demand_message"] = "Утверждённый квартальный план ещё не построен."
-            filtered_teams.append(team)
-        payload["star_map"]["teams"] = filtered_teams
-        payload["star_map"]["company"] = _company_star_map_team(
-            payload["star_map"].get("engineers", []),
-            filtered_teams,
-        )
+            payload["star_map"]["company"] = _company_star_map_team(
+                payload["star_map"].get("engineers", []),
+                payload["star_map"]["teams"],
+            )
     return payload
 
 
@@ -1511,16 +1865,59 @@ def cancel_replan_draft(workflow_id: str) -> dict:
 
 @app.get("/api/tasks")
 def tasks() -> list[dict]:
-    return [
-        _with_lifecycle(item, "task", item["task_id"])
-        for item in _current_dashboard()["tasks"]
-    ]
+    return _dashboard_with_lifecycle()["tasks"]
+
+
+def _catalog_mutation_error(error: Exception) -> HTTPException:
+    if isinstance(error, CatalogNotFoundError):
+        return HTTPException(status_code=404, detail=str(error))
+    return HTTPException(status_code=409, detail=str(error))
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task(request: CatalogTaskCreateRequest) -> dict:
+    repository = get_catalog_repository()
+    try:
+        explicit_skills = [dict(item) for item in request.required_skills]
+        for requirement in request.role_requirements:
+            explicit_skills.extend({
+                "technology": skill,
+                "role": requirement.get("role"),
+                "source": "explicit",
+            } for skill in requirement.get("skills", []) if skill)
+        required_skills = merge_task_skill_requirements(
+            task_id=request.task_id,
+            title=request.title,
+            explicit=[item for item in explicit_skills if not item.get("rejected")],
+            roles=[str(item.get("role")) for item in request.role_requirements if item.get("role")],
+            rejected=[str(item.get("technology")) for item in explicit_skills if item.get("rejected")],
+        )
+        repository.create_task(
+            task={
+                "task_id": request.task_id,
+                "summary": request.title,
+                "initiative_id": request.initiative_id,
+                "team_id": request.team_id,
+                "status": request.status,
+                "rung": request.rung,
+                "story_points": request.story_points,
+                "planned_start": request.planned_start,
+                "deadline": request.deadline,
+                "is_placeholder": False,
+            },
+            role_requirements=request.role_requirements,
+            skill_requirements=required_skills,
+            depends_on=request.depends_on,
+        )
+    except (CatalogConflictError, CatalogNotFoundError, ValueError) as error:
+        raise _catalog_mutation_error(error) from error
+    return next(item for item in _catalog_snapshot()["tasks"] if item["task_id"] == request.task_id)
 
 
 @app.get("/api/tasks/{task_id}")
 def task(task_id: str) -> dict:
     payload = next(
-        (item for item in _current_dashboard()["tasks"] if item["task_id"] == task_id),
+        (item for item in _dashboard_with_lifecycle()["tasks"] if item["task_id"] == task_id),
         None,
     )
     if payload is None:
@@ -1655,25 +2052,36 @@ def development_recommendations() -> dict:
             "recommendations": [],
             "read_only": True,
         }
-    dashboard = _current_dashboard()
-    tables = (dashboard.get("_planning_state") or {}).get("tables")
-    if not tables:
-        tables = get_catalog_repository().active_planning_tables()
+    dashboard = _dashboard_with_lifecycle()
+    tables = get_catalog_repository().active_planning_tables()
     return DevelopmentRecommendationService(tables, dashboard).calculate()
 
 
 @app.get("/api/teams")
 def teams() -> list[dict]:
-    return [
-        _with_lifecycle(item, "team", item["team_id"])
-        for item in _current_dashboard()["teams"]
-    ]
+    return _dashboard_with_lifecycle()["teams"]
+
+
+@app.post("/api/teams", status_code=201)
+def create_team(request: CatalogTeamCreateRequest) -> dict:
+    repository = get_catalog_repository()
+    try:
+        repository.create_team(
+            team_id=request.team_id,
+            name=request.name,
+            engineer_ids=request.engineer_ids,
+            capacity_sp=request.capacity_sp,
+        )
+    except (CatalogConflictError, CatalogNotFoundError, ValueError) as error:
+        raise _catalog_mutation_error(error) from error
+    return next(item for item in _catalog_snapshot()["teams"] if item["team_id"] == request.team_id)
 
 
 @app.get("/api/teams/{team_id}")
 def team(team_id: str) -> dict:
+    dashboard = _dashboard_with_lifecycle()
     payload = build_team_projection(
-        _current_dashboard(), plan_drafts.history(), team_id
+        dashboard, plan_drafts.history(), team_id
     )
     if payload is None:
         raise HTTPException(status_code=404, detail=f"Unknown team_id: {team_id}")
@@ -1682,23 +2090,55 @@ def team(team_id: str) -> dict:
 
 @app.get("/api/teams/{team_id}/history")
 def team_history(team_id: str) -> dict:
-    if build_team_projection(_current_dashboard(), plan_drafts.history(), team_id) is None:
+    if build_team_projection(_dashboard_with_lifecycle(), plan_drafts.history(), team_id) is None:
         raise HTTPException(status_code=404, detail=f"Unknown team_id: {team_id}")
     return build_team_history(plan_drafts.history(), team_id)
 
 
 @app.get("/api/engineers")
 def engineers() -> list[dict]:
-    return [
-        _with_lifecycle(item, "engineer", item["engineer_id"])
-        for item in _current_dashboard()["engineers"]
-    ]
+    return _dashboard_with_lifecycle()["engineers"]
+
+
+@app.post("/api/engineers", status_code=201)
+def create_engineer(request: CatalogEngineerCreateRequest) -> dict:
+    repository = get_catalog_repository()
+    try:
+        repository.create_engineer(
+            engineer_id=request.engineer_id,
+            name=request.name,
+            role=request.role,
+            grade=request.grade,
+            capacity_rate=request.capacity_rate,
+            team_id=request.team_id,
+            skills=request.skills,
+        )
+    except (CatalogConflictError, CatalogNotFoundError, ValueError) as error:
+        raise _catalog_mutation_error(error) from error
+    return next(item for item in _catalog_snapshot()["engineers"] if item["engineer_id"] == request.engineer_id)
+
+
+@app.post("/api/engineers/{engineer_id}/memberships", status_code=201)
+def add_engineer_membership(engineer_id: str, request: CatalogMembershipRequest) -> dict:
+    repository = get_catalog_repository()
+    try:
+        repository.add_engineer_membership(
+            engineer_id=engineer_id,
+            team_id=request.team_id,
+            capacity_rate=request.capacity_rate,
+            role=request.role,
+            grade=request.grade,
+        )
+    except (CatalogConflictError, CatalogNotFoundError, ValueError) as error:
+        raise _catalog_mutation_error(error) from error
+    return next(item for item in _catalog_snapshot()["engineers"] if item["engineer_id"] == engineer_id)
 
 
 @app.get("/api/engineers/{engineer_id}")
 def engineer(engineer_id: str) -> dict:
+    dashboard = _dashboard_with_lifecycle()
     payload = build_engineer_projection(
-        _current_dashboard(), plan_drafts.history(), engineer_id
+        dashboard, plan_drafts.history(), engineer_id
     )
     if payload is None:
         raise HTTPException(status_code=404, detail=f"Unknown engineer_id: {engineer_id}")
@@ -1707,7 +2147,7 @@ def engineer(engineer_id: str) -> dict:
 
 @app.get("/api/engineers/{engineer_id}/history")
 def engineer_history(engineer_id: str) -> dict:
-    if build_engineer_projection(_current_dashboard(), plan_drafts.history(), engineer_id) is None:
+    if build_engineer_projection(_dashboard_with_lifecycle(), plan_drafts.history(), engineer_id) is None:
         raise HTTPException(status_code=404, detail=f"Unknown engineer_id: {engineer_id}")
     return build_engineer_history(plan_drafts.history(), engineer_id)
 
@@ -1716,10 +2156,10 @@ def engineer_history(engineer_id: str) -> dict:
 def engineer_workspace(engineer_id: str) -> dict:
     """Personal projection of the approved plan; drafts are never a fallback."""
 
-    catalog_engineer = next(
-        (item for item in _catalog_service().engineers if item.get("engineer_id") == engineer_id),
-        None,
-    )
+    catalog_engineer = next((
+        item for item in _overlay_catalog_entities({"engineers": [], "teams": [], "tasks": []}, _catalog_snapshot())["engineers"]
+        if item.get("engineer_id") == engineer_id
+    ), None)
     if catalog_engineer is None:
         raise HTTPException(status_code=404, detail=f"Unknown active engineer_id: {engineer_id}")
     return build_engineer_workspace(
@@ -1737,9 +2177,7 @@ def plan_constructor_catalog() -> dict:
     """Return active entities from the persistent working catalog."""
 
     repository = get_catalog_repository()
-    return build_constructor_catalog(
-        _catalog_service(), archived_task_ids=repository.archived_ids("task")
-    )
+    return _catalog_snapshot()
 
 
 @app.post("/api/skills/extract")
@@ -1886,10 +2324,7 @@ def approve_constructor_plan(request: DraftApprovalRequest) -> dict:
         # this point; exposing the freshly rebuilt catalog prevents the UI
         # from briefly showing the stale pre-approval catalog (and avoids a
         # second request racing the approval response).
-        repository = get_catalog_repository()
-        approved["catalog"] = build_constructor_catalog(
-            _catalog_service(), archived_task_ids=repository.archived_ids("task")
-        )
+        approved["catalog"] = _catalog_snapshot()
         star_map = approved.get("star_map")
         if isinstance(star_map, dict):
             star_map["company"] = _company_star_map_team(
@@ -1902,6 +2337,8 @@ def approve_constructor_plan(request: DraftApprovalRequest) -> dict:
             status_code=409,
             detail="Предварительный план больше недоступен. Постройте его заново.",
         ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 def _draft_action(action, draft_id: str, entity_id: str) -> dict:
@@ -2294,6 +2731,31 @@ def _archive_entity(
             status_code=422,
             detail="Выберите предложенную замену или пересчёт без замены.",
         )
+    if plan_drafts.approved() is None:
+        try:
+            operation = repository.archive_with_relations(
+                entity_type,
+                entity_id,
+                request.reason_code,
+                request.reason_text,
+                team_engineer_action=request.team_engineer_action,
+                team_task_action=request.team_task_action,
+            )
+        except CatalogNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ArchiveValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ArchiveConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            **operation,
+            "message": "Сущность архивирована в каталоге. Утверждённый план отсутствует.",
+            "current_plan_unchanged": True,
+            "dashboard": _dashboard_with_lifecycle(),
+            "unplannable_task_ids": [],
+            "requires_plan_change": False,
+            "warning": None,
+        }
     # The planner runs before the transaction. A planning failure therefore
     # cannot leave the catalog changed while the current plan is stale.
     try:
@@ -2398,6 +2860,33 @@ def archive_engineer(engineer_id: str, request: ArchiveRequest) -> dict:
 @app.post("/api/teams/{team_id}/archive")
 def archive_team(team_id: str, request: ArchiveRequest) -> dict:
     return _archive_entity("team", team_id, request)
+
+
+def _delete_entity_permanently(entity_type: str, entity_id: str) -> dict:
+    """Permanently remove a catalog record after explicit UI confirmation."""
+
+    try:
+        result = get_catalog_repository().delete_entity(entity_type, entity_id)
+    except CatalogNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ArchiveValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {**result, "dashboard": _dashboard_with_lifecycle()}
+
+
+@app.delete("/api/tasks/{task_id}/permanent")
+def permanently_delete_task(task_id: str) -> dict:
+    return _delete_entity_permanently("task", task_id)
+
+
+@app.delete("/api/engineers/{engineer_id}/permanent")
+def permanently_delete_engineer(engineer_id: str) -> dict:
+    return _delete_entity_permanently("engineer", engineer_id)
+
+
+@app.delete("/api/teams/{team_id}/permanent")
+def permanently_delete_team(team_id: str) -> dict:
+    return _delete_entity_permanently("team", team_id)
 
 
 if not FRONTEND_DIR.is_dir():

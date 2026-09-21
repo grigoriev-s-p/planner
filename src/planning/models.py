@@ -91,7 +91,7 @@ class RoleCapacityCheck:
 @dataclass(frozen=True)
 class EngineerAvailability:
     engineer_id: str
-    source_team_id: str
+    source_team_id: str | None
     teams: tuple[str, ...]
     roles: tuple[str, ...]
     capacity_rate: float

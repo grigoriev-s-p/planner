@@ -78,7 +78,7 @@ def allocate_available_hours(
                     0.0,
                 ),
                 item.engineer_id,
-                item.source_team_id,
+                str(item.source_team_id or ""),
             ),
         )
         # Task-level requirements may be covered by different assigned people.
@@ -99,7 +99,7 @@ def allocate_available_hours(
                     item.source_team_id != task_team,
                     -item.available_hours,
                     item.engineer_id,
-                    item.source_team_id,
+                    str(item.source_team_id or ""),
                 ),
                 default=None,
             )
@@ -197,13 +197,21 @@ def _limit_cross_team_to_owner(
     external_ids = set(
         prior_ownership.external_engineer_ids if prior_ownership else ()
     )
+    # A null source team is the explicitly unassigned/shared-pool bucket. It
+    # is not external help from another team and must be allowed to perform a
+    # task even when the owner-majority guard is enabled for team-bound work.
+    # Otherwise a task with only free-pool engineers would be reduced to zero
+    # hours because it has no local (team-owned) row.
     local_rows = [
         row for row in outcome.engineer_allocations
-        if row.source_team_id == task_team and row.hours > 1e-9
+        if (row.source_team_id == task_team or row.source_team_id is None)
+        and row.hours > 1e-9
     ]
     external_rows = [
         row for row in outcome.engineer_allocations
-        if row.source_team_id != task_team and row.hours > 1e-9
+        if row.source_team_id is not None
+        and row.source_team_id != task_team
+        and row.hours > 1e-9
     ]
     owner_ids.update(row.engineer_id for row in local_rows)
     local_hours_this_sprint = sum(row.hours for row in local_rows)

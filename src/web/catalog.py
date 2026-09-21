@@ -62,6 +62,10 @@ class CatalogNotFoundError(CatalogError):
     """Requested catalog entity does not exist."""
 
 
+class CatalogConflictError(CatalogError):
+    """A catalog mutation conflicts with an existing entity or membership."""
+
+
 class ArchiveValidationError(CatalogError):
     """Archive request has an unsupported or incomplete reason."""
 
@@ -408,6 +412,419 @@ class CatalogRepository:
         return result
 
     @staticmethod
+    def _connection_rows(
+        connection: sqlite3.Connection, table_name: str
+    ) -> list[tuple[str, dict[str, Any]]]:
+        rows = connection.execute(
+            "SELECT source.row_key,COALESCE(changes.payload,source.payload) payload "
+            "FROM catalog_rows source LEFT JOIN catalog_row_overrides changes "
+            "ON changes.table_name=source.table_name AND changes.row_key=source.row_key "
+            "WHERE source.table_name=? ORDER BY source.row_key",
+            (table_name,),
+        ).fetchall()
+        return [(row["row_key"], json.loads(row["payload"])) for row in rows]
+
+    @staticmethod
+    def _insert_row(
+        connection: sqlite3.Connection,
+        table_name: str,
+        row: Mapping[str, Any],
+        now: str,
+    ) -> None:
+        payload = dict(row)
+        base_key = _row_identity(table_name, payload)
+        row_key = base_key
+        suffix = 1
+        while connection.execute(
+            "SELECT 1 FROM catalog_rows WHERE table_name=? AND row_key=?",
+            (table_name, row_key),
+        ).fetchone():
+            suffix += 1
+            row_key = f"{base_key}\x1e{suffix}"
+        connection.execute(
+            "INSERT INTO catalog_rows(table_name,row_key,payload,created_at) VALUES(?,?,?,?)",
+            (table_name, row_key, _json_payload(payload), now),
+        )
+
+    @staticmethod
+    def _delete_rows(
+        connection: sqlite3.Connection, table_name: str, predicate
+    ) -> int:
+        rows = CatalogRepository._connection_rows(connection, table_name)
+        keys = [row_key for row_key, payload in rows if predicate(payload)]
+        for row_key in keys:
+            connection.execute(
+                "DELETE FROM catalog_row_overrides WHERE table_name=? AND row_key=?",
+                (table_name, row_key),
+            )
+            connection.execute(
+                "DELETE FROM catalog_rows WHERE table_name=? AND row_key=?",
+                (table_name, row_key),
+            )
+        return len(keys)
+
+    @staticmethod
+    def _bump_revision(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT value FROM catalog_metadata WHERE key='catalog_revision'"
+        ).fetchone()
+        revision = int(row[0]) + 1 if row else 1
+        connection.execute(
+            "INSERT INTO catalog_metadata(key,value) VALUES('catalog_revision',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(revision),),
+        )
+        return revision
+
+    def revision(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM catalog_metadata WHERE key='catalog_revision'"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    @staticmethod
+    def _active_entity_in_connection(
+        connection: sqlite3.Connection, entity_type: str, entity_id: str
+    ) -> bool:
+        table_name = ENTITY_TABLES[entity_type]
+        field = {"task": "task_id", "engineer": "engineer_id", "team": "team_id"}[entity_type]
+        exists = any(
+            _text(payload.get(field)) == entity_id
+            for _, payload in CatalogRepository._connection_rows(connection, table_name)
+        )
+        if entity_type == "team" and not exists:
+            exists = any(
+                _text(payload.get("team_id")) == entity_id
+                for name in ("engineers", "tasks")
+                for _, payload in CatalogRepository._connection_rows(connection, name)
+            )
+        lifecycle = connection.execute(
+            "SELECT archived FROM entity_lifecycle WHERE entity_type=? AND entity_id=?",
+            (entity_type, entity_id),
+        ).fetchone()
+        return exists and not (lifecycle and bool(lifecycle[0]))
+
+    @staticmethod
+    def _canonical_role_in_connection(
+        connection: sqlite3.Connection, candidate: str
+    ) -> str:
+        """Reuse an exact normalized catalog spelling for case/space variants."""
+
+        from src.data.normalization import normalize_role_name
+
+        normalized = normalize_role_name(candidate) or ""
+        existing = {
+            (normalize_role_name(payload.get("role")) or "").casefold():
+                normalize_role_name(payload.get("role"))
+            for table_name in ("engineers", "task_role_effort")
+            for _, payload in CatalogRepository._connection_rows(connection, table_name)
+            if normalize_role_name(payload.get("role"))
+        }
+        return existing.get(normalized.casefold()) or normalized
+
+    def create_team(
+        self,
+        *,
+        team_id: str,
+        name: str | None = None,
+        engineer_ids: Iterable[str] = (),
+        capacity_sp: float | None = None,
+    ) -> dict[str, Any]:
+        """Create a team, optional memberships and initial manual capacity."""
+
+        team_id = _text(team_id)
+        if not team_id:
+            raise CatalogConflictError("ID команды не может быть пустым.")
+        selected = list(dict.fromkeys(_text(value) for value in engineer_ids if _text(value)))
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._active_entity_in_connection(connection, "team", team_id):
+                raise CatalogConflictError(f"Команда с ID {team_id} уже существует.")
+            archived = connection.execute(
+                "SELECT archived FROM entity_lifecycle WHERE entity_type='team' AND entity_id=?",
+                (team_id,),
+            ).fetchone()
+            if archived and bool(archived[0]):
+                raise CatalogConflictError(
+                    f"Команда {team_id} находится в архиве. Используйте восстановление."
+                )
+            engineer_rows = self._connection_rows(connection, "engineers")
+            by_engineer: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for row_key, payload in engineer_rows:
+                by_engineer.setdefault(_text(payload.get("engineer_id")), []).append((row_key, payload))
+            missing = [
+                value for value in selected
+                if value not in by_engineer
+                or not self._active_entity_in_connection(connection, "engineer", value)
+            ]
+            if missing:
+                raise CatalogNotFoundError("Неизвестные инженеры: " + ", ".join(missing))
+            history_row: dict[str, Any] = {
+                "team_id": team_id,
+                "team_name": _text(name) or team_id,
+            }
+            if capacity_sp is not None:
+                try:
+                    numeric_capacity = float(capacity_sp)
+                except (TypeError, ValueError) as error:
+                    raise CatalogConflictError("Capacity команды должна быть числом.") from error
+                if not math.isfinite(numeric_capacity) or numeric_capacity < 0:
+                    raise CatalogConflictError("Capacity команды не может быть отрицательной.")
+                history_row["capacity_sp"] = numeric_capacity
+            self._insert_row(connection, "team_history", history_row, now)
+            for engineer_id in selected:
+                rows = by_engineer[engineer_id]
+                total = sum(float(payload.get("capacity_rate") or 0) for _, payload in rows)
+                free_row = next(
+                    ((row_key, payload) for row_key, payload in rows if not _text(payload.get("team_id"))),
+                    None,
+                )
+                available = max(1.0 - total, 0.0)
+                if free_row is not None:
+                    row_key, payload = free_row
+                    replacement = {**payload, "team_id": team_id}
+                    connection.execute(
+                        "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                        "VALUES('engineers',?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                        "payload=excluded.payload,updated_at=excluded.updated_at",
+                        (row_key, _json_payload(replacement), now),
+                    )
+                elif available > 1e-9:
+                    template = rows[0][1]
+                    self._insert_row(
+                        connection,
+                        "engineers",
+                        {**template, "team_id": team_id, "capacity_rate": available},
+                        now,
+                    )
+                else:
+                    raise CatalogConflictError(
+                        f"У инженера {engineer_id} нет свободной доли участия."
+                    )
+            revision = self._bump_revision(connection)
+        return {
+            "team_id": team_id,
+            "name": _text(name) or team_id,
+            "engineer_ids": selected,
+            "capacity_sp": capacity_sp,
+            "catalog_revision": revision,
+        }
+
+    def create_engineer(
+        self,
+        *,
+        engineer_id: str,
+        name: str | None,
+        role: str,
+        grade: str | None,
+        capacity_rate: float,
+        team_id: str | None,
+        skills: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        """Persist an engineer profile, optional membership and canonical skills."""
+
+        from src.data.normalization import normalize_role_name
+        from src.skills import canonicalize_skill
+
+        engineer_id = _text(engineer_id)
+        role_raw = _text(role)
+        canonical_role = normalize_role_name(role_raw)
+        team_id = _text(team_id) or None
+        if not engineer_id or not canonical_role:
+            raise CatalogConflictError("Укажите ID инженера и роль.")
+        if not 0 < float(capacity_rate) <= 1:
+            raise CatalogConflictError("Доступность инженера должна быть от 0 до 1.")
+        normalized_skills = sorted({
+            value for item in skills if (value := canonicalize_skill(item))
+        }, key=str.casefold)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._active_entity_in_connection(connection, "engineer", engineer_id):
+                raise CatalogConflictError(f"Инженер с ID {engineer_id} уже существует.")
+            archived = connection.execute(
+                "SELECT archived FROM entity_lifecycle WHERE entity_type='engineer' AND entity_id=?",
+                (engineer_id,),
+            ).fetchone()
+            if archived and bool(archived[0]):
+                raise CatalogConflictError(
+                    f"Инженер {engineer_id} находится в архиве. Используйте восстановление."
+                )
+            if team_id and not self._active_entity_in_connection(connection, "team", team_id):
+                raise CatalogNotFoundError(f"Неизвестная команда: {team_id}")
+            canonical_role = self._canonical_role_in_connection(connection, role_raw)
+            self._insert_row(connection, "engineers", {
+                "engineer_id": engineer_id,
+                "name": _text(name) or engineer_id,
+                "team_id": team_id,
+                "role_raw": role_raw,
+                "role": canonical_role,
+                "grade": _text(grade) or None,
+                "capacity_rate": float(capacity_rate),
+            }, now)
+            for technology in normalized_skills:
+                self._insert_row(connection, "engineer_skills", {
+                    "engineer_id": engineer_id, "technology": technology,
+                }, now)
+            revision = self._bump_revision(connection)
+        return {
+            "engineer_id": engineer_id,
+            "name": _text(name) or engineer_id,
+            "role": canonical_role,
+            "team_id": team_id,
+            "grade": _text(grade) or None,
+            "capacity_rate": float(capacity_rate),
+            "skills": normalized_skills,
+            "catalog_revision": revision,
+        }
+
+    def add_engineer_membership(
+        self,
+        *,
+        engineer_id: str,
+        team_id: str,
+        capacity_rate: float,
+        role: str | None = None,
+        grade: str | None = None,
+    ) -> dict[str, Any]:
+        """Attach an existing engineer without exceeding one total FTE."""
+
+        from src.data.normalization import normalize_role_name
+
+        engineer_id, team_id = _text(engineer_id), _text(team_id)
+        rate = float(capacity_rate)
+        if not engineer_id or not team_id or not 0 < rate <= 1:
+            raise CatalogConflictError("Укажите инженера, команду и долю участия от 0 до 1.")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not self._active_entity_in_connection(connection, "engineer", engineer_id):
+                raise CatalogNotFoundError(f"Неизвестный инженер: {engineer_id}")
+            if not self._active_entity_in_connection(connection, "team", team_id):
+                raise CatalogNotFoundError(f"Неизвестная команда: {team_id}")
+            rows = [
+                (key, payload) for key, payload in self._connection_rows(connection, "engineers")
+                if _text(payload.get("engineer_id")) == engineer_id
+            ]
+            if any(_text(payload.get("team_id")) == team_id for _, payload in rows):
+                raise CatalogConflictError(f"Инженер {engineer_id} уже состоит в команде {team_id}.")
+            membership_total = sum(
+                float(payload.get("capacity_rate") or 0)
+                for _, payload in rows if _text(payload.get("team_id"))
+            )
+            free_row = next(((key, payload) for key, payload in rows if not _text(payload.get("team_id"))), None)
+            available = (
+                float(free_row[1].get("capacity_rate") or 0)
+                if free_row else max(1.0 - membership_total, 0.0)
+            )
+            if rate > available + 1e-9 or membership_total + rate > 1 + 1e-9:
+                raise CatalogConflictError(
+                    f"У инженера {engineer_id} доступно только {available:g} FTE."
+                )
+            template = free_row[1] if free_row else rows[0][1]
+            canonical_role = self._canonical_role_in_connection(connection, role or template.get("role"))
+            if not canonical_role:
+                raise CatalogConflictError("Для membership требуется роль инженера.")
+            membership = {
+                **template,
+                "team_id": team_id,
+                "role_raw": _text(role) or template.get("role_raw") or canonical_role,
+                "role": canonical_role,
+                "grade": _text(grade) or template.get("grade") or None,
+                "capacity_rate": rate,
+            }
+            if free_row and abs(rate - available) <= 1e-9:
+                row_key, _ = free_row
+                connection.execute(
+                    "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                    "VALUES('engineers',?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                    "payload=excluded.payload,updated_at=excluded.updated_at",
+                    (row_key, _json_payload(membership), now),
+                )
+            else:
+                if free_row:
+                    row_key, payload = free_row
+                    remainder = {**payload, "capacity_rate": available - rate}
+                    connection.execute(
+                        "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                        "VALUES('engineers',?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                        "payload=excluded.payload,updated_at=excluded.updated_at",
+                        (row_key, _json_payload(remainder), now),
+                    )
+                self._insert_row(connection, "engineers", membership, now)
+            revision = self._bump_revision(connection)
+        return {"engineer_id": engineer_id, "team_id": team_id, "capacity_rate": rate, "catalog_revision": revision}
+
+    def create_task(
+        self,
+        *,
+        task: Mapping[str, Any],
+        role_requirements: Iterable[Mapping[str, Any]],
+        skill_requirements: Iterable[Mapping[str, Any]] = (),
+        depends_on: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        """Create a task and every requirement/dependency atomically."""
+
+        from src.data.normalization import normalize_role_name
+        from src.skills import canonicalize_skill
+
+        task_id = _text(task.get("task_id"))
+        if not task_id:
+            raise CatalogConflictError("ID задачи не может быть пустым.")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._active_entity_in_connection(connection, "task", task_id):
+                raise CatalogConflictError(f"Задача с ID {task_id} уже существует.")
+            archived = connection.execute(
+                "SELECT archived FROM entity_lifecycle WHERE entity_type='task' AND entity_id=?",
+                (task_id,),
+            ).fetchone()
+            if archived and bool(archived[0]):
+                raise CatalogConflictError(
+                    f"Задача {task_id} находится в архиве. Используйте восстановление."
+                )
+            team_id = _text(task.get("team_id")) or None
+            if team_id and not self._active_entity_in_connection(connection, "team", team_id):
+                raise CatalogNotFoundError(f"Неизвестная команда: {team_id}")
+            row = dict(task)
+            row["task_id"] = task_id
+            row["summary"] = _text(row.get("summary") or row.get("title"))
+            row.pop("title", None)
+            self._insert_row(connection, "tasks", row, now)
+            for source in role_requirements:
+                role_raw = _text(source.get("role"))
+                role = self._canonical_role_in_connection(connection, role_raw)
+                hours = float(source.get("required_hours") or 0)
+                if not role or hours <= 0:
+                    raise CatalogConflictError("Для задачи укажите роль и положительные трудозатраты.")
+                self._insert_row(connection, "task_role_effort", {
+                    "task_id": task_id, "role_raw": role_raw, "role": role,
+                    "required_hours": hours,
+                }, now)
+            for source in skill_requirements:
+                technology = canonicalize_skill(source.get("technology"))
+                if not technology:
+                    continue
+                payload = dict(source)
+                payload.update({"task_id": task_id, "technology": technology})
+                self._insert_row(connection, "task_skill_requirements", payload, now)
+            for blocker in dict.fromkeys(_text(value) for value in depends_on if _text(value)):
+                if blocker == task_id:
+                    raise CatalogConflictError("Задача не может зависеть сама от себя.")
+                if not self._active_entity_in_connection(connection, "task", blocker):
+                    raise CatalogNotFoundError(f"Неизвестная блокирующая задача: {blocker}")
+                self._insert_row(connection, "task_dependencies", {
+                    "blocking_task_id": blocker,
+                    "blocked_task_id": task_id,
+                    "dependency_type": "FinishToStart",
+                }, now)
+            revision = self._bump_revision(connection)
+        return {"task_id": task_id, "catalog_revision": revision}
+
+    @staticmethod
     def _write_lifecycle(
         connection: sqlite3.Connection,
         entity_type: str,
@@ -637,6 +1054,7 @@ class CatalogRepository:
                 connection, entity_type, entity_id,
                 reason_code, reason_text, archived_at,
             )
+            self._bump_revision(connection)
 
         lifecycle = self.lifecycle(entity_type, entity_id)
         lifecycle.update({"entity_type": entity_type, "entity_id": entity_id})
@@ -646,6 +1064,125 @@ class CatalogRepository:
             "affected_task_ids": affected_tasks,
             "team_engineer_action": team_engineer_action,
             "team_task_action": team_task_action,
+        }
+
+    def delete_entity(self, entity_type: str, entity_id: str) -> dict[str, Any]:
+        """Permanently remove one catalog entity and its catalog relations.
+
+        This is intentionally separate from archive_with_relations: archive is
+        the recoverable business operation, while this method is used only by
+        the explicit "delete forever" control on an entity profile.
+        """
+
+        entity_id = _text(entity_id)
+        if entity_type not in ENTITY_TABLES:
+            raise ArchiveValidationError(f"Unsupported entity type: {entity_type}")
+        if not entity_id:
+            raise CatalogNotFoundError("ID сущности не может быть пустым.")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            tables = {
+                table_name: self._connection_rows(connection, table_name)
+                for table_name in (
+                    "tasks", "task_role_effort", "task_dependencies",
+                    "engineers", "engineer_skills", "team_history",
+                    "task_skill_requirements",
+                )
+            }
+            if not self._entity_exists(
+                {name: [payload for _, payload in rows] for name, rows in tables.items()},
+                entity_type,
+                entity_id,
+            ):
+                raise CatalogNotFoundError(f"Unknown {entity_type}_id: {entity_id}")
+
+            removed = 0
+            if entity_type == "task":
+                removed += self._delete_rows(
+                    connection, "tasks",
+                    lambda row: _text(row.get("task_id")) == entity_id,
+                )
+                for table_name in ("task_role_effort", "task_skill_requirements"):
+                    removed += self._delete_rows(
+                        connection, table_name,
+                        lambda row: _text(row.get("task_id")) == entity_id,
+                    )
+                removed += self._delete_rows(
+                    connection, "task_dependencies",
+                    lambda row: _text(row.get("blocking_task_id")) == entity_id
+                    or _text(row.get("blocked_task_id")) == entity_id,
+                )
+            elif entity_type == "engineer":
+                removed += self._delete_rows(
+                    connection, "engineers",
+                    lambda row: _text(row.get("engineer_id")) == entity_id,
+                )
+                removed += self._delete_rows(
+                    connection, "engineer_skills",
+                    lambda row: _text(row.get("engineer_id")) == entity_id,
+                )
+            else:
+                # Keep engineers and tasks as catalog entities, but remove the
+                # deleted team's membership/ownership links. A membership row
+                # becomes an unassigned bucket unless that engineer already
+                # has one, in which case the redundant row is removed.
+                engineer_rows = tables["engineers"]
+                for row_key, payload in engineer_rows:
+                    if _text(payload.get("team_id")) != entity_id:
+                        continue
+                    engineer_id = _text(payload.get("engineer_id"))
+                    has_free = any(
+                        _text(other.get("engineer_id")) == engineer_id
+                        and not _text(other.get("team_id"))
+                        for _, other in engineer_rows
+                    )
+                    if has_free:
+                        connection.execute(
+                            "DELETE FROM catalog_row_overrides WHERE table_name=? AND row_key=?",
+                            ("engineers", row_key),
+                        )
+                        connection.execute(
+                            "DELETE FROM catalog_rows WHERE table_name=? AND row_key=?",
+                            ("engineers", row_key),
+                        )
+                    else:
+                        replacement = {**payload, "team_id": None}
+                        now = datetime.now(timezone.utc).isoformat()
+                        connection.execute(
+                            "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                            "VALUES('engineers',?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                            "payload=excluded.payload,updated_at=excluded.updated_at",
+                            (row_key, _json_payload(replacement), now),
+                        )
+                    removed += 1
+                # Tasks remain in the catalog but no longer point at a deleted
+                # owner team.
+                for row_key, payload in tables["tasks"]:
+                    if _text(payload.get("team_id")) != entity_id:
+                        continue
+                    replacement = {**payload, "team_id": None}
+                    now = datetime.now(timezone.utc).isoformat()
+                    connection.execute(
+                        "INSERT INTO catalog_row_overrides(table_name,row_key,payload,updated_at) "
+                        "VALUES('tasks',?,?,?) ON CONFLICT(table_name,row_key) DO UPDATE SET "
+                        "payload=excluded.payload,updated_at=excluded.updated_at",
+                        (row_key, _json_payload(replacement), now),
+                    )
+                removed += self._delete_rows(
+                    connection, "team_history",
+                    lambda row: _text(row.get("team_id")) == entity_id,
+                )
+
+            connection.execute(
+                "DELETE FROM entity_lifecycle WHERE entity_type=? AND entity_id=?",
+                (entity_type, entity_id),
+            )
+            self._bump_revision(connection)
+        return {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "removed_rows": removed,
+            "permanently_deleted": True,
         }
 
     def lifecycle(self, entity_type: str, entity_id: str) -> dict[str, Any]:
@@ -783,6 +1320,7 @@ class CatalogRepository:
             "capacity_rate": "Занятость",
             "snapshot_date": "Дата снимка",
             "velocity_achieved": "Фактическая производительность",
+            "capacity_sp": "Ручная capacity за спринт",
             "planned_sp": "Запланировано Story Points",
         }.get(field)
 
@@ -1201,6 +1739,8 @@ class CatalogRepository:
                         added[table_name] = added.get(table_name, 0) + 1
                     else:
                         kept[table_name] = kept.get(table_name, 0) + 1
+            if rows_to_delete or any(added.values()) or restored or restored_updated:
+                self._bump_revision(connection)
         return CatalogMergeResult(
             added, kept, tuple(dict.fromkeys(warnings)), tuple(conflicts),
             tuple(archived_entities), restored, restored_updated, kept_archived,
@@ -1292,6 +1832,7 @@ class CatalogRepository:
                 """,
                 (entity_type, entity_id, 1, archived_at, reason_code, reason_text),
             )
+            self._bump_revision(connection)
         result = self.lifecycle(entity_type, entity_id)
         result["entity_type"] = entity_type
         result["entity_id"] = entity_id

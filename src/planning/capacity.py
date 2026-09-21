@@ -28,12 +28,19 @@ def calculate_team_capacity(
     team_history: Iterable[Mapping[str, Any]],
     focus_factor: float = FOCUS_FACTOR,
 ) -> TeamCapacity:
-    """Return mean achieved velocity multiplied by the mandatory focus factor."""
+    """Return historical capacity, or an explicit manual scenario capacity.
+
+    ``capacity_sp`` is intentionally optional: imported historical rows keep
+    the existing velocity-based calculation, while a newly created team can
+    be planned before it has any historical samples. When both are present,
+    historical velocity remains authoritative.
+    """
 
     factor = _required_number(focus_factor, "focus_factor")
     if factor < 0:
         raise ValueError("focus_factor cannot be negative.")
     velocities: list[float] = []
+    manual_capacities: list[float] = []
     for row in team_history:
         if str(row.get("team_id", "")).strip() != team_id:
             continue
@@ -41,15 +48,30 @@ def calculate_team_capacity(
         try:
             velocity = _required_number(value, "velocity_achieved")
         except ValueError:
-            continue
+            velocity = -1
         if velocity >= 0:
             velocities.append(velocity)
+        manual = row.get("capacity_sp")
+        if manual is not None:
+            try:
+                capacity = _required_number(manual, "capacity_sp")
+            except ValueError:
+                capacity = -1
+            if capacity >= 0:
+                manual_capacities.append(capacity)
     average = sum(velocities) / len(velocities) if velocities else 0.0
+    # Historical velocity is the source of truth whenever samples exist.
+    # Manual capacity is only a bootstrap for a team with no history yet.
+    capacity_sp = (
+        average * factor
+        if velocities
+        else (sum(manual_capacities) / len(manual_capacities) if manual_capacities else 0.0)
+    )
     return TeamCapacity(
         team_id=team_id,
         average_velocity_sp=average,
         focus_factor=factor,
-        capacity_sp=average * factor,
+        capacity_sp=capacity_sp,
         history_samples=len(velocities),
     )
 

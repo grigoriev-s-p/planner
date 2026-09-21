@@ -98,7 +98,7 @@ class FeasibilityContext:
 @dataclass
 class _EngineerProfile:
     engineer_id: str
-    team_id: str
+    team_id: str | None
     roles: set[str] = field(default_factory=set)
     capacity_rate: float = 0.0
     skills: set[str] = field(default_factory=set)
@@ -115,22 +115,17 @@ class FeasibilityService:
             if (task_id := _text(row.get("task_id"))) is not None
         }
         self._profiles = self._build_engineer_profiles()
-        self._engineer_teams: dict[str, set[str]] = defaultdict(set)
+        self._engineer_teams: dict[str, set[str | None]] = defaultdict(set)
         for profile in self._profiles.values():
             self._engineer_teams[profile.engineer_id].add(profile.team_id)
 
-    def _build_engineer_profiles(self) -> dict[tuple[str, str], _EngineerProfile]:
-        profiles: dict[tuple[str, str], _EngineerProfile] = {}
+    def _build_engineer_profiles(self) -> dict[tuple[str, str | None], _EngineerProfile]:
+        profiles: dict[tuple[str, str | None], _EngineerProfile] = {}
         for row in self.context.engineers:
             engineer_id = _text(row.get("engineer_id"))
             team = _text(row.get("team_id"))
             rate = _number(row.get("capacity_rate"))
-            if (
-                engineer_id is None
-                or team is None
-                or rate is None
-                or not 0 < rate <= 1
-            ):
+            if engineer_id is None or rate is None or not 0 < rate <= 1:
                 continue
             profile = profiles.setdefault(
                 (engineer_id, team),
@@ -439,7 +434,10 @@ class FeasibilityService:
                     profile
                     for profile in self._profiles.values()
                     if role in profile.roles
-                    and (allow_cross_team or profile.team_id == team_id)
+                    # A profile with no source team is a shared pool resource
+                    # and is always eligible. Team-bound profiles still obey
+                    # the caller's cross-team policy.
+                    and (allow_cross_team or profile.team_id == team_id or profile.team_id is None)
                     and profile.engineer_id not in unavailable
                 ),
                 key=lambda profile: (
@@ -456,7 +454,7 @@ class FeasibilityService:
                         0.0,
                     ),
                     profile.engineer_id,
-                    profile.team_id,
+                    str(profile.team_id or ""),
                 ),
             )
             matching_profiles = [
@@ -481,7 +479,10 @@ class FeasibilityService:
                     EngineerAvailability(
                         engineer_id=profile.engineer_id,
                         source_team_id=profile.team_id,
-                        teams=tuple(sorted(self._engineer_teams[profile.engineer_id])),
+                        teams=tuple(sorted(
+                            (team for team in self._engineer_teams[profile.engineer_id] if team is not None),
+                            key=str,
+                        )),
                         roles=tuple(sorted(profile.roles)),
                         capacity_rate=profile.capacity_rate,
                         nominal_hours=capacity.nominal_hours,
