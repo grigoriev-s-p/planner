@@ -1146,6 +1146,11 @@ window.planConstructor = (() => {
     errorBox.hidden = true;
     try {
       const approvedPlan = await api.approveConstructorPlan(previewPlan.draft.id);
+      const refreshedCatalog = await api.getConstructorCatalog().catch(() => null);
+      if (refreshedCatalog) {
+        catalog = refreshedCatalog;
+        onCatalogUpdated(refreshedCatalog);
+      }
       previewPlan = null;
       onPlanApproved(approvedPlan);
     } catch (error) {

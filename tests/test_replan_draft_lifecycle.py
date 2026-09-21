@@ -37,6 +37,51 @@ def test_close_is_idempotent_and_keeps_previous_approved_until_review() -> None:
     assert store.approved() == approved
 
 
+def test_saved_actual_can_be_corrected_before_approval() -> None:
+    store = PlanDraftStore()
+    approved = approved_plan(store)
+    first_facts = _facts()
+    first_facts[1]["remaining_role_hours"] = {"Backend": 20}
+    corrected_facts = _facts()
+    corrected_facts[1]["remaining_role_hours"] = {"Backend": 120}
+
+    first = store.close_sprint(1, first_facts)
+    corrected = store.close_sprint(1, corrected_facts)
+
+    assert corrected["workflow_id"] == first["workflow_id"]
+    assert corrected["status"] == "READY_FOR_REVIEW"
+    assert corrected["actual"]["results"] == corrected_facts
+    assert store.approved() == approved
+
+
+def test_pending_sprint_close_can_be_cancelled_without_changing_plan() -> None:
+    store = PlanDraftStore()
+    approved = approved_plan(store)
+    workflow = store.close_sprint(1, _facts())
+
+    cancelled = store.cancel_replanning(workflow["workflow_id"])
+
+    assert cancelled["status"] == "CANCELLED"
+    assert cancelled["draft_plan"] is None
+    assert store.approved() == approved
+
+
+def test_all_completed_requires_review_before_approved_plan_changes() -> None:
+    store = PlanDraftStore()
+    approved = approved_plan(store)
+
+    workflow = store.close_sprint(1, [], all_completed=True)
+
+    assert workflow["status"] == "READY_FOR_REVIEW"
+    assert workflow["replanning_required"] is False
+    assert workflow["draft_plan"] is not None
+    assert store.approved() == approved
+
+    saved = store.approve_replanning(workflow["workflow_id"])
+    assert saved["_planning_state"]["completed_through_sprint"] == 1
+    assert saved["revision_context"]["trigger"] == "SPRINT_CLOSE_APPROVE"
+
+
 def test_invalid_actual_is_rejected_before_persistence() -> None:
     store = PlanDraftStore()
     approved_plan(store)
@@ -160,12 +205,15 @@ def test_diff_classifies_added_removed_team_engineer_and_cross_team_changes() ->
     assert "DONE" not in changes
 
 
-def test_frontend_exposes_review_retry_and_explicit_approve_controls() -> None:
+def test_frontend_exposes_review_edit_cancel_retry_and_approve_controls() -> None:
     source = (web_api.FRONTEND_DIR / "app.js").read_text(encoding="utf-8")
     api_source = (web_api.FRONTEND_DIR / "api.js").read_text(encoding="utf-8")
 
     assert "data-approve-replan" in source
     assert "data-retry-replan" in source
+    assert "data-edit-sprint-actual" in source
+    assert "data-cancel-sprint-actual" in source
     assert "hydrate(result);" not in source[source.index("async function closeCurrentSprint"):source.index("function renderStar")]
     assert "getReplanDraft" in api_source
     assert "approveReplanDraft" in api_source
+    assert "cancelReplanDraft" in api_source

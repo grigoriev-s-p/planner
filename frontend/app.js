@@ -642,7 +642,7 @@ function renderPlanning() {
       })
       .join('') || '<div class="sprint-empty">Нет задач</div>';
     const kpiBadge = sprintKpi ? `<span class="sprint-column-kpi ${attr(sprintKpi.status || 'UNAVAILABLE')}" title="Sprint Say/Do Ratio">KPI ${sprintKpi.completion_percent == null ? '—' : percent(sprintKpi.completion_percent)}</span>` : '';
-    return `<section class="sprint-column ${sprint === currentSprint() ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><div class="sprint-column-title"><b>Sprint ${sprint}</b>${kpiBadge}</div><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
+    return `<section class="sprint-column ${sprintData.presentation_state === 'CURRENT' ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><div class="sprint-column-title"><b>Sprint ${sprint}</b>${kpiBadge}</div><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
   }).join('');
   activateSprintScrollbars();
   renderPlanRiskSummary();
@@ -1403,7 +1403,7 @@ function replanChangeCard(change) {
 function renderReplanWorkflow(workflow) {
   const target = $('#recalcResult');
   if (workflow.status === 'REPLANNING_FAILED') {
-    target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">ФАКТ СОХРАНЁН</div><h2>Пересчёт не завершён</h2><p>Результаты Sprint ${number(workflow.sprint_number)} сохранены. Утверждённый план не изменён.</p></div><span class="status moved">Нужен повтор</span></div><div class="replan-error">${escapeHtml(workflow.error || 'Неизвестная ошибка пересчёта.')}</div><button class="btn btn-blue" type="button" data-retry-replan="${attr(workflow.workflow_id)}">Повторить пересчёт</button></article>`;
+    target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">ФАКТ СОХРАНЁН</div><h2>Пересчёт не завершён</h2><p>Результаты Sprint ${number(workflow.sprint_number)} сохранены. Утверждённый план не изменён.</p></div><span class="status moved">Нужен повтор</span></div><div class="replan-error">${escapeHtml(workflow.error || 'Неизвестная ошибка пересчёта.')}</div><div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-retry-replan="${attr(workflow.workflow_id)}">Повторить пересчёт</button></div></article>`;
     return;
   }
   if (workflow.status !== 'READY_FOR_REVIEW') {
@@ -1416,7 +1416,28 @@ function renderReplanWorkflow(workflow) {
   const content = changes.length
     ? `<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
     : '<div class="replan-no-changes"><b>Изменений в плане не требуется</b><p>Фактический результат сохранён, а оставшийся план бизнес-эквивалентен утверждённому.</p></div>';
-  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} уже сохранён. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-page="current-sprint">Вернуться к текущему спринту</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length ? 'Утвердить изменения' : 'Подтвердить без изменений'}</button></div></article>`;
+  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} сохранён как черновик. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length ? 'Утвердить изменения' : 'Подтвердить завершение спринта'}</button></div></article>`;
+}
+
+function editSprintActual(workflowId) {
+  const workflow = data.replanWorkflow;
+  if (!workflow || workflow.workflow_id !== workflowId || !workflow.actual) return;
+  show('current-sprint');
+  openSprintCloseDialog(workflow.actual);
+}
+
+async function cancelSprintActual(workflowId) {
+  if (!window.confirm('Отменить сохранённый факт? Утверждённый план останется без изменений.')) return;
+  try {
+    await window.postcodeApi.cancelReplanDraft(workflowId);
+    const dashboard = await window.postcodeApi.getDashboard();
+    hydrate(dashboard);
+    data.replanWorkflow = null;
+    show('current-sprint');
+    showToast('Закрытие спринта отменено. Факт можно заполнить заново.');
+  } catch (error) {
+    showToast(`Не удалось отменить закрытие: ${error?.message || error}`);
+  }
 }
 
 async function retryReplan(workflowId) {
@@ -1436,7 +1457,8 @@ async function approveReplan(workflowId) {
     hydrate(dashboard);
     data.replanWorkflow = {workflow_id: workflowId, status: 'APPROVED'};
     show('current-sprint');
-    showToast('Новый план утверждён. Открыт текущий спринт.');
+    const quarterDone = data.plan?.sprints?.every((item) => item.presentation_state === 'CLOSED');
+    showToast(quarterDone ? 'Sprint 6 подтверждён. Квартал завершён.' : 'Факт подтверждён. Открыт следующий спринт.');
   } catch (error) {
     showToast(`Не удалось утвердить план: ${error?.message || error}`);
   }
@@ -1467,7 +1489,7 @@ function renderCurrentSprint() {
     ? 'Sprint 6 завершён. Квартальный workflow закрыт.'
     : `Sprint ${sprint} · ${sprintTasks.length} задач · ${teamIds.size} команд`;
   if (pendingReview) {
-    $('#currentSprintNotice').innerHTML = '<aside class="development-notice pending-review-notice" role="status"><span class="development-icon">↻</span><div><b>Требуется подтверждение изменений плана</b><p>Факт спринта сохранён. Проверьте черновик пересчёта и подтвердите новую редакцию.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Посмотреть изменения</button></aside>';
+    $('#currentSprintNotice').innerHTML = '<aside class="development-notice pending-review-notice" role="status"><span class="development-icon">↻</span><div><b>Требуется подтверждение факта спринта</b><p>Проверьте сохранённые часы и SP. До подтверждения утверждённый план не изменится.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Открыть проверку</button></aside>';
   } else if (quarterDone) {
     $('#currentSprintNotice').innerHTML = '<aside class="development-notice" role="status"><span class="development-icon">✓</span><div><b>Квартал завершён</b><p>Спринт 6 зафиксирован. Новый спринт не создаётся.</p></div></aside>';
   } else $('#currentSprintNotice').innerHTML = '';
@@ -1527,14 +1549,18 @@ function renderCurrentSprint() {
 
 }
 
-function renderSprintCloseDialog() {
+function renderSprintCloseDialog(actual = null) {
   const sprint = currentSprint();
   const sprintTasks = (sprintBy(sprint)?.tasks || []).map((row) => taskBy(row.task_id)).filter(Boolean);
+  const savedResults = new Map((actual?.results || []).map((row) => [String(row.task_id), row]));
   $('#sprintCloseTitle').textContent = `Завершение Sprint ${sprint}`;
-  $('#sprintCloseSubtitle').textContent = 'Зафиксируйте фактический результат текущего спринта.';
+  $('#sprintCloseSubtitle').textContent = actual
+    ? 'Исправьте сохранённый факт и снова проверьте результат перед подтверждением.'
+    : 'Зафиксируйте фактический результат текущего спринта.';
   $('#sprintCloseDueCount').textContent = `Задач в спринте: ${sprintTasks.length}`;
   $('#sprintCloseTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
-    const roles = roleHoursForTask(task, sprint);
+    const saved = savedResults.get(String(task.task_id));
+    const roles = {...roleHoursForTask(task, sprint), ...(saved?.remaining_role_hours || {})};
     const startingSp = Number(task.remaining_story_points ?? task.story_points ?? 0);
     return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="1" max="${attr(startingSp)}" step="1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>Целое число, не более ${number(startingSp)} SP. Выполненное будет рассчитано автоматически.</small></div><p>Сколько ещё потребуется времени</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
   }).join('') : empty('В этом спринте нет задач.');
@@ -1542,6 +1568,25 @@ function renderSprintCloseDialog() {
   $$('input[name="hasPlanDeviations"]').forEach((input) => { input.checked = false; });
   $('#sprintCloseError').hidden = true;
   $('#confirmCloseCurrentSprint').disabled = true;
+
+  if (actual) {
+    const answer = actual.all_completed ? 'no' : 'yes';
+    const radio = $(`input[name="hasPlanDeviations"][value="${answer}"]`);
+    if (radio) radio.checked = true;
+    savedResults.forEach((saved, taskId) => {
+      const card = $(`[data-close-task="${CSS.escape(taskId)}"]`, $('#sprintCloseTasks'));
+      if (!card || saved.task_completed) return;
+      $('[data-task-deviation]', card).checked = true;
+      $('[data-task-reason]', card).value = saved.incomplete_reason || '';
+      $('[data-fact-sp]', card).value = saved.remaining_story_points ?? '';
+      $$('[data-fact-role]', card).forEach((input) => {
+        const value = saved.remaining_role_hours?.[input.dataset.factRole];
+        if (value != null) input.value = value;
+      });
+    });
+    syncSprintCloseControls();
+    $('#confirmCloseCurrentSprint').disabled = false;
+  }
 }
 
 function syncSprintCloseControls() {
@@ -1558,8 +1603,8 @@ function syncSprintCloseControls() {
   });
 }
 
-function openSprintCloseDialog() {
-  renderSprintCloseDialog();
+function openSprintCloseDialog(actual = null) {
+  renderSprintCloseDialog(actual);
   $('#sprintCloseDialog').showModal();
 }
 
@@ -1641,7 +1686,7 @@ async function closeCurrentSprint(event) {
   }
 
   closeSprintCloseDialog();
-  if (result.replanning_required === false) {
+  if (result.status === 'SPRINT_CLOSED') {
     data.replanWorkflow = null;
     try {
       const dashboard = await window.postcodeApi.getDashboard();
@@ -2208,7 +2253,7 @@ function bindEvents() {
   $('#skillTech').addEventListener('change', (event) => { state.skillTech = event.target.value; renderStarSkills(); });
   $('#competencyQuarterOnly')?.addEventListener('change', (event) => { state.starQuarterOnly = event.target.checked; state.skillTech = 'all'; renderStarSkills(); });
   $('#criticalOnly').addEventListener('change', (event) => { state.criticalOnly = event.target.checked; renderStarSkills(); });
-  $('#openSprintCloseDialog').addEventListener('click', openSprintCloseDialog);
+  $('#openSprintCloseDialog').addEventListener('click', () => openSprintCloseDialog());
   $('#sprintCloseForm').addEventListener('submit', closeCurrentSprint);
   $('#sprintCloseDialog').addEventListener('click', (event) => { if (event.target === $('#sprintCloseDialog')) closeSprintCloseDialog(); });
   $('#confirmSprintResult').addEventListener('click', closeSprintResult);
@@ -2225,6 +2270,10 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     const approveReplanButton = event.target.closest('[data-approve-replan]');
     if (approveReplanButton) { approveReplan(approveReplanButton.dataset.approveReplan); return; }
+    const editSprintActualButton = event.target.closest('[data-edit-sprint-actual]');
+    if (editSprintActualButton) { editSprintActual(editSprintActualButton.dataset.editSprintActual); return; }
+    const cancelSprintActualButton = event.target.closest('[data-cancel-sprint-actual]');
+    if (cancelSprintActualButton) { cancelSprintActual(cancelSprintActualButton.dataset.cancelSprintActual); return; }
     const retryReplanButton = event.target.closest('[data-retry-replan]');
     if (retryReplanButton) { retryReplan(retryReplanButton.dataset.retryReplan); return; }
     const kpiToggle = event.target.closest('[data-toggle-kpi-details]');
@@ -2436,6 +2485,7 @@ async function initialize() {
       data.historicalTasks = (updatedCatalog.tasks || [])
         .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
         .map(historicalTaskFromCatalog);
+      data.engineerCatalog = updatedCatalog.engineers || [];
     });
     if (state.workspaceMode === 'engineer') await loadEngineerWorkspace();
     if (hasPendingReplan() && state.page === 'home') show('recalc');

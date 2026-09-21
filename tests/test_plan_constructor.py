@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -8,7 +9,9 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from src.web import api as web_api
 from src.web.api import PlanDraftStore, app, plan_drafts
+from src.web.catalog import CatalogRepository
 from src.web.constructor import (
     ConstructorScenario,
     ScenarioValidationError,
@@ -74,6 +77,22 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 
 
 class ConstructorDomainTests(unittest.TestCase):
+    def test_approved_manual_entities_are_persisted_in_working_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = CatalogRepository(Path(directory) / "catalog.sqlite3")
+            store = PlanDraftStore(repository_provider=lambda: repository)
+            payload = scenario_payload()
+            draft = store.create(build_constructor_plan(ConstructorScenario(**payload)))
+
+            store.approve(draft["draft"]["id"])
+            tables = repository.tables()
+
+            self.assertIn("Team-A", {row["team_id"] for row in tables["team_history"]})
+            self.assertIn("ENG-1", {row["engineer_id"] for row in tables["engineers"]})
+            self.assertIn("TASK-1", {row["task_id"] for row in tables["tasks"]})
+            self.assertTrue(tables["engineer_skills"])
+            self.assertTrue(tables["task_role_effort"])
+
     def test_manual_scenario_preserves_owner_and_baseline_dates(self) -> None:
         payload = scenario_payload()
         payload["tasks"][0].update({
@@ -567,12 +586,21 @@ class ConstructorDomainTests(unittest.TestCase):
 class ConstructorAPIIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.catalog_directory = tempfile.TemporaryDirectory()
+        cls.original_repository_provider = web_api.get_catalog_repository
+        cls.repository = CatalogRepository(
+            Path(cls.catalog_directory.name) / "catalog.sqlite3",
+            seed_tables=cls.original_repository_provider().tables(),
+        )
+        web_api.get_catalog_repository = lambda: cls.repository
         cls.client = TestClient(app)
         plan_drafts.reset()
 
     @classmethod
     def tearDownClass(cls) -> None:
         plan_drafts.reset()
+        web_api.get_catalog_repository = cls.original_repository_provider
+        cls.catalog_directory.cleanup()
 
     def test_catalog_exposes_editable_copies_of_dataset_entities(self) -> None:
         response = self.client.get("/api/plan-constructor/catalog")
