@@ -1461,11 +1461,6 @@ function renderCurrentSprint() {
   const totalSp = sprintRows.reduce((sum, row) => sum + Number(row.capacity_sp_load || 0), 0);
   const totalHours = allocations.reduce((sum, row) => sum + Number(row.allocated_hours || 0), 0);
   $('#openSprintCloseDialog').disabled = quarterDone || pendingReview;
-  $('#currentSprintIntro').textContent = pendingReview
-    ? `Sprint ${sprint} закрыт · ожидается проверка нового плана`
-    : quarterDone
-    ? 'Sprint 6 завершён. Квартальный workflow закрыт.'
-    : `Sprint ${sprint} · ${sprintTasks.length} задач · ${teamIds.size} команд`;
   if (pendingReview) {
     $('#currentSprintNotice').innerHTML = '<aside class="development-notice pending-review-notice" role="status"><span class="development-icon">↻</span><div><b>Требуется подтверждение изменений плана</b><p>Факт спринта сохранён. Проверьте черновик пересчёта и подтвердите новую редакцию.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Посмотреть изменения</button></aside>';
   } else if (quarterDone) {

@@ -210,7 +210,7 @@ def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, An
             values = [
                 f"Не хватает {deficit:g} SP."
                 if deficit
-                else "Не хватает доступной ёмкости команды."
+                else "Не хватает доступной ёмкости команды по Story Points (SP)."
             ]
         elif code in {"OUTSIDE_QUARTER", "QUARTER_OVERFLOW"}:
             key, title = "quarter", "Не помещается в текущем квартале"
