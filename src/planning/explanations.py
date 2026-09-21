@@ -249,6 +249,17 @@ def _message(code: ReasonCode, task_id: str, details: dict[str, Any]) -> str:
         return f"Задача {task_id} не может быть завершена в пределах шести спринтов."
     if code == ReasonCode.MISSING_SPECIALIST:
         return f"Для задачи {task_id} нет специалиста роли {details.get('role', '')}."
+    if code == ReasonCode.INSUFFICIENT_SKILL_CAPACITY:
+        skills = details.get("missing_skills") or details.get("required_technologies") or []
+        skill_text = ", ".join(str(value) for value in skills)
+        role = details.get("role")
+        if details.get("cross_team_blocked"):
+            return "В назначенной команде нет доступного специалиста с нужной компетенцией."
+        if role and skill_text:
+            return f"Нет доступного специалиста роли {role} с навыками: {skill_text}."
+        if skill_text:
+            return f"Не хватает специалистов с навыками: {skill_text}."
+        return "Не хватает специалистов с требуемыми компетенциями."
     if code == ReasonCode.INVALID_TASK_OWNERSHIP:
         return str(
             details.get("status_message")

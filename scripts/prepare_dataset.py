@@ -46,10 +46,18 @@ def raw_file_label(raw_file: Path, project_root: Path) -> str:
         return raw_file.name
 
 
+EMPTY_TABLE_FIELDS = {
+    "task_skill_requirements.csv": [
+        "task_id", "role", "technology", "source", "matched_text",
+        "confidence", "required_hours", "extractor_version", "confirmed", "rejected",
+    ],
+}
+
+
 def write_csv_atomically(path: Path, rows: list[dict[str, Any]]) -> None:
-    if not rows:
+    fieldnames = list(rows[0].keys()) if rows else EMPTY_TABLE_FIELDS.get(path.name)
+    if not fieldnames:
         raise ValueError(f"Cannot write empty table {path.name}.")
-    fieldnames = list(rows[0].keys())
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -147,6 +155,7 @@ def print_summary(result: ProcessingResult, output_dir: Path) -> None:
         "task_dependencies.csv": "Dependencies",
         "engineers.csv": "Engineers",
         "engineer_skills.csv": "Engineer skills",
+        "task_skill_requirements.csv": "Task skill requirements",
         "team_history.csv": "Team history",
         "planning_results.csv": "Planning results",
         "plan_mismatch_reasons.csv": "Plan mismatch reasons",

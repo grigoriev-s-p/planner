@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Iterable
 
+from src.skills import canonicalize_skill
+
 from .analytics import cross_team_links, reserve_candidates, role_coverage, skill_coverage
 from .models import EngineerAllocation, EngineerBucket
 
@@ -101,7 +103,7 @@ class StarMapService:
         result: dict[str, set[str]] = defaultdict(set)
         for row in self.skill_rows:
             engineer_id = self._text(row.get("engineer_id"))
-            technology = self._text(row.get("technology"))
+            technology = canonicalize_skill(self._text(row.get("technology")))
             if engineer_id and technology:
                 result[engineer_id].add(technology)
         return result

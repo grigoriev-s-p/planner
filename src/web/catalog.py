@@ -100,6 +100,12 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"true", "1", "yes"}
+
+
 def _json_payload(row: Mapping[str, Any]) -> str:
     return json.dumps(dict(row), ensure_ascii=False, sort_keys=True, default=str)
 
@@ -925,6 +931,7 @@ class CatalogRepository:
         }
         new_entity_ids: dict[str, set[str]] = {}
         rows_to_insert: dict[str, list[dict[str, Any]]] = {}
+        rows_to_delete: list[tuple[str, str]] = []
         for table_name, (entity_type, field, label) in entity_specs.items():
             existing_groups = self._groups(current.get(table_name, []), field)
             incoming_groups = self._groups(materialized.get(table_name, []), field)
@@ -964,7 +971,6 @@ class CatalogRepository:
 
         linked_specs = {
             "task_role_effort": ("task", "task_id"),
-            "task_skill_requirements": ("task", "task_id"),
             "engineer_skills": ("engineer", "engineer_id"),
         }
         for table_name, (entity_type, field) in linked_specs.items():
@@ -997,6 +1003,42 @@ class CatalogRepository:
                     "excel": [dict(row) for row in incoming_rows],
                 })
 
+        # Automatic title extraction is refreshable, while explicit/manual
+        # requirements and user rejections are durable overrides.  Re-importing
+        # an existing task replaces only its previous ``source=title`` rows.
+        table_name = "task_skill_requirements"
+        rows_to_insert[table_name] = []
+        current_groups = self._groups(current.get(table_name, []), "task_id")
+        incoming_groups = self._groups(materialized.get(table_name, []), "task_id")
+        for entity_id, incoming_rows in incoming_groups.items():
+            if entity_id in new_entity_ids.get("task", set()):
+                rows_to_insert[table_name].extend(incoming_rows)
+                continue
+            if entity_id in archived["task"]:
+                kept[table_name] = kept.get(table_name, 0) + len(incoming_rows)
+                continue
+            saved_rows = current_groups.get(entity_id, [])
+            saved_manual = [
+                row for row in saved_rows
+                if _text(row.get("source")).casefold() != "title"
+                or _truthy(row.get("rejected"))
+            ]
+            protected_skills = {
+                _text(row.get("technology")).casefold()
+                for row in saved_manual
+                if _text(row.get("technology"))
+            }
+            for row in saved_rows:
+                if _text(row.get("source")).casefold() == "title" and not _truthy(row.get("rejected")):
+                    rows_to_delete.append((table_name, _row_identity(table_name, row)))
+            for row in incoming_rows:
+                technology = _text(row.get("technology")).casefold()
+                source = _text(row.get("source")).casefold()
+                if source == "title" and technology not in protected_skills:
+                    rows_to_insert[table_name].append(row)
+                else:
+                    kept[table_name] = kept.get(table_name, 0) + 1
+
         independent_tables = set(materialized) - set(rows_to_insert)
         for table_name in independent_tables:
             existing_keys = {
@@ -1028,6 +1070,15 @@ class CatalogRepository:
         kept_archived: dict[str, int] = {}
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            for table_name, row_key in rows_to_delete:
+                connection.execute(
+                    "DELETE FROM catalog_row_overrides WHERE table_name=? AND row_key=?",
+                    (table_name, row_key),
+                )
+                connection.execute(
+                    "DELETE FROM catalog_rows WHERE table_name=? AND row_key=?",
+                    (table_name, row_key),
+                )
             for item in archived_entities:
                 decision = decisions[item["decision_key"]]
                 entity_type, entity_id = item["entity_type"], item["entity_id"]
@@ -1186,6 +1237,17 @@ class CatalogRepository:
 
 @lru_cache(maxsize=1)
 def get_catalog_repository() -> CatalogRepository:
-    from .service import get_planning_service
+    from .service import PROCESSED_DIR, TABLE_FILES, get_planning_service
 
-    return CatalogRepository(CATALOG_DB, seed_tables=get_planning_service().tables)
+    # A fresh installation is allowed to have no generated CSV snapshot yet.
+    # In that state the persistent SQLite catalog starts empty and the first
+    # accepted Excel upload becomes its source of truth.  Only bootstrap from
+    # processed data when the complete legacy snapshot is present; attempting
+    # to construct PlanningAPIService with missing files used to make every API
+    # endpoint fail with HTTP 503 before an upload was even possible.
+    processed_snapshot_exists = all(
+        (PROCESSED_DIR / filename).is_file()
+        for filename in TABLE_FILES.values()
+    )
+    seed_tables = get_planning_service().tables if processed_snapshot_exists else None
+    return CatalogRepository(CATALOG_DB, seed_tables=seed_tables)

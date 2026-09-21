@@ -18,6 +18,7 @@ import pandas as pd
 from src.bus_factor import BusFactorService
 from src.star_map import StarMapService
 from src.planning import FeasibilityContext, build_quarter_plan
+from src.skills import canonicalize_skill, get_skill_registry
 from src.planning.capacity import calculate_team_capacity
 from src.planning.ownership import evaluate_ownership_rows
 from src.planning.task_states import is_historical_done
@@ -43,6 +44,9 @@ TABLE_FILES = {
     "engineers": "engineers.csv",
     "engineer_skills": "engineer_skills.csv",
     "team_history": "team_history.csv",
+}
+OPTIONAL_TABLE_FILES = {
+    "task_skill_requirements": "task_skill_requirements.csv",
 }
 
 
@@ -90,12 +94,31 @@ def _number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"true", "1", "yes"}
+
+
 def _read_table(directory: Path, table_name: str) -> list[dict[str, Any]]:
     path = directory / TABLE_FILES[table_name]
     if not path.is_file():
         raise ServiceDataError(f"Missing processed file: {path.name}")
     try:
         frame = pd.read_csv(path)
+    except (OSError, UnicodeError, pd.errors.ParserError) as error:
+        raise ServiceDataError(f"Cannot read {path.name}: {error}") from error
+    return [_clean(row) for row in frame.to_dict("records")]
+
+
+def _read_optional_table(directory: Path, table_name: str) -> list[dict[str, Any]]:
+    path = directory / OPTIONAL_TABLE_FILES[table_name]
+    if not path.is_file():
+        return []
+    try:
+        frame = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return []
     except (OSError, UnicodeError, pd.errors.ParserError) as error:
         raise ServiceDataError(f"Cannot read {path.name}: {error}") from error
     return [_clean(row) for row in frame.to_dict("records")]
@@ -158,9 +181,20 @@ def _human_reason_blocks(reasons: Iterable[dict[str, Any]]) -> list[dict[str, An
             "INSUFFICIENT_SKILL_CAPACITY",
         }:
             key, title = "specialists", "Не хватает специалистов"
-            values = [str(details.get("role"))] if details.get("role") else [
-                "Нет специалиста с нужными компетенциями."
-            ]
+            missing_skills = details.get("missing_skills") or details.get("required_technologies") or []
+            role = details.get("role")
+            if code == "INSUFFICIENT_SKILL_CAPACITY" and missing_skills:
+                skill_text = ", ".join(str(value) for value in missing_skills)
+                if details.get("cross_team_blocked"):
+                    values = ["В назначенной команде нет доступного специалиста с нужной компетенцией."]
+                else:
+                    values = [
+                        f"Нет доступного специалиста роли {role} с навыками: {skill_text}."
+                        if role
+                        else f"Не хватает специалистов с навыками: {skill_text}."
+                    ]
+            else:
+                values = [str(role)] if role else ["Нет специалиста с нужными компетенциями."]
         elif code in {"INSUFFICIENT_ROLE_CAPACITY", "INSUFFICIENT_ENGINEER_CAPACITY"}:
             key, title = "engineer_hours", "Не хватает доступного времени специалистов"
             role = details.get("role")
@@ -484,6 +518,10 @@ class PlanningAPIService:
             self.tables = {
                 name: _read_table(processed_dir, name) for name in TABLE_FILES
             }
+            self.tables.update({
+                name: _read_optional_table(processed_dir, name)
+                for name in OPTIONAL_TABLE_FILES
+            })
         else:
             missing = sorted(set(TABLE_FILES) - set(tables))
             if missing:
@@ -494,6 +532,35 @@ class PlanningAPIService:
                 name: [dict(row) for row in rows] for name, rows in tables.items()
             }
         self.tables.setdefault("task_skill_requirements", [])
+        seen_engineer_skills: set[tuple[str, str]] = set()
+        canonical_engineer_skills: list[dict[str, Any]] = []
+        for row in self.tables["engineer_skills"]:
+            engineer_id = _text(row.get("engineer_id"))
+            technology = canonicalize_skill(row.get("technology"))
+            key = (engineer_id or "", technology)
+            if engineer_id and technology and key not in seen_engineer_skills:
+                seen_engineer_skills.add(key)
+                canonical_engineer_skills.append({**row, "technology": technology})
+        self.tables["engineer_skills"] = canonical_engineer_skills
+        canonical_requirements: list[dict[str, Any]] = []
+        seen_requirements: set[tuple[str, str, str]] = set()
+        for row in self.tables["task_skill_requirements"]:
+            task_id = _text(row.get("task_id"))
+            role = _text(row.get("role"))
+            technology = canonicalize_skill(row.get("technology"))
+            key = (task_id or "", role or "", technology)
+            if task_id and technology and key not in seen_requirements:
+                seen_requirements.add(key)
+                canonical_requirements.append({**row, "role": role, "technology": technology})
+        self.tables["task_skill_requirements"] = canonical_requirements
+        hard_skill_requirements = [
+            row for row in canonical_requirements
+            if not _boolean(row.get("rejected"))
+            and (
+                str(row.get("confidence") or "high").casefold() == "high"
+                or _boolean(row.get("confirmed"))
+            )
+        ]
         self.context = FeasibilityContext.from_records(
             tasks=self.tables["tasks"],
             task_role_effort=self.tables["task_role_effort"],
@@ -501,7 +568,7 @@ class PlanningAPIService:
             engineers=self.tables["engineers"],
             engineer_skills=self.tables["engineer_skills"],
             team_history=self.tables["team_history"],
-            task_skill_requirements=self.tables["task_skill_requirements"],
+            task_skill_requirements=hard_skill_requirements,
         )
         self.plan = build_quarter_plan(self.context, **self._planner_options)
         self._raw_tasks = {
@@ -656,6 +723,34 @@ class PlanningAPIService:
                 values[role] += hours
         return dict(sorted(values.items()))
 
+    def _task_skill_requirements(self, task_id: str) -> list[dict[str, Any]]:
+        registry = get_skill_registry()
+        output = []
+        for row in self.tables.get("task_skill_requirements", []):
+            if _text(row.get("task_id")) != task_id or _boolean(row.get("rejected")):
+                continue
+            technology = canonicalize_skill(row.get("technology"))
+            if not technology:
+                continue
+            definition = registry.definition(technology)
+            source = str(row.get("source") or "explicit").casefold()
+            confidence = str(row.get("confidence") or "high").casefold()
+            confirmed_value = row.get("confirmed")
+            output.append({
+                "canonical_id": definition.canonical_id if definition else None,
+                "technology": technology,
+                "role": _text(row.get("role")),
+                "source": source,
+                "confidence": confidence,
+                "confirmed": (
+                    confidence == "high"
+                    if confirmed_value is None
+                    else _boolean(confirmed_value)
+                ),
+                "matched_text": _text(row.get("matched_text")),
+            })
+        return sorted(output, key=lambda item: ((item["role"] or ""), item["technology"].casefold()))
+
     def _task_dependencies(self, task_id: str) -> dict[str, list[dict[str, Any]]]:
         incoming = []
         outgoing = []
@@ -771,6 +866,7 @@ class PlanningAPIService:
                     },
                     "role_hours_by_sprint": role_hours_by_sprint,
                     "role_requirements": self._task_role_requirements(task_id),
+                    "required_skills": self._task_skill_requirements(task_id),
                     "dependencies": self._task_dependencies(task_id),
                     "allocations": allocations,
                     "ownership": ownership,
@@ -847,6 +943,13 @@ class PlanningAPIService:
         existing BusFactorService remains the only source of BF values.
         """
 
+        quarter_required_skills = {
+            requirement["technology"]
+            for task in self.tasks
+            if task.get("assigned_team_id") == team_id and task.get("planned_sprints")
+            for requirement in task.get("required_skills", [])
+            if requirement.get("confirmed") and requirement.get("confidence") == "high"
+        }
         technologies: list[dict[str, Any]] = []
         for item in bus_team.get("competencies", []):
             holders = [engineer.get("engineer_id") for engineer in item.get("engineers", [])]
@@ -870,6 +973,40 @@ class PlanningAPIService:
                     ],
                 }
             )
+
+        known_technologies = {item.get("technology") for item in technologies}
+        team_engineer_ids = {
+            _text(row.get("engineer_id"))
+            for row in self.tables.get("engineers", [])
+            if _text(row.get("team_id")) == team_id
+        }
+        skills_by_engineer: dict[str, set[str]] = defaultdict(set)
+        for row in self.tables.get("engineer_skills", []):
+            engineer_id = _text(row.get("engineer_id"))
+            technology = canonicalize_skill(row.get("technology"))
+            if engineer_id and technology:
+                skills_by_engineer[engineer_id].add(technology)
+        for technology in sorted(quarter_required_skills - known_technologies, key=str.casefold):
+            holders = sorted(
+                engineer_id for engineer_id in team_engineer_ids
+                if engineer_id and technology in skills_by_engineer.get(engineer_id, set())
+            )
+            organization_holders = sorted(
+                engineer_id for engineer_id, skills in skills_by_engineer.items()
+                if technology in skills
+            )
+            technologies.append({
+                "technology": technology,
+                "team_bus_factor": len(set(holders)),
+                "organization_bus_factor": len(set(organization_holders)),
+                "engineer_ids": holders,
+                "engineer_count": len(set(holders)),
+                "coverage_status": "NO_TEAM_COVERAGE" if not holders else "AVAILABLE",
+                "quarter_relevance": "required",
+                "quarter_relevant": True,
+                "quarter_engineer_ids": holders,
+                "helpers": [],
+            })
 
         role_entries: list[dict[str, Any]] = []
         try:
@@ -901,6 +1038,9 @@ class PlanningAPIService:
         role_entries.sort(key=lambda item: str(item.get("competency") or "").casefold())
         all_entries = [*role_entries, *technologies]
         quarter_roles = [item for item in role_entries if item.get("quarter_relevant")]
+        for item in technologies:
+            item["quarter_relevant"] = item.get("technology") in quarter_required_skills
+            item["quarter_relevance"] = "required" if item["quarter_relevant"] else "not_required"
         quarter_technologies = [item for item in technologies if item.get("quarter_relevant")]
 
         def mode(roles: list[dict[str, Any]], skills: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1665,7 +1805,23 @@ class PlanningAPIService:
 
     @cached_property
     def dashboard(self) -> dict[str, Any]:
+        initialized = any(
+            self.tables.get(table_name)
+            for table_name in (
+                "tasks",
+                "engineers",
+                "team_history",
+                "task_role_effort",
+            )
+        )
         return {
+            "status": "READY" if initialized else "EMPTY",
+            "data_state": "READY" if initialized else "UNINITIALIZED",
+            "message": (
+                None
+                if initialized
+                else "Квартальный план ещё не построен"
+            ),
             "plan": self.plan_payload,
             "summary": self.summary,
             "tasks": self.tasks,

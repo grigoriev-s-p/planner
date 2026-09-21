@@ -6,6 +6,8 @@ from typing import Iterable, Literal
 
 import pandas as pd
 
+from src.skills import canonicalize_skill
+
 
 CompetencyType = Literal["skill", "role"]
 
@@ -25,23 +27,6 @@ ROLE_ALIASES = {
     "разработчик bigdata": "Разработчик Big Data",
     "разработчик big data": "Разработчик Big Data",
     "руководитель bigdata": "Руководитель BigData",
-}
-
-SKILL_ALIASES = {
-    "apache kafka": "Kafka",
-    "kafka": "Kafka",
-    "microservices": "Microservices",
-    "микросервисы": "Microservices",
-    "microservices архитектура": "Microservices",
-    "архитектура микросервисов": "Microservices",
-    "postgres": "PostgreSQL",
-    "postgresql": "PostgreSQL",
-    "javascript": "JavaScript",
-    "java script": "JavaScript",
-    "typescript": "TypeScript",
-    "ios": "iOS",
-    "android": "Android",
-    "c#": "C#",
 }
 
 GRADE_ORDER = {
@@ -69,7 +54,7 @@ def normalize_skill(value) -> str:
     cleaned = _clean_text(value)
     if not cleaned:
         return ""
-    return SKILL_ALIASES.get(cleaned.casefold(), cleaned)
+    return canonicalize_skill(cleaned)
 
 
 def _pick_column(df: pd.DataFrame, candidates: Iterable[str], required: bool = True) -> str | None:

@@ -137,6 +137,7 @@ class FeasibilityResult:
     dependencies: tuple[DependencyCheck, ...]
     reasons: tuple[FeasibilityReason, ...]
     limitations: tuple[str, ...] = ()
+    task_required_technologies: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -151,4 +152,5 @@ class FeasibilityResult:
             "dependencies": [asdict(item) for item in self.dependencies],
             "reasons": [reason.to_dict() for reason in self.reasons],
             "limitations": list(self.limitations),
+            "task_required_technologies": list(self.task_required_technologies),
         }

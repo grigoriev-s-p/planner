@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from src.skills import canonicalize_skill
+
 from .allocation import allocate_available_hours
 from .capacity import calculate_team_capacity
 from .dependency_rules import dependency_timing
@@ -307,6 +309,12 @@ class BaselineQuarterPlanner:
             for task in context.tasks
             if (task_id := _text(task.get("task_id"))) is not None
         }
+        self.engineer_skills_by_id: dict[str, set[str]] = {}
+        for row in context.engineer_skills:
+            engineer_id = _text(row.get("engineer_id"))
+            technology = canonicalize_skill(_text(row.get("technology")))
+            if engineer_id and technology:
+                self.engineer_skills_by_id.setdefault(engineer_id, set()).add(technology)
         self.eligibility = EligibilityService(
             EligibilityContext.from_records(
                 task_role_effort=context.task_role_effort,
@@ -769,6 +777,20 @@ class BaselineQuarterPlanner:
                     )
                     continue
 
+                previously_assigned_ids = {
+                    item.engineer_id
+                    for allocation in allocations
+                    for item in allocation.engineer_allocations
+                    if item.hours > 0
+                }
+                covered_task_skills = (
+                    set().union(
+                        *(self.engineer_skills_by_id.get(engineer_id, set())
+                          for engineer_id in previously_assigned_ids)
+                    )
+                    if previously_assigned_ids
+                    else set()
+                )
                 outcome = allocate_available_hours(
                     remaining,
                     feasibility,
@@ -779,6 +801,7 @@ class BaselineQuarterPlanner:
                     ),
                     enforce_owner_majority=True,
                     preferred_engineer_hours=preferred_engineer_hours,
+                    covered_task_skills=covered_task_skills,
                 )
                 if outcome.total_hours <= 1e-9:
                     attempts.append(
@@ -897,8 +920,49 @@ class BaselineQuarterPlanner:
                     reasons=last.reasons + (sp_reason,),
                 )
 
+        required_task_skills = set(
+            self.feasibility.task_skill_requirements(task_id).get(None, set())
+        )
+        assigned_engineer_ids = {
+            item.engineer_id
+            for allocation in allocations
+            for item in allocation.engineer_allocations
+            if item.hours > 0
+        }
+        covered_task_skills = (
+            set().union(
+                *(self.engineer_skills_by_id.get(engineer_id, set())
+                  for engineer_id in assigned_engineer_ids)
+            )
+            if assigned_engineer_ids
+            else set()
+        )
+        missing_task_skills = sorted(required_task_skills - covered_task_skills)
+        if not remaining and missing_task_skills:
+            skill_reason = FeasibilityReason(
+                ReasonCode.INSUFFICIENT_SKILL_CAPACITY,
+                {
+                    "role": None,
+                    "missing_skills": missing_task_skills,
+                    "required_technologies": sorted(required_task_skills),
+                    "candidate_engineers": sorted(assigned_engineer_ids),
+                },
+            )
+            if attempts:
+                last = attempts[-1]
+                attempts[-1] = PlacementAttempt(
+                    last.sprint_number,
+                    last.outcome,
+                    allocated_hours=last.allocated_hours,
+                    capacity_sp_load=last.capacity_sp_load,
+                    planned_completion_sp=last.planned_completion_sp,
+                    completed_sp=last.completed_sp,
+                    reasons=last.reasons + (skill_reason,),
+                )
+
         can_distribute_sp = (
             not remaining
+            and not missing_task_skills
             and start_sprint is not None
             and team_id is not None
             and story_points is not None

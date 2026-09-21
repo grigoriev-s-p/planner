@@ -35,6 +35,7 @@ window.postcodeApi = (() => {
     getTasks: () => request('/api/tasks'),
     getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     getRisks: () => request('/api/risks'),
+    getDevelopmentRecommendations: () => request('/api/development/recommendations'),
     getTeams: () => request('/api/teams'),
     getTeam: (teamId) => request(`/api/teams/${encodeURIComponent(teamId)}`),
     getTeamHistory: (teamId) => request(`/api/teams/${encodeURIComponent(teamId)}/history`),
@@ -45,6 +46,9 @@ window.postcodeApi = (() => {
     getStarMap: () => request('/api/star-map'),
     resetAllData: () => request('/api/admin/reset-data', {method: 'POST'}),
     getConstructorCatalog: () => request('/api/plan-constructor/catalog'),
+    extractTaskSkills: (payload) => request('/api/skills/extract', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
     getArchiveReasons: () => request('/api/catalog/archive-reasons'),
     getDeletionImpact: (entityType, entityId) => {
       const collection = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];

@@ -23,6 +23,12 @@ from pydantic import BaseModel, Field
 from src.data.normalization import normalize
 from src.data.parser import DatasetParsingError, parse_workbook
 from src.data.validation import validate
+from src.skills import (
+    EXTRACTOR_VERSION,
+    canonicalize_skill,
+    get_skill_registry,
+    merge_task_skill_requirements,
+)
 
 from .service import TABLE_FILES, PlanningAPIService, ServiceDataError
 from .catalog import CatalogRepository
@@ -60,6 +66,16 @@ class ConstructorRoleRequirement(BaseModel):
     skills: list[str] = Field(default_factory=list)
 
 
+class ConstructorSkillRequirement(BaseModel):
+    technology: str = Field(min_length=1, max_length=200)
+    role: str | None = Field(default=None, max_length=200)
+    source: Literal["explicit", "title", "both"] = "explicit"
+    confidence: Literal["high", "medium", "low"] = "high"
+    matched_text: str | None = Field(default=None, max_length=500)
+    confirmed: bool = True
+    rejected: bool = False
+
+
 class ConstructorTask(BaseModel):
     task_id: str = Field(min_length=1, max_length=120)
     title: str = Field(min_length=1, max_length=500)
@@ -71,6 +87,7 @@ class ConstructorTask(BaseModel):
     planned_start: str | None = Field(default=None, max_length=50)
     deadline: str | None = Field(default=None, max_length=50)
     role_requirements: list[ConstructorRoleRequirement] = Field(default_factory=list)
+    required_skills: list[ConstructorSkillRequirement] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
 
 
@@ -408,7 +425,7 @@ def scenario_tables(
                     "capacity_rate": assignment.capacity_rate,
                 }
             )
-        for skill in sorted({_clean_text(skill) for skill in engineer.skills if _clean_text(skill)}):
+        for skill in sorted({canonicalize_skill(skill) for skill in engineer.skills if canonicalize_skill(skill)}):
             engineer_skills.append({"engineer_id": engineer_id, "technology": skill})
 
     for task in scenario.tasks:
@@ -435,6 +452,16 @@ def scenario_tables(
                 "is_placeholder": False,
             }
         )
+        explicit_skill_rows: list[dict[str, Any]] = [
+            requirement.model_dump()
+            for requirement in task.required_skills
+            if not requirement.rejected
+        ]
+        rejected_skills = [
+            requirement.technology
+            for requirement in task.required_skills
+            if requirement.rejected
+        ]
         for requirement in task.role_requirements:
             role = _clean_text(requirement.role)
             role_effort.append(
@@ -445,12 +472,33 @@ def scenario_tables(
                     "required_hours": requirement.required_hours,
                 }
             )
-            for skill in sorted(
-                {_clean_text(skill) for skill in requirement.skills if _clean_text(skill)}
-            ):
-                task_skill_requirements.append(
-                    {"task_id": task_id, "role": role, "technology": skill}
-                )
+            explicit_skill_rows.extend(
+                {"technology": skill, "role": role, "source": "explicit"}
+                for skill in requirement.skills
+                if canonicalize_skill(skill)
+            )
+        task_skill_requirements.extend(
+            merge_task_skill_requirements(
+                task_id=task_id,
+                title=task.title,
+                explicit=explicit_skill_rows,
+                roles=[requirement.role for requirement in task.role_requirements],
+                rejected=rejected_skills,
+            )
+        )
+        for technology in sorted({canonicalize_skill(value) for value in rejected_skills if canonicalize_skill(value)}):
+            task_skill_requirements.append({
+                "task_id": task_id,
+                "role": None,
+                "technology": technology,
+                "source": "title",
+                "matched_text": technology,
+                "confidence": "high",
+                "required_hours": None,
+                "extractor_version": EXTRACTOR_VERSION,
+                "confirmed": False,
+                "rejected": True,
+            })
         for blocking_task_id in sorted(set(task.depends_on)):
             dependencies.append(
                 {
@@ -780,10 +828,23 @@ def build_constructor_catalog(
 
     role_requirements: dict[str, list[dict[str, Any]]] = defaultdict(list)
     skill_requirements: dict[tuple[str, str], list[str]] = defaultdict(list)
+    task_skill_details: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in service.tables.get("task_skill_requirements", []):
-        key = (_clean_text(row.get("task_id")), _clean_text(row.get("role")))
-        technology = _clean_text(row.get("technology"))
-        if all(key) and technology:
+        task_id = _clean_text(row.get("task_id"))
+        role = _clean_text(row.get("role")) or None
+        key = (task_id, role or "")
+        technology = canonicalize_skill(row.get("technology"))
+        if task_id and technology:
+            task_skill_details[task_id].append({
+                "technology": technology,
+                "role": role,
+                "source": _clean_text(row.get("source")) or "explicit",
+                "confidence": _clean_text(row.get("confidence")) or "high",
+                "matched_text": _clean_text(row.get("matched_text")) or None,
+                "confirmed": str(row.get("confirmed", "true")).strip().casefold() in {"true", "1", "yes"},
+                "rejected": str(row.get("rejected", "false")).strip().casefold() in {"true", "1", "yes"},
+            })
+        if task_id and role and technology and str(row.get("rejected", "false")).strip().casefold() not in {"true", "1", "yes"}:
             skill_requirements[key].append(technology)
     for row in service.tables["task_role_effort"]:
         task_id = _clean_text(row.get("task_id"))
@@ -843,6 +904,10 @@ def build_constructor_catalog(
                 "role_requirements": sorted(
                     role_requirements[task_id], key=lambda item: item["role"]
                 ),
+                "required_skills": sorted(
+                    task_skill_details[task_id],
+                    key=lambda item: ((item.get("role") or ""), item["technology"].casefold()),
+                ),
                 "depends_on": sorted(set(dependencies[task_id])),
                 "source": "dataset",
             }
@@ -866,9 +931,8 @@ def build_constructor_catalog(
             for item in requirements
         }
     )
-    skills = sorted(
-        {skill for values in skills_by_engineer.values() for skill in values}
-    )
+    skill_registry = get_skill_registry()
+    skills = [item.display_name for item in skill_registry.definitions]
     grades = sorted(
         {
             assignment["grade"]
@@ -877,7 +941,16 @@ def build_constructor_catalog(
             if assignment["grade"]
         }
     )
+    initialized = bool(
+        catalog_tasks
+        or engineer_profiles
+        or service.teams
+        or any(service.tables.get(name) for name in ("tasks", "engineers", "team_history"))
+    )
     return {
+        "status": "READY" if initialized else "EMPTY",
+        "data_state": "READY" if initialized else "UNINITIALIZED",
+        "message": None if initialized else "Каталог ещё не заполнен",
         "teams": [
             {
                 "team_id": team["team_id"],
@@ -893,6 +966,7 @@ def build_constructor_catalog(
         "options": {
             "roles": roles,
             "skills": skills,
+            "skill_registry": skill_registry.options(),
             "grades": grades,
             "statuses": ["ToDo", "InProgress", "Done"],
             "focus_factor": 0.8,

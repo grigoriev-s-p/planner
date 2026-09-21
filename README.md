@@ -11,10 +11,12 @@ planner-а. Streamlit остаётся техническим интерфейс
 
 ```powershell
 python -m pip install -r requirements.txt
-python scripts/prepare_dataset.py
-python scripts/data_audit.py
 python -m uvicorn src.web.api:app --reload
 ```
+
+При первом запуске processed CSV не обязательны: приложение откроется с пустым
+каталогом, а исходный Excel можно загрузить в разделе «Планирование». Ручной
+запуск `prepare_dataset.py` нужен только для автономной диагностики CSV-пайплайна.
 
 Product frontend доступен по адресу `http://127.0.0.1:8000`.
 
@@ -29,6 +31,7 @@ Product frontend доступен по адресу `http://127.0.0.1:8000`.
 | `src/data/` | Поиск файла, parser Excel, нормализация и валидация. |
 | `src/planning/` | Feasibility checker, scoring, resource allocation и quarter planner. |
 | `src/replanning/` | Baseline/fact/forecast KPI, diff версий плана и объяснимые алерты. |
+| `src/development/` | Ленивые read-only рекомендации «дообучить/нанять» по Approved Plan. |
 | `src/web/` | FastAPI, загрузка processed snapshot и стабильные API DTO. |
 | `frontend/` | Product SPA из HTML, CSS и JavaScript без build pipeline. |
 | `dev_ui/` | Временный русскоязычный интерфейс Streamlit. |
@@ -58,12 +61,19 @@ task_role_effort.csv
 task_dependencies.csv
 engineers.csv
 engineer_skills.csv
+task_skill_requirements.csv
 team_history.csv
 planning_results.csv
 plan_mismatch_reasons.csv
 task_closure_results.csv
 _dataset_manifest.json
 ```
+
+`task_skill_requirements.csv` формируется автоматически: явные требования из
+Excel объединяются с точными совпадениями технологий в названии задачи. Общий
+реестр `src/skills/registry.py` канонизирует навыки инженеров, требований,
+планировщика, Bus Factor и Star Map. Старые processed-наборы без этой таблицы
+остаются совместимыми и загружаются с пустым набором требований.
 
 Manifest содержит хеш исходного Excel и хеши CSV. Повторный запуск с тем же
 файлом ничего не перезаписывает. Для принудительной пересборки:
@@ -117,6 +127,14 @@ python -m uvicorn src.web.api:app --reload
 - `/api/dashboard`, `/api/plan`, `/api/summary`;
 - `/api/tasks`, `/api/tasks/{task_id}`, `/api/initiatives`;
 - `/api/risks`;
+- `/api/development/recommendations` — отдельная ленивая выборка требований и
+  кандидатов без симуляции обучения, найма или повторного планирования. Категория
+  `PLAN_CRITICAL` показывает только роли и навыки, отмеченные planner-ом как
+  ресурсные блокеры задач `MOVED/UNPLANNABLE`; остальные требования этих задач не
+  превращаются в рекомендации. `TEAM_WEAKNESS` содержит востребованные квартальным
+  планом роли и навыки с `Bus Factor = 1`. Для каждой компетенции endpoint возвращает связанные
+  задачи, ранжированный список кандидатов на дообучение и профиль для возможного
+  найма без расчёта количества людей, часов и прогнозного влияния на план;
 - `/api/teams`, `/api/teams/{team_id}`;
 - `/api/engineers`, `/api/engineers/{engineer_id}`, `/api/star-map`;
 - `/api/plan-constructor/catalog`, `/api/plan-constructor/plan`;
@@ -129,8 +147,10 @@ python -m uvicorn src.web.api:app --reload
 
 ### Рабочий каталог и загрузка Excel
 
-Product UI хранит рабочий каталог в `data/catalog/catalog.sqlite3`. При первом
-запуске он заполняется из `data/processed`. Загрузка Excel выполняет цепочку
+Product UI хранит рабочий каталог в `data/catalog/catalog.sqlite3`. Если полный
+legacy-снимок `data/processed` уже существует, он используется только для
+первичного заполнения пустого каталога. При чистом запуске каталог остаётся
+пустым до загрузки Excel. Загрузка Excel выполняет цепочку
 `parse → normalize → validate/audit`. Если замечаний нет, система сразу делает
 `insert-only merge` и строит предварительный план. Предупреждения сначала
 показываются в окне «Проверка данных»; после подтверждения используется уже
@@ -269,15 +289,14 @@ Acceptance tests создают маленькие данные программ
 
 ## Последовательность ручной проверки
 
-1. Поместить Excel в `data/raw/`.
-2. Запустить `python scripts/prepare_dataset.py`.
-3. Запустить `python scripts/data_audit.py` и прочитать отчёт из `reports/`.
-4. Запустить `python -m uvicorn src.web.api:app --reload` и открыть product UI.
+1. Запустить `python -m uvicorn src.web.api:app --reload` и открыть product UI.
+2. Перейти в «Планирование» и загрузить исходный Excel.
+3. Подтвердить предупреждения проверки данных, если они есть.
+4. Утвердить построенный квартальный план.
 5. При необходимости открыть `python -m streamlit run dev_ui/app.py`.
-6. На странице «Качество данных» проверить warnings.
-7. На странице «Квартальный план» построить план и проверить задачи `MOVED`,
+6. На странице «Квартальный план» проверить задачи `MOVED`,
    причины, cross-team allocations и рекомендации.
-8. Перед изменениями логики выполнить полный набор тестов.
+7. Перед изменениями логики выполнить полный набор тестов.
 
 ## Ограничения текущей версии
 
