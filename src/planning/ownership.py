@@ -131,7 +131,10 @@ def _evaluate(
         hours = max(float(raw_hours), 0.0)
         if hours <= EPSILON:
             continue
-        if source_team_id == owner_team_id:
+        # A null source team is an explicitly unassigned/shared-pool engineer.
+        # They are not an external team that can violate the owner-majority
+        # rule; the pool is available to the task's owner by definition.
+        if source_team_id == owner_team_id or source_team_id is None:
             owner_hours += hours
             owner_engineers.add(engineer_id)
             by_sprint[int(sprint)][0] += hours

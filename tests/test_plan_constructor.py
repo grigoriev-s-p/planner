@@ -77,6 +77,21 @@ def scenario_payload(*, engineer_skills: list[str] | None = None) -> dict:
 
 
 class ConstructorDomainTests(unittest.TestCase):
+    def test_unassigned_engineer_is_shared_with_selected_team(self) -> None:
+        payload = scenario_payload()
+        payload["engineers"][0]["assignments"] = [{
+            "team_id": None,
+            "role": "Backend",
+            "grade": "Middle",
+            "capacity_rate": 1,
+        }]
+        result = build_constructor_plan(ConstructorScenario(**payload))
+        task = next(item for item in result["tasks"] if item["task_id"] == "TASK-1")
+        self.assertEqual(task["status"], "PLANNED")
+        allocation = next(item for item in task["allocations"] if item["engineer_id"] == "ENG-1")
+        self.assertIsNone(allocation["source_team_id"])
+        self.assertTrue(allocation["cross_team"])
+
     def test_approved_manual_entities_are_persisted_in_working_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = CatalogRepository(Path(directory) / "catalog.sqlite3")

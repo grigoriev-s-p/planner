@@ -60,6 +60,7 @@ body.constructor-modal-open{overflow:hidden}
 .constructor-dataset-status-success{color:#267243!important}
 .constructor-dataset-status-error{color:#a73f3c!important}
 .constructor-counters{grid-template-columns:repeat(2,1fr)}
+.engineer-membership-form{display:grid;grid-template-columns:minmax(0,1fr) 145px auto;gap:10px;align-items:end;margin-top:18px}.engineer-membership-form label{display:grid;gap:5px;color:var(--muted);font-weight:700}.engineer-membership-form input,.engineer-membership-form select{width:100%;min-height:44px;border:1px solid #ccd5ed;border-radius:10px;background:#fff;padding:9px 12px}.engineer-membership-form .constructor-errors{grid-column:1/-1;margin:0}@media(max-width:760px){.engineer-membership-form{grid-template-columns:1fr}}
 .constructor-dialog{overscroll-behavior:contain}
 .constructor-form-grid{align-items:start}
 .constructor-form-grid .constructor-wide-field{grid-column:1/-1}

@@ -178,11 +178,12 @@ class DevelopmentRecommendationService:
 
     def _bus_factor_by_team_role(self) -> dict[tuple[str, str], tuple[int, list[str]]]:
         result: dict[tuple[str, str], set[str]] = defaultdict(set)
-        for engineer_id, engineer in self.engineers.items():
-            for team_id in engineer.get("team_ids") or []:
-                for role in engineer.get("roles") or []:
-                    if _text(team_id) and _text(role):
-                        result[(_text(team_id), _text(role))].add(engineer_id)
+        for assignment in self.tables.get("engineers", ()):
+            engineer_id = _text(assignment.get("engineer_id"))
+            team_id = _text(assignment.get("team_id"))
+            role = _text(assignment.get("role"))
+            if engineer_id in self.engineers and team_id and role:
+                result[(team_id, role)].add(engineer_id)
         return {key: (len(holders), sorted(holders)) for key, holders in result.items()}
 
     def _bus_factor_by_company_skill(self) -> dict[str, tuple[int, list[str]]]:

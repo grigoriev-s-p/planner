@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260921-35">
+  <link rel="stylesheet" href="/styles.css?v=20260921-36">
 </head>
 <body>
   <div class="shell">
@@ -133,7 +133,7 @@
       </section>
 
       <section class="page" id="page-engineer-detail" aria-labelledby="engineerDetailTitle">
-        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-engineer-back>← Назад</button></div>
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-engineer-back>← Назад</button><div id="engineerDetailActions"></div></div>
         <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ ИНЖЕНЕРА</div><h1 id="engineerDetailTitle">Инженер</h1><p id="engineerDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◉</div></div>
         <div id="engineerDetailState" aria-live="polite"></div>
         <div id="engineerDetailContent" hidden>
@@ -167,7 +167,7 @@
       </section>
 
       <section class="page" id="page-team-detail" aria-labelledby="teamDetailTitle">
-        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-team-back>← Назад</button></div>
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-team-back>← Назад</button><div id="teamDetailActions"></div></div>
         <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h1 id="teamDetailTitle">Команда</h1><p id="teamDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◆</div></div>
         <div id="teamDetailState" aria-live="polite"></div>
         <div id="teamDetailContent" hidden>
@@ -284,8 +284,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260921-15"></script>
-  <script src="/constructor.js?v=20260921-15"></script>
-  <script src="/app.js?v=20260921-25"></script>
+  <script src="/api.js?v=20260921-17"></script>
+  <script src="/constructor.js?v=20260922-18"></script>
+  <script src="/app.js?v=20260921-27"></script>
 </body>
 </html>

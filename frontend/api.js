@@ -34,13 +34,27 @@ window.postcodeApi = (() => {
     approveReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/approve`, {method: 'POST'}),
     cancelReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/cancel`, {method: 'POST'}),
     getTasks: () => request('/api/tasks'),
+    createTask: (payload) => request('/api/tasks', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
     getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
+    permanentlyDeleteEntity: (entityType, entityId) => request(`/api/${entityType}s/${encodeURIComponent(entityId)}/permanent`, {method: 'DELETE'}),
+    permanentlyDeleteEntity: (entityType, entityId) => request(`/api/${entityType}s/${encodeURIComponent(entityId)}/permanent`, {method: 'DELETE'}),
     getRisks: () => request('/api/risks'),
     getDevelopmentRecommendations: () => request('/api/development/recommendations'),
     getTeams: () => request('/api/teams'),
+    createTeam: (payload) => request('/api/teams', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
     getTeam: (teamId) => request(`/api/teams/${encodeURIComponent(teamId)}`),
     getTeamHistory: (teamId) => request(`/api/teams/${encodeURIComponent(teamId)}/history`),
     getEngineers: () => request('/api/engineers'),
+    createEngineer: (payload) => request('/api/engineers', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
+    addEngineerMembership: (engineerId, payload) => request(`/api/engineers/${encodeURIComponent(engineerId)}/memberships`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
     getEngineer: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}`),
     getEngineerHistory: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}/history`),
     getEngineerWorkspace: (engineerId) => request(`/api/engineer-workspace/${encodeURIComponent(engineerId)}`),

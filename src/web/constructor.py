@@ -42,12 +42,17 @@ MAX_CONSTRUCTOR_UPLOAD_BYTES = 25 * 1024 * 1024
 class ConstructorTeam(BaseModel):
     team_id: str = Field(min_length=1, max_length=120)
     name: str | None = Field(default=None, max_length=200)
-    expected_velocity_sp: float = Field(ge=0)
+    # Existing teams provide historical velocity. A newly created team has no
+    # history yet and may provide a direct per-sprint capacity instead.
+    expected_velocity_sp: float | None = Field(default=None, ge=0)
+    capacity_sp: float | None = Field(default=None, ge=0)
     focus_factor: float = Field(default=0.8, ge=0, le=1)
 
 
 class ConstructorEngineerAssignment(BaseModel):
-    team_id: str = Field(min_length=1, max_length=120)
+    # ``None`` denotes an unassigned/shared-pool engineer. Such a resource is
+    # available to help any selected team during manual planning.
+    team_id: str | None = Field(default=None, max_length=120)
     role: str = Field(min_length=1, max_length=200)
     grade: str | None = Field(default=None, max_length=120)
     capacity_rate: float = Field(gt=0, le=1)
@@ -358,6 +363,11 @@ def validate_constructor_scenario(
         if not is_historical_done(effective_task_rows.get(task_id, {}))
     }
     for team in scenario.teams:
+        if team.expected_velocity_sp is None and team.capacity_sp is None:
+            errors.append(
+                f"Команда {team.team_id}: укажите исторический velocity "
+                "или ручную capacity за спринт."
+            )
         if abs(team.focus_factor - 0.8) > 1e-9:
             errors.append(
                 f"Команда {team.team_id}: Focus Factor должен быть 0.8 "
@@ -370,13 +380,13 @@ def validate_constructor_scenario(
             assignment_teams.append(_clean_text(assignment.team_id))
             if not _clean_text(assignment.role):
                 errors.append(f"Инженер {engineer.engineer_id}: роль не может быть пустой.")
-            if assignment.team_id not in known_teams:
+            if assignment.team_id and assignment.team_id not in known_teams:
                 errors.append(
                     f"Инженер {engineer.engineer_id}: команда "
                     f"{assignment.team_id} не добавлена в сценарий."
                 )
             source_teams = catalog_engineer_teams.get(engineer.engineer_id, set())
-            if source_teams and assignment.team_id not in source_teams:
+            if source_teams and assignment.team_id and assignment.team_id not in source_teams:
                 errors.append(
                     f"Инженер {engineer.engineer_id} уже закреплён за другой "
                     "командой и не может быть перенесён в сценарии."
@@ -477,22 +487,28 @@ def scenario_tables(
 
     for team in scenario.teams:
         team_id = _clean_text(team.team_id)
-        team_history.append(
-            {
-                "team_id": team_id,
-                "team_name": _clean_text(team.name) or team_id,
-                "velocity_achieved": team.expected_velocity_sp,
-            }
-        )
+        history_row = {
+            "team_id": team_id,
+            "team_name": _clean_text(team.name) or team_id,
+        }
+        if team.expected_velocity_sp is not None:
+            history_row["velocity_achieved"] = team.expected_velocity_sp
+        if team.capacity_sp is not None:
+            history_row["capacity_sp"] = team.capacity_sp
+        team_history.append(history_row)
 
     for engineer in scenario.engineers:
         engineer_id = _clean_text(engineer.engineer_id)
+        # Keep both team memberships and the explicit shared-pool assignment.
+        # The browser sends an unassigned employee as ``team_id: null``; if we
+        # only serialized team memberships here that employee disappeared from
+        # the temporary planner context before feasibility was evaluated.
         for assignment in engineer.assignments:
             engineers.append(
                 {
                     "engineer_id": engineer_id,
                     "name": _clean_text(engineer.name) or engineer_id,
-                    "team_id": _clean_text(assignment.team_id),
+                    "team_id": _clean_text(assignment.team_id) or None,
                     "role_raw": _clean_text(assignment.role),
                     "role": _clean_text(assignment.role),
                     "grade": _clean_text(assignment.grade) or None,
@@ -689,6 +705,8 @@ def build_constructor_plan(
         plan_version="constructor-draft",
         planner_options={
             "allow_team_reassignment": False,
+            # Team-bound cross-team help remains opt-in, while the planner
+            # always admits unassigned/shared-pool engineers as helpers.
             "allow_cross_team": False,
         },
     )
@@ -852,6 +870,28 @@ def build_constructor_catalog(
     """Expose active catalog entities plus preserved dependency references."""
 
     archived_tasks = set(archived_task_ids)
+
+    # Keep historical velocity and manual capacity separate. A new team has
+    # no velocity samples yet, so its capacity must not be exposed as a fake
+    # zero velocity when the catalog is reopened.
+    historical_velocity_by_team: dict[str, list[float]] = defaultdict(list)
+    manual_capacity_by_team: dict[str, list[float]] = defaultdict(list)
+    for history_row in service.tables.get("team_history", []):
+        history_team_id = _clean_text(history_row.get("team_id"))
+        if not history_team_id:
+            continue
+        try:
+            velocity = float(history_row.get("velocity_achieved"))
+            if velocity >= 0:
+                historical_velocity_by_team[history_team_id].append(velocity)
+        except (TypeError, ValueError):
+            pass
+        try:
+            capacity = float(history_row.get("capacity_sp"))
+            if capacity >= 0:
+                manual_capacity_by_team[history_team_id].append(capacity)
+        except (TypeError, ValueError):
+            pass
 
     skills_by_engineer: dict[str, set[str]] = defaultdict(set)
     for row in service.tables["engineer_skills"]:
@@ -1034,7 +1074,18 @@ def build_constructor_catalog(
             {
                 "team_id": team["team_id"],
                 "name": team["name"],
-                "expected_velocity_sp": team["average_velocity_sp"],
+                "expected_velocity_sp": (
+                    sum(historical_velocity_by_team[team["team_id"]])
+                    / len(historical_velocity_by_team[team["team_id"]])
+                    if historical_velocity_by_team[team["team_id"]]
+                    else None
+                ),
+                "capacity_sp": (
+                    sum(manual_capacity_by_team[team["team_id"]])
+                    / len(manual_capacity_by_team[team["team_id"]])
+                    if manual_capacity_by_team[team["team_id"]]
+                    else None
+                ),
                 "focus_factor": 0.8,
                 "source": "dataset",
             }
@@ -1046,6 +1097,212 @@ def build_constructor_catalog(
             "roles": roles,
             "skills": skills,
             "skill_registry": skill_registry.options(),
+            "grades": grades,
+            "statuses": ["ToDo", "InProgress", "Done"],
+            "focus_factor": 0.8,
+        },
+        "source_dataset_read_only": True,
+        "working_catalog_persistent": True,
+    }
+
+
+def build_catalog_snapshot(
+    tables: dict[str, list[dict[str, Any]]],
+    *,
+    archived_task_ids: Iterable[str] = (),
+    revision: int = 0,
+) -> dict[str, Any]:
+    """Build the catalog DTO without invoking the quarter planner.
+
+    Catalog pages and mutations need current master data, not a simulated plan.
+    Keeping this projection table-only also makes an engineer/team/task create
+    cheap and prevents catalog writes from changing Approved Plan indirectly.
+    """
+
+    archived_tasks = set(archived_task_ids)
+
+    skills_by_engineer: dict[str, set[str]] = defaultdict(set)
+    for row in tables.get("engineer_skills", []):
+        engineer_id = _clean_text(row.get("engineer_id"))
+        skill = canonicalize_skill(row.get("technology"))
+        if engineer_id and skill:
+            skills_by_engineer[engineer_id].add(skill)
+
+    profiles: dict[str, dict[str, Any]] = {}
+    for row in tables.get("engineers", []):
+        engineer_id = _clean_text(row.get("engineer_id"))
+        role = _clean_text(row.get("role"))
+        if not engineer_id or not role:
+            continue
+        profile = profiles.setdefault(engineer_id, {
+            "engineer_id": engineer_id,
+            "name": _clean_text(row.get("name")) or engineer_id,
+            "assignments": [],
+            "free_assignment": None,
+            "skills": [],
+            "source": "catalog",
+        })
+        assignment = {
+            "team_id": _clean_text(row.get("team_id")) or None,
+            "role": role,
+            "grade": _clean_text(row.get("grade")) or None,
+            "capacity_rate": float(row.get("capacity_rate") or 0),
+        }
+        if assignment["team_id"]:
+            profile["assignments"].append(assignment)
+        elif profile["free_assignment"] is None:
+            profile["free_assignment"] = {key: value for key, value in assignment.items() if key != "team_id"}
+    for engineer_id, profile in profiles.items():
+        profile["assignments"].sort(key=lambda item: (item["team_id"], item["role"]))
+        profile["skills"] = sorted(skills_by_engineer[engineer_id], key=str.casefold)
+        profile["is_free"] = not profile["assignments"]
+        profile["membership_rate"] = sum(float(item["capacity_rate"]) for item in profile["assignments"])
+        profile["available_capacity_rate"] = (
+            float(profile["free_assignment"].get("capacity_rate") or 0)
+            if profile["free_assignment"]
+            else max(1.0 - profile["membership_rate"], 0.0)
+        )
+
+    role_effort: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    skills_by_task_role: dict[tuple[str, str], set[str]] = defaultdict(set)
+    task_skill_details: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in tables.get("task_skill_requirements", []):
+        task_id = _clean_text(row.get("task_id"))
+        role = _clean_text(row.get("role"))
+        technology = canonicalize_skill(row.get("technology"))
+        if not task_id or not technology:
+            continue
+        detail = {
+            "technology": technology,
+            "role": role or None,
+            "source": _clean_text(row.get("source")) or "explicit",
+            "confidence": _clean_text(row.get("confidence")) or "high",
+            "matched_text": _clean_text(row.get("matched_text")) or None,
+            "confirmed": str(row.get("confirmed", "true")).casefold() in {"true", "1", "yes"},
+            "rejected": str(row.get("rejected", "false")).casefold() in {"true", "1", "yes"},
+        }
+        task_skill_details[task_id].append(detail)
+        if role and not detail["rejected"]:
+            skills_by_task_role[(task_id, role)].add(technology)
+    for row in tables.get("task_role_effort", []):
+        task_id = _clean_text(row.get("task_id"))
+        role = _clean_text(row.get("role"))
+        try:
+            hours = float(row.get("required_hours") or 0)
+        except (TypeError, ValueError):
+            continue
+        if task_id and role and hours > 0:
+            role_effort[task_id].append({
+                "role": role,
+                "required_hours": hours,
+                "skills": sorted(skills_by_task_role[(task_id, role)], key=str.casefold),
+            })
+    dependencies: dict[str, list[str]] = defaultdict(list)
+    for row in tables.get("task_dependencies", []):
+        blocker = _clean_text(row.get("blocking_task_id"))
+        blocked = _clean_text(row.get("blocked_task_id"))
+        if blocker and blocked:
+            dependencies[blocked].append(blocker)
+
+    tasks = []
+    for row in tables.get("tasks", []):
+        task_id = _clean_text(row.get("task_id"))
+        if not task_id or task_id in archived_tasks or bool(row.get("is_placeholder")):
+            continue
+        raw_status = _clean_text(row.get("status")).casefold()
+        status = {"todo": "ToDo", "inprogress": "InProgress", "done": "Done"}.get(raw_status, "ToDo")
+        tasks.append({
+            "task_id": task_id,
+            "title": _clean_text(row.get("summary")) or task_id,
+            "initiative_id": _clean_text(row.get("initiative_id")) or None,
+            "team_id": _clean_text(row.get("team_id")) or None,
+            "status": status,
+            "rung": float(row.get("rung") or 0),
+            "story_points": float(row.get("story_points") or 0),
+            "planned_start": _clean_text(row.get("planned_start")) or None,
+            "deadline": _clean_text(row.get("deadline")) or None,
+            "role_requirements": sorted(role_effort[task_id], key=lambda item: item["role"]),
+            "required_skills": sorted(task_skill_details[task_id], key=lambda item: ((item.get("role") or ""), item["technology"].casefold())),
+            "depends_on": sorted(set(dependencies[task_id])),
+            "source": "catalog",
+        })
+
+    team_names: dict[str, str] = {}
+    team_velocity: dict[str, list[float]] = defaultdict(list)
+    team_capacity: dict[str, list[float]] = defaultdict(list)
+    for row in tables.get("team_history", []):
+        team_id = _clean_text(row.get("team_id"))
+        if not team_id:
+            continue
+        team_names[team_id] = _clean_text(row.get("team_name") or row.get("name")) or team_id
+        value = row.get("velocity_achieved")
+        try:
+            if value is not None:
+                team_velocity[team_id].append(float(value))
+        except (TypeError, ValueError):
+            pass
+        manual = row.get("capacity_sp")
+        try:
+            if manual is not None:
+                team_capacity[team_id].append(float(manual))
+        except (TypeError, ValueError):
+            pass
+    team_ids = set(team_names)
+    team_ids.update(
+        _clean_text(item.get("team_id"))
+        for item in tables.get("engineers", [])
+        if _clean_text(item.get("team_id"))
+    )
+    team_ids.update(task["team_id"] for task in tasks if task["team_id"])
+    teams = [{
+        "team_id": team_id,
+        "name": team_names.get(team_id, team_id),
+        "expected_velocity_sp": (
+            sum(team_velocity[team_id]) / len(team_velocity[team_id])
+            if team_velocity[team_id] else None
+        ),
+        "capacity_sp": (
+            sum(team_capacity[team_id]) / len(team_capacity[team_id])
+            if team_capacity[team_id] else None
+        ),
+        "focus_factor": 0.8,
+        "source": "catalog",
+    } for team_id in sorted(team_ids)]
+
+    roles = sorted({
+        item["role"]
+        for profile in profiles.values()
+        for item in [*profile["assignments"], *([profile["free_assignment"]] if profile["free_assignment"] else [])]
+        if item.get("role")
+    } | {
+        item["role"] for rows in role_effort.values() for item in rows
+    }, key=str.casefold)
+    grades = sorted({
+        item["grade"]
+        for profile in profiles.values()
+        for item in [*profile["assignments"], *([profile["free_assignment"]] if profile["free_assignment"] else [])]
+        if item.get("grade")
+    }, key=str.casefold)
+    registry = get_skill_registry()
+    registry_skills = {item.display_name for item in registry.definitions}
+    all_skills = registry_skills | {
+        skill for values in skills_by_engineer.values() for skill in values
+    } | {
+        item["technology"] for values in task_skill_details.values() for item in values
+    }
+    initialized = bool(tasks or profiles or teams)
+    return {
+        "status": "READY" if initialized else "EMPTY",
+        "data_state": "READY" if initialized else "UNINITIALIZED",
+        "message": None if initialized else "Каталог ещё не заполнен",
+        "catalog_revision": revision,
+        "teams": teams,
+        "engineers": sorted(profiles.values(), key=lambda item: item["engineer_id"]),
+        "tasks": sorted(tasks, key=lambda item: item["task_id"]),
+        "options": {
+            "roles": roles,
+            "skills": sorted(all_skills, key=str.casefold),
+            "skill_registry": registry.options(),
             "grades": grades,
             "statuses": ["ToDo", "InProgress", "Done"],
             "focus_factor": 0.8,
