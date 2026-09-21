@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+import src.web.catalog as catalog_module
+import src.web.service as service_module
 from src.web.api import app, plan_drafts
 from src.web.catalog import (
     ArchiveConflictError,
@@ -211,6 +213,8 @@ class CatalogMergeTests(unittest.TestCase):
             response = client.post("/api/admin/reset-data")
             empty_dashboard = client.get("/api/dashboard")
             empty_catalog = client.get("/api/plan-constructor/catalog")
+            empty_replan = client.get("/api/replanning/draft")
+            health = client.get("/api/health")
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "reset")
@@ -219,8 +223,44 @@ class CatalogMergeTests(unittest.TestCase):
             plan_drafts.snapshot(draft["draft"]["id"])
         self.assertEqual(empty_dashboard.status_code, 200, empty_dashboard.text)
         self.assertEqual(empty_dashboard.json()["tasks"], [])
+        self.assertEqual(empty_dashboard.json()["status"], "EMPTY")
+        self.assertEqual(empty_dashboard.json()["data_state"], "UNINITIALIZED")
         self.assertEqual(empty_catalog.status_code, 200, empty_catalog.text)
         self.assertEqual(empty_catalog.json()["tasks"], [])
+        self.assertEqual(empty_catalog.json()["status"], "EMPTY")
+        self.assertEqual(empty_catalog.json()["data_state"], "UNINITIALIZED")
+        self.assertEqual(empty_replan.status_code, 200, empty_replan.text)
+        self.assertEqual(
+            empty_replan.json(),
+            {"status": "NONE", "data_state": "UNINITIALIZED"},
+        )
+        self.assertEqual(health.status_code, 200, health.text)
+        self.assertEqual(
+            health.json(),
+            {"status": "ok", "data_state": "UNINITIALIZED"},
+        )
+
+    def test_repository_boots_empty_when_processed_snapshot_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            empty_processed = root / "processed"
+            empty_processed.mkdir()
+            database = root / "catalog.sqlite3"
+            catalog_module.get_catalog_repository.cache_clear()
+            try:
+                with (
+                    patch.object(catalog_module, "CATALOG_DB", database),
+                    patch.object(service_module, "PROCESSED_DIR", empty_processed),
+                    patch(
+                        "src.web.service.get_planning_service",
+                        side_effect=AssertionError("processed loader must not run"),
+                    ),
+                ):
+                    repository = catalog_module.get_catalog_repository()
+                    self.assertTrue(database.is_file())
+                    self.assertTrue(all(not rows for rows in repository.tables().values()))
+            finally:
+                catalog_module.get_catalog_repository.cache_clear()
 
     def test_linked_data_conflict_is_reported_without_overwrite(self) -> None:
         result = self.repo.merge_tables({

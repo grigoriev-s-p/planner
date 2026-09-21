@@ -137,6 +137,14 @@ class EngineerWorkspaceFrontendContractTests(unittest.TestCase):
         self.assertIn("renderEngineerParticipation", self.app)
         self.assertNotIn("story_points", self.app.split("function renderEngineerSprint()", 1)[1].split("function renderEngineerQuarter()", 1)[0])
 
+    def test_engineer_profile_tasks_have_a_distinct_renderer(self) -> None:
+        self.assertEqual(self.app.count("function renderEngineerProfileTasks(detail)"), 1)
+        self.assertEqual(self.app.count("function renderEngineerTasks()"), 1)
+        self.assertIn("tasks: renderEngineerProfileTasks", self.app)
+        engineer_meta = self.app.split("$('#engineerDetailMeta').textContent", 1)[1].split(";", 1)[0]
+        self.assertNotIn("Approved Plan", engineer_meta)
+        self.assertNotIn("Revision", engineer_meta)
+
     def test_direct_engineer_route_selects_engineer_mode(self) -> None:
         self.assertIn("page.startsWith('engineer-') ? 'engineer'", self.app)
         self.assertIn("postcode-workspace-mode", self.app)

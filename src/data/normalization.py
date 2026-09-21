@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from src.skills import canonicalize_skill, merge_task_skill_requirements
+
 from .parser import ParsedDataset, RawReferenceList, RawTable, is_blank, normalized_text
 
 
@@ -33,6 +35,11 @@ TASK_HEADER_MAPPING = {
     "заказчик": "customer",
     "исполнитель": "executor",
     "итоговый результат": "final_result",
+    "required_skills": "required_skills",
+    "required skills": "required_skills",
+    "требуемые навыки": "required_skills",
+    "требуемые компетенции": "required_skills",
+    "технологии": "required_skills",
 }
 
 PLACEHOLDER_TASK_SUMMARY = "Unknown task"
@@ -213,6 +220,7 @@ def normalize_engineers(table: RawTable) -> tuple[list[dict[str, Any]], list[dic
             }
         )
         for technology in split_skills(source.get("skills_declared")):
+            technology = canonicalize_skill(technology)
             key = (engineer_id, technology.casefold())
             if key not in seen_skills:
                 seen_skills.add(key)
@@ -278,6 +286,23 @@ def normalize(parsed: ParsedDataset) -> NormalizedDataset:
         task.setdefault("summary", None)
         task["is_placeholder"] = False
     effort, effort_task_ids, effort_roles = melt_effort(parsed.effort)
+    roles_by_task: dict[str, set[str]] = {}
+    for row in effort:
+        if row.get("role") and isinstance(row.get("required_hours"), (int, float)) and row["required_hours"] > 0:
+            roles_by_task.setdefault(str(row["task_id"]), set()).add(str(row["role"]))
+    task_skill_requirements: list[dict[str, Any]] = []
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        if not task_id or task.get("is_placeholder"):
+            continue
+        task_skill_requirements.extend(
+            merge_task_skill_requirements(
+                task_id=task_id,
+                title=task.get("summary"),
+                explicit=split_skills(task.get("required_skills")),
+                roles=sorted(roles_by_task.get(task_id, set())),
+            )
+        )
     dependencies = records_from_table(
         parsed.dependencies,
         ["blocking_task_id", "blocked_task_id", "dependency_type"],
@@ -298,6 +323,7 @@ def normalize(parsed: ParsedDataset) -> NormalizedDataset:
             "task_dependencies.csv": dependencies,
             "engineers.csv": engineers,
             "engineer_skills.csv": engineer_skills,
+            "task_skill_requirements.csv": task_skill_requirements,
             "team_history.csv": team_history,
             "planning_results.csv": normalize_reference_list(parsed.planning_results),
             "plan_mismatch_reasons.csv": normalize_reference_list(parsed.plan_mismatch_reasons),

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any, Iterable
 
-from .loader import REQUIRED_PROCESSED_FILES
+from .loader import EMPTY_ALLOWED_PROCESSED_FILES, REQUIRED_PROCESSED_FILES
 from .normalization import NormalizedDataset
 
 
@@ -62,7 +62,9 @@ def dependency_reference_issues(
 
 def _validate_required_tables(dataset: NormalizedDataset, report: ValidationReport) -> None:
     for filename in REQUIRED_PROCESSED_FILES:
-        if not dataset.tables.get(filename):
+        if filename not in dataset.tables:
+            report.errors.append(f"Required table {filename} is absent.")
+        elif not dataset.tables.get(filename) and filename not in EMPTY_ALLOWED_PROCESSED_FILES:
             report.errors.append(f"Required table {filename} is empty.")
 
 
@@ -186,6 +188,21 @@ def validate(dataset: NormalizedDataset) -> ValidationReport:
             )
         if not skill.get("technology"):
             report.errors.append(f"engineer_skills row {index} has an empty technology.")
+
+    for index, requirement in enumerate(dataset.tables["task_skill_requirements.csv"], start=1):
+        if requirement.get("task_id") not in task_id_set:
+            report.errors.append(
+                "task_skill_requirements row "
+                f"{index} references absent task {requirement.get('task_id')!r}."
+            )
+        if not requirement.get("technology"):
+            report.errors.append(
+                f"task_skill_requirements row {index} has an empty technology."
+            )
+        if requirement.get("confidence") not in {"high", "medium", "low"}:
+            report.errors.append(
+                f"task_skill_requirements row {index} has invalid confidence."
+            )
 
     for filename in (
         "planning_results.csv",

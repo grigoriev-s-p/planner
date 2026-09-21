@@ -18,6 +18,8 @@ window.planConstructor = (() => {
   let showPlanChanges = true;
   let activeRecommendationId = null;
   let recommendationUpdateInFlight = false;
+  let editingSkillRequirements = [];
+  let skillExtractionTimer = null;
   let bound = false;
 
   const $c = (selector, root = document) => root.querySelector(selector);
@@ -630,6 +632,52 @@ window.planConstructor = (() => {
     return `<div class="constructor-repeat-row constructor-requirement-row"><label>Роль<input name="requirement_role" list="constructorRoleOptions" value="${esc(requirement.role)}" required></label><label>Часы<input name="requirement_hours" type="number" min="0.01" step="0.01" value="${esc(requirement.required_hours ?? 8)}" required></label><label class="wide">Навыки через запятую<input name="requirement_skills" value="${esc((requirement.skills || []).join(', '))}" placeholder="Python, Kafka"></label><button type="button" class="repeat-remove" data-remove-repeat aria-label="Удалить">×</button></div>`;
   }
 
+  function skillSourceLabel(item) {
+    if (item.rejected) return 'Отклонено пользователем';
+    if (item.source === 'both') return 'Указано вручную и найдено в названии';
+    if (item.source === 'title') return item.confirmed ? 'Найдено в названии' : 'Требует подтверждения';
+    return 'Указано вручную';
+  }
+
+  function skillRoleOptions(selected = '') {
+    const roles = $$c('.constructor-requirement-row [name="requirement_role"]')
+      .map((input) => input.value.trim()).filter(Boolean);
+    return `<option value="">Для всей задачи</option>${[...new Set(roles)].map((role) => `<option value="${esc(role)}" ${role === selected ? 'selected' : ''}>${esc(role)}</option>`).join('')}`;
+  }
+
+  function renderSkillRequirements() {
+    const target = $c('#constructorSkillRequirementList');
+    if (!target) return;
+    target.innerHTML = editingSkillRequirements.length ? editingSkillRequirements.map((item, index) => `<div class="constructor-skill-row ${item.rejected ? 'rejected' : ''}"><div><b>${esc(item.technology)}</b><small>${esc(skillSourceLabel(item))}${item.matched_text ? ` · «${esc(item.matched_text)}»` : ''}</small></div><select data-skill-role="${index}" aria-label="Роль для ${esc(item.technology)}" ${item.rejected ? 'disabled' : ''}>${skillRoleOptions(item.role || '')}</select><div>${item.source === 'title' && !item.confirmed && !item.rejected ? `<button type="button" class="text-button" data-confirm-skill="${index}">Подтвердить</button>` : ''}<button type="button" class="text-button" data-reject-skill="${index}">${item.rejected ? 'Вернуть' : 'Убрать'}</button></div></div>`).join('') : '<p class="muted">Требуемые компетенции не указаны.</p>';
+  }
+
+  async function refreshSkillExtraction(extraExplicit = null) {
+    const form = $c('#constructorEntityForm');
+    if (!form || form.dataset.formType !== 'tasks' || !api?.extractTaskSkills) return;
+    const explicit = editingSkillRequirements.filter((item) => !item.rejected && item.source !== 'title');
+    if (extraExplicit) explicit.push({technology: extraExplicit, source: 'explicit', confirmed: true});
+    const rejected = editingSkillRequirements.filter((item) => item.rejected).map((item) => item.technology);
+    const roles = $$c('.constructor-requirement-row [name="requirement_role"]', form).map((input) => input.value.trim()).filter(Boolean);
+    try {
+      const result = await api.extractTaskSkills({
+        task_id: String(new FormData(form).get('task_id') || 'preview'),
+        title: String(new FormData(form).get('title') || ''), roles, explicit, rejected,
+      });
+      const rejectedRows = editingSkillRequirements.filter((item) => item.rejected);
+      editingSkillRequirements = [...(result.requirements || []), ...rejectedRows];
+      renderSkillRequirements();
+      const input = $c('#constructorSkillSearch');
+      if (input) input.value = '';
+    } catch (_) {
+      // Planner validation will still canonicalize the saved scenario.
+    }
+  }
+
+  function scheduleSkillExtraction() {
+    window.clearTimeout(skillExtractionTimer);
+    skillExtractionTimer = window.setTimeout(() => refreshSkillExtraction(), 220);
+  }
+
   function dependencyCandidates(currentTaskId) {
     const combined = [...catalog.tasks, ...draft.tasks];
     const seen = new Set();
@@ -700,12 +748,18 @@ window.planConstructor = (() => {
       content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.05" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
-      const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], depends_on: []};
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты и обязательные навыки</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], required_skills: [], depends_on: []};
+      editingSkillRequirements = clone(task.required_skills || []);
+      const skillOptions = (catalog.options.skills || []).map((skill) => `<option value="${esc(skill)}"></option>`).join('');
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button><section class="constructor-skills"><h3>Требуемые компетенции</h3><p class="muted">Точные технологии из названия добавляются автоматически. Предложения можно подтвердить или отклонить.</p><div class="constructor-skill-add"><input id="constructorSkillSearch" list="constructorSkillOptions" placeholder="Найти навык или алиас"><datalist id="constructorSkillOptions">${skillOptions}</datalist><button type="button" class="btn btn-outline" data-add-task-skill>Добавить</button></div><div id="constructorSkillRequirementList"></div></section>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     document.body.classList.add('constructor-modal-open');
     dialog.showModal();
     updateDependencyView();
+    if (type === 'tasks') {
+      renderSkillRequirements();
+      if (!item) scheduleSkillExtraction();
+    }
   }
 
   function saveEntity(form) {
@@ -753,7 +807,7 @@ window.planConstructor = (() => {
         skills: csvValues($c('[name="requirement_skills"]', row).value),
       }));
       const dependsOn = $$c('[name="dependency_id"]:checked', form).map((input) => input.value);
-      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: existing?.source || 'draft'};
+      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, required_skills: clone(editingSkillRequirements), depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: existing?.source || 'draft'};
       dependsOn.forEach((dependencyId) => {
         if (findDraft('tasks', dependencyId)) return;
         const source = findCatalog('tasks', dependencyId);
@@ -915,6 +969,14 @@ window.planConstructor = (() => {
       const pick = event.target.closest('[data-constructor-pick]');
       if (pick) { toggleCatalog(pick.dataset.constructorPick, pick.value, pick.checked); return; }
       if (event.target.matches('[name="dependency_id"]')) updateDependencyView();
+      if (event.target.matches('[name="requirement_role"]')) {
+        renderSkillRequirements();
+        scheduleSkillExtraction();
+      }
+      if (event.target.matches('[data-skill-role]')) {
+        const item = editingSkillRequirements[Number(event.target.dataset.skillRole)];
+        if (item) item.role = event.target.value || null;
+      }
       if (event.target.id === 'showPlanChanges') {
         showPlanChanges = event.target.checked;
         if (!showPlanChanges) changedTaskEffects = [];
@@ -924,6 +986,7 @@ window.planConstructor = (() => {
     });
     document.addEventListener('input', (event) => {
       if (event.target.id === 'archiveEntitySearch') { filterArchiveRows(); return; }
+      if (event.target.matches('#constructorEntityForm [name="title"]')) { scheduleSkillExtraction(); return; }
       if (event.target.id !== 'constructorDependencySearch') return;
       const query = event.target.value.trim().toLowerCase();
       $$c('[data-dependency-option]').forEach((option) => { option.hidden = !option.dataset.search.includes(query); });
@@ -956,6 +1019,27 @@ window.planConstructor = (() => {
       if (remove) { toggleCatalog(remove.dataset.constructorRemove, remove.dataset.id, false); return; }
       if (event.target.closest('[data-close-constructor-form]')) { $c('#constructorDialog').close(); return; }
       if (event.target.closest('[data-add-requirement]')) { $c('#constructorRequirementRows').insertAdjacentHTML('beforeend', requirementRow()); return; }
+      if (event.target.closest('[data-add-task-skill]')) {
+        const value = $c('#constructorSkillSearch')?.value.trim();
+        if (value) refreshSkillExtraction(value);
+        return;
+      }
+      const confirmSkill = event.target.closest('[data-confirm-skill]');
+      if (confirmSkill) {
+        const item = editingSkillRequirements[Number(confirmSkill.dataset.confirmSkill)];
+        if (item) { item.confirmed = true; renderSkillRequirements(); }
+        return;
+      }
+      const rejectSkill = event.target.closest('[data-reject-skill]');
+      if (rejectSkill) {
+        const item = editingSkillRequirements[Number(rejectSkill.dataset.rejectSkill)];
+        if (item) {
+          if (item.rejected) { item.rejected = false; item.confirmed = true; }
+          else { item.rejected = true; item.confirmed = false; }
+          renderSkillRequirements();
+        }
+        return;
+      }
       const repeatRemove = event.target.closest('[data-remove-repeat]');
       if (repeatRemove) {
         const row = repeatRemove.closest('.constructor-repeat-row');
@@ -989,6 +1073,10 @@ window.planConstructor = (() => {
 
   function initialize(sourceCatalog, apiClient, handlePlanApproved, handleCatalogUpdated) {
     catalog = sourceCatalog;
+    if (catalog?.data_state === 'UNINITIALIZED') {
+      mode = 'upload';
+      setDatasetStatus('Каталог пуст. Загрузите Excel, чтобы автоматически создать каталог и построить квартальный план.');
+    }
     api = apiClient;
     onPlanApproved = typeof handlePlanApproved === 'function' ? handlePlanApproved : () => {};
     onCatalogUpdated = typeof handleCatalogUpdated === 'function' ? handleCatalogUpdated : () => {};

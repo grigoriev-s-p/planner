@@ -26,6 +26,8 @@ from .constructor import (
     build_constructor_plan_from_prepared,
     prepare_constructor_workbook,
 )
+from src.skills import get_skill_registry, merge_task_skill_requirements
+from src.development import DevelopmentRecommendationService
 from .data_preflight import structural_preflight
 from .service import (
     PlanningAPIService,
@@ -105,6 +107,14 @@ class SprintActualRequest(BaseModel):
 
 class ConstructorUploadDecisionRequest(BaseModel):
     decisions: dict[str, Literal["KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"]] = Field(default_factory=dict)
+
+
+class SkillExtractionRequest(BaseModel):
+    title: str = Field(default="", max_length=500)
+    task_id: str = Field(default="preview", max_length=120)
+    roles: list[str] = Field(default_factory=list)
+    explicit: list[dict] = Field(default_factory=list)
+    rejected: list[str] = Field(default_factory=list)
 
 
 def _with_official_week0_kpi_denominator(payload: dict) -> dict:
@@ -844,6 +854,11 @@ def _catalog_service() -> PlanningAPIService:
     )
 
 
+def _catalog_data_state() -> str:
+    tables = get_catalog_repository().tables()
+    return "READY" if any(tables.values()) else "UNINITIALIZED"
+
+
 def _with_lifecycle(payload: dict, entity_type: str, entity_id: str) -> dict:
     return {**payload, **get_catalog_repository().lifecycle(entity_type, entity_id)}
 
@@ -1039,7 +1054,7 @@ def _company_star_map_team(engineers: list[dict], teams: list[dict]) -> dict:
         result = []
         for label, ids in sorted(holders.items(), key=lambda pair: pair[0].casefold()):
             unique_ids = sorted({str(value) for value in ids if str(value) in engineer_ids})
-            if not unique_ids:
+            if not unique_ids and not quarter:
                 continue
             result.append({
                 label_field: label,
@@ -1134,6 +1149,10 @@ def _dashboard_with_lifecycle() -> dict:
     # Keep the immutable current plan untouched while making the Star Map use
     # the active catalog for current Bus Factor membership.
     if isinstance(payload.get("star_map"), dict):
+        has_approved_plan = plan_drafts.approved() is not None
+        payload["star_map"]["quarter_demand_status"] = (
+            "AVAILABLE" if has_approved_plan else "NO_APPROVED_PLAN"
+        )
         active_tables = repository.active_planning_tables()
         active_bus = build_bus_factor_payload(active_tables)
         payload["star_map"]["status"] = active_bus.get("status", payload["star_map"].get("status"))
@@ -1198,6 +1217,16 @@ def _dashboard_with_lifecycle() -> dict:
                         if engineer_id in active_engineer_ids
                     ]
                     item["team_bus_factor"] = len(set(item["engineer_ids"]))
+            if not has_approved_plan:
+                modes = team.get("competency_modes") or {}
+                modes["quarter"] = {
+                    "roles": [],
+                    "technologies": [],
+                    "entries": [],
+                    "zone_counts": {"critical": 0, "limited": 0, "stable": 0, "total": 0},
+                }
+                team["quarter_demand_status"] = "NO_APPROVED_PLAN"
+                team["quarter_demand_message"] = "Утверждённый квартальный план ещё не построен."
             filtered_teams.append(team)
         payload["star_map"]["teams"] = filtered_teams
         payload["star_map"]["company"] = _company_star_map_team(
@@ -1214,8 +1243,7 @@ async def service_data_error_handler(_, error: ServiceDataError):
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    _service()
-    return {"status": "ok"}
+    return {"status": "ok", "data_state": _catalog_data_state()}
 
 
 @app.post("/api/admin/reset-data")
@@ -1301,7 +1329,13 @@ def current_replan_draft() -> dict:
     if not workflow or workflow.get("status") not in {
         "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
     }:
-        return {"status": "NONE"}
+        empty_state = (
+            {"data_state": "UNINITIALIZED"}
+            if _catalog_data_state() == "UNINITIALIZED"
+            and plan_drafts.approved() is None
+            else {}
+        )
+        return {"status": "NONE", **empty_state}
     return workflow
 
 
@@ -1455,6 +1489,29 @@ def risks() -> list[dict]:
     return _current_dashboard()["risks"]
 
 
+@app.get("/api/development/recommendations")
+def development_recommendations() -> dict:
+    """Lazily calculate read-only recommendations for the approved plan."""
+
+    approved = plan_drafts.approved()
+    if approved is None:
+        return {
+            "status": "NO_APPROVED_PLAN",
+            "source": None,
+            "scope": "FULL_QUARTER",
+            "message": "Сначала утвердите квартальный план.",
+            "summary": {"total": 0, "plan_critical": 0, "team_weakness": 0, "roles": 0, "skills": 0},
+            "filters": {"teams": [], "roles": [], "skills": [], "categories": []},
+            "recommendations": [],
+            "read_only": True,
+        }
+    dashboard = _current_dashboard()
+    tables = (dashboard.get("_planning_state") or {}).get("tables")
+    if not tables:
+        tables = get_catalog_repository().active_planning_tables()
+    return DevelopmentRecommendationService(tables, dashboard).calculate()
+
+
 @app.get("/api/teams")
 def teams() -> list[dict]:
     return [
@@ -1533,6 +1590,25 @@ def plan_constructor_catalog() -> dict:
     return build_constructor_catalog(
         _catalog_service(), archived_task_ids=repository.archived_ids("task")
     )
+
+
+@app.post("/api/skills/extract")
+def extract_task_skills(request: SkillExtractionRequest) -> dict:
+    """Return deterministic backend recognition for constructor live preview."""
+
+    requirements = merge_task_skill_requirements(
+        task_id=request.task_id or "preview",
+        title=request.title,
+        explicit=request.explicit,
+        roles=request.roles,
+        rejected=request.rejected,
+    )
+    registry = get_skill_registry()
+    return {
+        "requirements": requirements,
+        "registry_version": "1.0",
+        "options": registry.options(),
+    }
 
 
 @app.post("/api/plan-constructor/plan/upload")

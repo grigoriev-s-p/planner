@@ -8,6 +8,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.skills import canonicalize_skill
+
 from .capacity import calculate_engineer_capacity, calculate_team_capacity
 from .dependency_rules import (
     dependency_is_satisfied,
@@ -143,7 +145,7 @@ class FeasibilityService:
                 profile.capacity_rate = min(profile.capacity_rate, rate)
         for row in self.context.engineer_skills:
             engineer_id = _text(row.get("engineer_id"))
-            technology = _text(row.get("technology"))
+            technology = canonicalize_skill(_text(row.get("technology")))
             if engineer_id and technology:
                 for profile in profiles.values():
                     if profile.engineer_id == engineer_id:
@@ -214,14 +216,14 @@ class FeasibilityService:
                 requirements[role] += hours
         return dict(sorted(requirements.items()))
 
-    def task_skill_requirements(self, task_id: str) -> dict[str, set[str]]:
-        requirements: dict[str, set[str]] = defaultdict(set)
+    def task_skill_requirements(self, task_id: str) -> dict[str | None, set[str]]:
+        requirements: dict[str | None, set[str]] = defaultdict(set)
         for row in self.context.task_skill_requirements:
             if _text(row.get("task_id")) != task_id:
                 continue
             role = _text(row.get("role"))
-            technology = _text(row.get("technology"))
-            if role and technology:
+            technology = canonicalize_skill(_text(row.get("technology")))
+            if technology:
                 requirements[role].add(technology)
         return requirements
 
@@ -417,12 +419,14 @@ class FeasibilityService:
                 if float(hours) > 0
             }
         skill_requirements = self.task_skill_requirements(task_id)
+        task_required_skills = skill_requirements.get(None, set())
         role_checks: list[RoleCapacityCheck] = []
         engineer_rows: list[EngineerAvailability] = []
         any_role_work_possible = not role_requirements
         all_roles_complete = True
         bucket_used_hours = self._bucket_used_hours(sprint_state, team_id)
         shared_matching_buckets: dict[tuple[str, str], float] = {}
+        task_skill_candidates: dict[str, set[str]] = defaultdict(set)
 
         for role, required_hours in role_requirements.items():
             required_skills = skill_requirements.get(role, set())
@@ -497,6 +501,9 @@ class FeasibilityService:
                     shared_matching_buckets[key] = max(
                         shared_matching_buckets.get(key, 0.0), remaining_hours
                     )
+                if matches_skills and remaining_hours > 0:
+                    for technology in task_required_skills.intersection(profile.skills):
+                        task_skill_candidates[technology].add(profile.engineer_id)
 
             deficit = max(required_hours - available_hours, 0.0)
             if available_hours > 0:
@@ -561,6 +568,34 @@ class FeasibilityService:
                 )
             )
 
+        unavailable_task_skills = sorted(
+            technology
+            for technology in task_required_skills
+            if not task_skill_candidates.get(technology)
+        )
+        if unavailable_task_skills:
+            external_skill_candidates = sorted({
+                profile.engineer_id
+                for profile in self._profiles.values()
+                if profile.team_id != team_id
+                and profile.engineer_id not in (unavailable_engineer_ids or set())
+                and profile.roles.intersection(role_requirements)
+                and set(unavailable_task_skills).intersection(profile.skills)
+            })
+            all_roles_complete = False
+            reasons.append(
+                FeasibilityReason(
+                    ReasonCode.INSUFFICIENT_SKILL_CAPACITY,
+                    {
+                        "role": None,
+                        "missing_skills": unavailable_task_skills,
+                        "required_technologies": unavailable_task_skills,
+                        "candidate_engineers": external_skill_candidates,
+                        "cross_team_blocked": bool(external_skill_candidates and not allow_cross_team),
+                    },
+                )
+            )
+
         # A profile may expose several roles, but its team capacity bucket can
         # only be spent once. Per-role totals alone would otherwise claim that
         # one 80-hour engineer can supply 80 hours for every listed role.
@@ -596,6 +631,7 @@ class FeasibilityService:
             dependencies=tuple(dependency_checks),
             reasons=tuple(reasons),
             limitations=limitations,
+            task_required_technologies=tuple(sorted(task_required_skills)),
         )
 
 

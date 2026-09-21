@@ -28,6 +28,7 @@ def allocate_available_hours(
     prior_ownership: TaskOwnership | None = None,
     enforce_owner_majority: bool = False,
     preferred_engineer_hours: Mapping[str, float] | None = None,
+    covered_task_skills: set[str] | None = None,
 ) -> AllocationOutcome:
     """Prefer local engineers, then free hours and engineer_id within each role.
 
@@ -50,6 +51,8 @@ def allocate_available_hours(
     role_allocations: dict[str, float] = {}
     engineer_allocations: list[EngineerTaskAllocation] = []
     task_team = feasibility.team_capacity.team_id if feasibility.team_capacity else None
+    required_task_skills = set(feasibility.task_required_technologies)
+    covered_skills = set(covered_task_skills or set())
     role_order = sorted(
         remaining_role_hours,
         key=lambda role: (len(by_role.get(role, [])), role),
@@ -78,6 +81,50 @@ def allocate_available_hours(
                 item.source_team_id,
             ),
         )
+        # Task-level requirements may be covered by different assigned people.
+        # Reserve a small, real part of this role's work for each still-missing
+        # competency before the regular greedy fill.  This never creates hours:
+        # every reservation is deducted from the same role and capacity bucket.
+        for technology in sorted(required_task_skills - covered_skills):
+            specialists = [
+                item for item in candidates
+                if technology in item.skills
+                and item.available_hours
+                - assigned_by_bucket.get((item.engineer_id, item.source_team_id), 0.0)
+                > 1e-9
+            ]
+            specialist = min(
+                specialists,
+                key=lambda item: (
+                    item.source_team_id != task_team,
+                    -item.available_hours,
+                    item.engineer_id,
+                    item.source_team_id,
+                ),
+                default=None,
+            )
+            if specialist is None or allocated >= role_remaining - 1e-9:
+                continue
+            bucket = (specialist.engineer_id, specialist.source_team_id)
+            already_assigned = assigned_by_bucket.get(bucket, 0.0)
+            available = max(specialist.available_hours - already_assigned, 0.0)
+            hours = round(min(1.0, role_remaining - allocated, available), 10)
+            if hours <= 0:
+                continue
+            assigned_by_bucket[bucket] = already_assigned + hours
+            allocated += hours
+            covered_skills.update(required_task_skills.intersection(specialist.skills))
+            engineer_allocations.append(
+                EngineerTaskAllocation(
+                    engineer_id=specialist.engineer_id,
+                    role=role,
+                    hours=hours,
+                    teams=specialist.teams,
+                    task_team=task_team,
+                    source_team_id=specialist.source_team_id,
+                    source_bucket_capacity_hours=specialist.nominal_hours,
+                )
+            )
         for engineer in candidates:
             bucket = (engineer.engineer_id, engineer.source_team_id)
             already_assigned = assigned_by_bucket.get(bucket, 0.0)
@@ -108,6 +155,7 @@ def allocate_available_hours(
                     source_bucket_capacity_hours=engineer.nominal_hours,
                 )
             )
+            covered_skills.update(required_task_skills.intersection(engineer.skills))
             if allocated >= role_remaining - 1e-9:
                 break
         role_allocations[role] = allocated

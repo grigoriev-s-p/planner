@@ -8,18 +8,20 @@ from pathlib import Path
 from typing import Any
 
 
-PREPROCESSING_VERSION = "1.4.0"
+PREPROCESSING_VERSION = "2.0.0"
 REQUIRED_PROCESSED_FILES = (
     "tasks.csv",
     "task_role_effort.csv",
     "task_dependencies.csv",
     "engineers.csv",
     "engineer_skills.csv",
+    "task_skill_requirements.csv",
     "team_history.csv",
     "planning_results.csv",
     "plan_mismatch_reasons.csv",
     "task_closure_results.csv",
 )
+EMPTY_ALLOWED_PROCESSED_FILES = frozenset({"task_skill_requirements.csv"})
 MANIFEST_NAME = "_dataset_manifest.json"
 
 
@@ -103,6 +105,7 @@ def processed_dataset_is_current(
             return False
         if metadata.get("sha256") != sha256_file(output_path):
             return False
-        if not isinstance(metadata.get("rows"), int) or metadata["rows"] < 1:
+        minimum_rows = 0 if filename in EMPTY_ALLOWED_PROCESSED_FILES else 1
+        if not isinstance(metadata.get("rows"), int) or metadata["rows"] < minimum_rows:
             return False
     return True
