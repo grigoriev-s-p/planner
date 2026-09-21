@@ -275,3 +275,21 @@ body.constructor-modal-open{overflow:hidden}
 .entity-detail-grid .competency-summary h3{overflow-wrap:anywhere;word-break:break-word}
 .entity-detail-grid .competency-summary>b{flex:0 0 auto}
 @media(max-width:620px){.entity-detail-grid .competency-card-grid{grid-template-columns:1fr}}
+
+/* Header brand from the refreshed UI. */
+.brand{gap:13px}
+.brand-icon{width:58px;height:58px;border:0;border-radius:18px;overflow:hidden;flex-shrink:0;font-size:initial;position:static}
+.brand-icon img{display:block;width:46px;height:46px;object-fit:cover;border-radius:12px}
+.brand-name{display:block;font-size:28px;line-height:1}
+@media(max-width:570px){.brand-name{font-size:24px}}
+
+/* Team overview: keep current-work cards inside their panel and give text-heavy tasks more room. */
+#teamDetailBody > .entity-detail-grid:first-child{grid-template-columns:minmax(330px,.72fr) minmax(0,1.28fr);align-items:start}
+#teamDetailBody > .entity-detail-grid:first-child > .entity-detail-panel{min-width:0}
+#teamDetailBody > .entity-detail-grid:first-child > .entity-detail-panel:last-child{width:100%}
+#teamDetailBody > .entity-detail-grid:first-child .entity-work-list{min-width:0}
+#teamDetailBody > .entity-detail-grid:first-child .entity-work-card{width:100%;min-width:0;grid-template-columns:minmax(180px,.58fr) minmax(0,1.42fr)}
+#teamDetailBody > .entity-detail-grid:first-child .entity-work-card>div{min-width:0}
+#teamDetailBody > .entity-detail-grid:first-child .entity-work-meta{min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:normal}
+@media(max-width:1180px){#teamDetailBody > .entity-detail-grid:first-child{grid-template-columns:1fr}#teamDetailBody > .entity-detail-grid:first-child .entity-work-card{grid-template-columns:minmax(180px,.7fr) minmax(0,1.3fr)}}
+@media(max-width:620px){#teamDetailBody > .entity-detail-grid:first-child .entity-work-card{grid-template-columns:1fr}}

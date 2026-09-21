@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260921-36">
+  <link rel="stylesheet" href="/styles.css?v=20260922-01">
 </head>
 <body>
   <div class="shell">
     <header class="header">
-      <div class="header-brand-group"><button class="brand" type="button" data-page="home" aria-label="PostCode — главная"><span class="brand-icon">п<span class="brand-spark">✦</span></span><span class="brand-name">PostCode<small>TEAM INTELLIGENCE</small></span></button><div class="workspace-mode-switch" role="group" aria-label="Режим работы"><button type="button" class="active" data-workspace-mode="manager">Руководитель</button><button type="button" data-workspace-mode="engineer">Инженер</button></div></div>
+      <div class="header-brand-group"><button class="brand" type="button" data-page="home" aria-label="PostCode — главная"><span class="brand-icon"><img src="/assets/postcode-logo.jpg" alt="" aria-hidden="true"></span><span class="brand-name">PostCode</span></button><div class="workspace-mode-switch" role="group" aria-label="Режим работы"><button type="button" class="active" data-workspace-mode="manager">Руководитель</button><button type="button" data-workspace-mode="engineer">Инженер</button></div></div>
       <nav class="nav" aria-label="Основная навигация">
         <button type="button" class="nav-link active" data-manager-nav data-page="home">Главная</button>
         <button type="button" class="nav-link" data-manager-nav data-page="planning">Планирование</button>
@@ -88,7 +88,7 @@
 
       <section class="page" id="page-current-sprint" aria-labelledby="currentSprintTitle">
         <div class="current-sprint-toolbar"><button class="btn btn-outline" type="button" data-page="current-plan">← К текущему плану</button><button class="btn btn-danger-outline" type="button" id="openSprintCloseDialog">Завершить спринт</button></div>
-        <div class="page-intro planning-hero current-sprint-hero"><div><div class="eyebrow">ТЕКУЩЕЕ СОСТОЯНИЕ</div><h1 id="currentSprintTitle">Текущий спринт</h1><p id="currentSprintIntro">Задачи, команды и запланированная загрузка.</p></div><div class="page-intro-icon">✓</div></div>
+        <div class="page-intro planning-hero current-sprint-hero"><div><h1 id="currentSprintTitle">Текущий спринт</h1><p id="currentSprintIntro" hidden>Задачи, команды и запланированная загрузка.</p></div><div class="page-intro-icon">✓</div></div>
         <div id="currentSprintNotice"></div>
         <div id="currentSprintSummary" class="current-sprint-summary"></div>
         <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Задачи спринта</h2><p class="hint">ID, название, SP, Rung и команда. Откройте задачу для подробностей.</p></div><span class="tag" id="currentSprintTaskCount">0</span></div><div id="currentSprintTasks" class="current-sprint-task-list"></div></article>
