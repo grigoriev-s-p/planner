@@ -558,13 +558,17 @@ window.planConstructor = (() => {
 
   function renderCatalogs() {
     const teamQuery = searchValue('#constructorTeamSearch');
-    const teams = catalog.teams
+    // Include newly created scenario-only teams in the same picker as the
+    // persistent catalog. They remain selected until the user removes them
+    // from the draft and disappear only after that explicit action.
+    const allTeams = catalogWithDraft('teams');
+    const teams = allTeams
       .filter((team) => `${team.team_id} ${team.name}`.toLowerCase().includes(teamQuery))
       .sort((left, right) => (
         Number(right.expected_velocity_sp || 0) - Number(left.expected_velocity_sp || 0)
         || String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru')
       ));
-    $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && catalog.teams.length ? selectAllControl('teams', catalog.teams) : ''}${teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
+    $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP${team.source === 'draft' ? ' · Новая команда' : ''}</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
 
     const taskQuery = searchValue('#constructorTaskSearch');
     const allTasks = catalogWithDraft('tasks');
@@ -581,10 +585,14 @@ window.planConstructor = (() => {
 
   function renderDraft() {
     $c('#constructorCounters').innerHTML = [
-      ['Команды', draft.teams.length], ['Задачи', draft.tasks.length],
+      ['Команды', draft.teams.length], ['Инженеры', draft.engineers.length], ['Задачи', draft.tasks.length],
     ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
     $c('#constructorDraftEntities').innerHTML = [
       entityRows('Команды', 'teams', draft.teams, (item) => `${item.expected_velocity_sp} SP`),
+      entityRows('Инженеры', 'engineers', draft.engineers, (item) => {
+        const assignment = item.assignments?.[0];
+        return [assignment?.team_id, assignment?.role, assignment?.grade].filter(Boolean).join(' · ');
+      }),
       entityRows('Задачи', 'tasks', draft.tasks, () => ''),
     ].join('');
   }
@@ -1007,7 +1015,7 @@ window.planConstructor = (() => {
       const selectAll = event.target.closest('[data-constructor-select-all]');
       if (selectAll) {
         const type = selectAll.dataset.constructorSelectAll;
-        toggleAllCatalog(type, type === 'teams' ? catalog.teams : catalogWithDraft('tasks').filter((task) => !isHistoricalDoneTask(task)), selectAll.checked);
+        toggleAllCatalog(type, type === 'teams' ? catalogWithDraft('teams') : catalogWithDraft('tasks').filter((task) => !isHistoricalDoneTask(task)), selectAll.checked);
         return;
       }
       const pick = event.target.closest('[data-constructor-pick]');
@@ -1146,7 +1154,7 @@ window.planConstructor = (() => {
     errorBox.hidden = true;
     try {
       const approvedPlan = await api.approveConstructorPlan(previewPlan.draft.id);
-      const refreshedCatalog = await api.getConstructorCatalog().catch(() => null);
+      const refreshedCatalog = approvedPlan.catalog || await api.getConstructorCatalog().catch(() => null);
       if (refreshedCatalog) {
         catalog = refreshedCatalog;
         onCatalogUpdated(refreshedCatalog);

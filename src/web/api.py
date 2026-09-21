@@ -1881,6 +1881,15 @@ def approve_constructor_plan(request: DraftApprovalRequest) -> dict:
 
     try:
         approved = plan_drafts.approve(request.draft_id)
+        # Return the catalog after the approval merge as part of the same
+        # response.  Manual entities are persisted by PlanDraftStore before
+        # this point; exposing the freshly rebuilt catalog prevents the UI
+        # from briefly showing the stale pre-approval catalog (and avoids a
+        # second request racing the approval response).
+        repository = get_catalog_repository()
+        approved["catalog"] = build_constructor_catalog(
+            _catalog_service(), archived_task_ids=repository.archived_ids("task")
+        )
         star_map = approved.get("star_map")
         if isinstance(star_map, dict):
             star_map["company"] = _company_star_map_team(
