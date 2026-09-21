@@ -627,6 +627,8 @@ class ConstructorAPIIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(approval.status_code, 200, approval.text)
         self.assertTrue(approval.json()["draft"]["approved"])
+        self.assertEqual(approval.json()["star_map"]["company"]["team_id"], "__company__")
+        self.assertEqual(approval.json()["star_map"]["company"]["team_name"], "Вся компания")
 
         current_after_approval = self.client.get("/api/dashboard")
         self.assertEqual(current_after_approval.status_code, 200)
