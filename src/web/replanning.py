@@ -9,6 +9,7 @@ from typing import Any
 from .service import PlanningAPIService
 from src.planning.ownership import evaluate_ownership_rows
 from .lifecycle import capture_closed_sprint
+from .kpi_projection import project_management_kpis
 
 
 def _task_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -542,6 +543,49 @@ def build_remaining_horizon_plan(
         remaining_by_task,
         current_tasks,
     )
+    # Hours and SP describe the same residual work, but SP entered by the
+    # manager is authoritative for KPI and for the next planner run.  Keep the
+    # legacy hours-derived value only for older clients that do not send SP.
+    for task_id, roles in remaining_by_task.items():
+        task = current_tasks.get(task_id) or {}
+        starting_sp = float(
+            task.get("remaining_story_points")
+            if task.get("remaining_story_points") is not None
+            else task.get("story_points") or 0.0
+        )
+        row = result_by_id.get(task_id)
+        explicit_sp = row.get("remaining_story_points") if row else None
+        if explicit_sp is not None:
+            remaining_sp = float(explicit_sp)
+            if remaining_sp <= 0:
+                raise ValueError(
+                    f"Для задачи {task_id} укажите положительный остаток SP."
+                )
+            if remaining_sp > starting_sp + 1e-9:
+                raise ValueError(
+                    f"Остаток {remaining_sp:g} SP для {task_id} "
+                    f"превышает текущий объём {starting_sp:g} SP."
+                )
+        else:
+            remaining_sp = min(remaining_story_points.get(task_id, 0.0), starting_sp)
+        remaining_story_points[task_id] = remaining_sp
+
+    # Persist the conservation equation for audit and frozen sprint history:
+    # completed SP + transferred SP = task SP at sprint start.
+    for task_id, row in result_by_id.items():
+        task = current_tasks.get(task_id) or {}
+        starting_sp = float(
+            task.get("remaining_story_points")
+            if task.get("remaining_story_points") is not None
+            else task.get("story_points") or 0.0
+        )
+        residual_sp = (
+            0.0 if row.get("task_completed")
+            else float(remaining_story_points.get(task_id, 0.0))
+        )
+        row["starting_story_points"] = starting_sp
+        row["remaining_story_points"] = residual_sp
+        row["completed_story_points"] = max(starting_sp - residual_sp, 0.0)
 
     original_effort = tables["task_role_effort"]
     tables["task_role_effort"] = [
@@ -746,7 +790,13 @@ def build_remaining_horizon_plan(
                 for task_id, row in result_by_id.items()
                 if task_id not in explicitly_reported_ids
             ],
-            *[{**deepcopy(row), "sprint_number": sprint_number} for row in results],
+            *[
+                {
+                    **deepcopy(result_by_id[str(row["task_id"])]),
+                    "sprint_number": sprint_number,
+                }
+                for row in results
+            ],
         ],
     })
     if sprint_number == 6:
@@ -772,4 +822,4 @@ def build_remaining_horizon_plan(
     quarter["current_sprint"] = 6 if sprint_number == 6 else sprint_number + 1
     quarter["current_sprint_source"] = "replanning_state"
     candidate.setdefault("features", {})["replanning"] = "AVAILABLE"
-    return candidate
+    return project_management_kpis(candidate)

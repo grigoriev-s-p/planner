@@ -301,7 +301,7 @@ def test_t17_frontend_uses_backend_lifecycle_projection() -> None:
     lifecycle = (root / "src" / "web" / "lifecycle.py").read_text(encoding="utf-8")
     markup = (root / "frontend" / "index.html").read_text(encoding="utf-8")
 
-    assert "all_completed: completionAnswer === 'yes'" in source
+    assert "all_completed: deviationAnswer === 'no'" in source
     assert "sprintData.presentation_state === 'CLOSED'" in source
     assert "task?.current_status" in source
     assert "sprint === currentSprint() ? 'current' : ''" in source
@@ -326,8 +326,9 @@ def test_sprint_close_form_excludes_irrelevant_controls_from_native_validation()
     assert 'step="any" data-fact-role=' in source
     assert 'step="0.25" data-fact-role=' not in source
     assert '<select data-task-reason disabled>' in source
-    assert 'data-task-unfinished disabled' in source
+    assert 'data-task-deviation disabled' in source
+    assert 'data-fact-sp placeholder="0" disabled' in source
     assert 'value="${escapeHtml(hours)}" disabled' in source
     assert "function syncSprintCloseControls()" in source
-    assert "checkbox.disabled = !unfinishedEnabled;" in source
+    assert "checkbox.disabled = !deviationsEnabled;" in source
     assert "input.disabled = !taskEnabled;" in source
