@@ -75,7 +75,7 @@
         <section class="panel plan-uninitialized" id="planUninitialized" hidden aria-live="polite"><div><div class="eyebrow">ДАННЫЕ НЕ ЗАГРУЖЕНЫ</div><h2>Квартальный план ещё не построен</h2><p>Перейдите в планирование и загрузите Excel — каталог заполнится автоматически.</p></div><button class="btn btn-blue" type="button" data-page="planning">Перейти в «Планирование»</button></section>
         <aside class="plan-risk-summary" id="planRiskSummary" aria-live="polite"><div class="empty-state">Загружаем риски плана…</div></aside>
         <div class="panel planning-board-panel"><div class="panel-heading align-end"><div><h2>Квартал по спринтам</h2><p class="hint">Нажмите на задачу, чтобы открыть подробную информацию.</p></div><div class="legend"><span><i class="legend-mark blue"></i>Текущий спринт</span></div></div><div class="board-viewport"><div id="sprintBoard" class="sprint-board"></div></div></div>
-        <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">Ожидаемый KPI плана</h2><p class="hint">Результат при успешном выполнении всех задач текущего квартального плана.</p></div><button class="kpi-details-toggle" id="toggleKpiDetails" type="button" data-toggle-kpi-details aria-expanded="false" aria-controls="kpiDetails">Подробнее <span aria-hidden="true">⌄</span></button></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
+        <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">KPI эффективности планирования</h2><p class="hint">PI Predictability показывает, какая доля инициатив из исходного плана будет и уже фактически завершена.</p></div><button class="kpi-details-toggle" id="toggleKpiDetails" type="button" data-toggle-kpi-details aria-expanded="false" aria-controls="kpiDetails">Подробнее <span aria-hidden="true">⌄</span></button></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
         <div id="kpiDetails" class="kpi-details" hidden>
           <div class="initiative-grid">
             <article class="panel initiative-panel completed-initiatives"><div class="panel-heading"><h2>Будут завершены в этом квартале</h2><span class="initiative-status-mark success" aria-hidden="true">✓</span></div><div id="completedInitiatives" class="initiative-list"></div></article>
@@ -235,11 +235,18 @@
       <form id="sprintCloseForm">
         <header class="sprint-close-header"><div><div class="eyebrow">ФАКТИЧЕСКОЕ ЗАВЕРШЕНИЕ</div><h2 id="sprintCloseTitle">Завершение спринта</h2><p id="sprintCloseSubtitle"></p></div><button class="drawer-close" type="button" data-close-sprint-dialog aria-label="Закрыть">×</button></header>
         <div class="sprint-close-body">
-          <section class="sprint-close-question"><h3>Все задачи завершены согласно плану?</h3><p id="sprintCloseDueCount"></p><div class="sprint-answer-options"><label><input type="radio" name="allTasksCompleted" value="yes"><span>Да</span></label><label><input type="radio" name="allTasksCompleted" value="no"><span>Нет</span></label></div></section>
-          <section id="sprintUnfinishedSection" hidden><div class="sprint-close-section-heading"><div><h3>Какие задачи не были завершены?</h3><p>Выберите задачи с плановым завершением в этом спринте и укажите остаток работы.</p></div></div><div id="sprintCloseTasks" class="sprint-close-task-list"></div></section>
+          <section class="sprint-close-question"><h3>Есть отклонения от плана?</h3><p id="sprintCloseDueCount"></p><div class="sprint-answer-options"><label><input type="radio" name="hasPlanDeviations" value="yes"><span>Да</span></label><label><input type="radio" name="hasPlanDeviations" value="no"><span>Нет</span></label></div></section>
+          <section id="sprintUnfinishedSection" hidden><div class="sprint-close-section-heading"><div><h3>Какие задачи отклонились от плана?</h3><p>Выберите задачи и укажите, сколько часов и SP осталось выполнить после спринта.</p></div></div><div id="sprintCloseTasks" class="sprint-close-task-list"></div></section>
           <div id="sprintCloseError" class="constructor-errors" hidden></div>
         </div>
         <footer class="sprint-close-actions"><button class="btn btn-outline" type="button" data-close-sprint-dialog>Отмена</button><button class="btn btn-blue" type="submit" id="confirmCloseCurrentSprint">Завершить спринт</button></footer>
+      </form>
+    </dialog>
+    <dialog class="sprint-result-dialog" id="sprintResultDialog" aria-labelledby="sprintResultTitle">
+      <form method="dialog" class="sprint-result-shell" id="sprintResultForm">
+        <header class="sprint-close-header"><div><div class="eyebrow">SPRINT SAY/DO RATIO</div><h2 id="sprintResultTitle">Итоги спринта</h2><p>Факт сравнивается с исходным планом и не меняется после replanning.</p></div><button class="drawer-close" type="submit" value="close" aria-label="Закрыть">×</button></header>
+        <div id="sprintResultContent" class="sprint-result-content"></div>
+        <footer class="sprint-close-actions"><button class="btn btn-blue" id="confirmSprintResult" type="submit" value="close">Понятно</button></footer>
       </form>
     </dialog>
     <dialog class="risk-dialog" id="riskDialog" aria-labelledby="riskDialogTitle">

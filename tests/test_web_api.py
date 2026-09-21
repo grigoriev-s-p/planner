@@ -651,7 +651,7 @@ class FrontendRefinementTests(unittest.TestCase):
         initiatives_position = self.html.index('class="initiative-grid"')
         self.assertLess(board_position, kpi_position)
         self.assertLess(kpi_position, initiatives_position)
-        self.assertIn("Ожидаемый KPI плана", self.html)
+        self.assertIn("KPI эффективности планирования", self.html)
 
     def test_kpi_details_use_one_collapsed_inline_toggle(self) -> None:
         self.assertIn('id="toggleKpiDetails"', self.html)
@@ -679,9 +679,16 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("expected.completion_percent", render_kpis)
         self.assertIn("expected.completed_initiatives", render_kpis)
         self.assertIn("expected.baseline_initiatives", render_kpis)
+        self.assertIn("quarter.completion_percent", render_kpis)
+        self.assertIn("pi-kpi-comparison", render_kpis)
         self.assertNotIn("sprint_kpis", render_kpis)
         self.assertNotIn("Факт ещё не загружен", render_kpis)
-        self.assertNotIn("Sprint", render_kpis)
+        self.assertNotIn("Sprint Say/Do Ratio", render_kpis)
+        planning_board = self.app.split("function renderPlanning()", 1)[1].split(
+            "function renderTasks()", 1
+        )[0]
+        self.assertIn("data.kpis?.sprint_kpis", planning_board)
+        self.assertIn("sprint-column-kpi", planning_board)
         self.assertNotIn("baseline_id", self.html + render_kpis)
         planning_html = self.html.split('id="page-current-plan"', 1)[1].split(
             'id="page-tasks"', 1
