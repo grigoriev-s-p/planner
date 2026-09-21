@@ -24,6 +24,12 @@ def _approved(store: PlanDraftStore | None = None) -> tuple[PlanDraftStore, dict
     return store, store.approve(draft["draft"]["id"])
 
 
+def _close_and_approve(store: PlanDraftStore, sprint: int) -> tuple[dict, dict]:
+    workflow = store.close_sprint(sprint, [], all_completed=True)
+    assert workflow["status"] == "READY_FOR_REVIEW"
+    return workflow, store.approve_replanning(workflow["workflow_id"])
+
+
 def _after_sprint_one(results: list[dict] | None = None) -> tuple[dict, dict]:
     _, approved = _approved()
     replanned = build_remaining_horizon_plan(approved, 1, results or [])
@@ -49,7 +55,7 @@ def test_t2_t3_after_close_sprint_two_is_current_and_sprint_one_is_closed() -> N
 
 def test_authoritative_dashboard_projects_approved_lifecycle_once(monkeypatch) -> None:
     store, _ = _approved()
-    store.close_sprint(1, [], all_completed=True)
+    _close_and_approve(store, 1)
     monkeypatch.setattr(web_api, "plan_drafts", store)
 
     dashboard = web_api._current_dashboard()
@@ -77,12 +83,12 @@ def test_t4_t5_all_completed_api_accepts_empty_unfinished_payload(monkeypatch) -
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["status"] == "SPRINT_CLOSED"
+    assert payload["status"] == "READY_FOR_REVIEW"
     assert payload["actual"]["all_completed"] is True
     assert payload["replanning_required"] is False
     assert payload["current_sprint"] == 2
     assert payload["sprint_result"]["unfinished_task_ids"] == []
-    assert TestClient(app).get("/api/replanning/draft").json() == {"status": "NONE"}
+    assert TestClient(app).get("/api/replanning/draft").json()["workflow_id"] == payload["workflow_id"]
 
 
 def test_all_completed_does_not_call_replanner_or_change_future_plan(monkeypatch) -> None:
@@ -94,27 +100,28 @@ def test_all_completed_does_not_call_replanner_or_change_future_plan(monkeypatch
 
     monkeypatch.setattr(web_api, "build_remaining_horizon_plan", unexpected_replan)
     response = store.close_sprint(1, [], all_completed=True)
-    saved = store.approved()
+    assert store.approved() == approved
+    saved = store.approve_replanning(response["workflow_id"])
 
-    assert response["status"] == "SPRINT_CLOSED"
-    assert response["draft_plan"] is None
+    assert response["status"] == "READY_FOR_REVIEW"
+    assert response["draft_plan"] is not None
     assert saved["plan"]["sprints"][1:] == future_before
-    assert saved["revision_context"]["trigger"] == "SPRINT_CLOSE_NO_REPLAN"
+    assert saved["revision_context"]["trigger"] == "SPRINT_CLOSE_APPROVE"
     assert saved["_planning_state"]["actual_completed_tasks"] == {"A": 1}
     assert next(row for row in saved["tasks"] if row["task_id"] == "C")["status"] == "PLANNED"
 
 
 def test_sprint_two_all_completed_finishes_due_task_only() -> None:
     store, _ = _approved()
-    first = store.close_sprint(1, [], all_completed=True)
+    first, _ = _close_and_approve(store, 1)
     assert first["sprint_result"]["completed_task_ids"] == ["A"]
     assert "C" not in first["sprint_result"]["completed_task_ids"]
     future_before = deepcopy(store.approved()["plan"]["sprints"][2:])
 
-    second = store.close_sprint(2, [], all_completed=True)
+    second, _ = _close_and_approve(store, 2)
     state = store.approved()["_planning_state"]
 
-    assert second["status"] == "SPRINT_CLOSED"
+    assert second["status"] == "READY_FOR_REVIEW"
     assert second["current_sprint"] == 3
     assert second["sprint_result"]["completed_task_ids"] == ["C"]
     assert state["actual_completed_tasks"] == {"A": 1, "C": 2}
@@ -123,7 +130,9 @@ def test_sprint_two_all_completed_finishes_due_task_only() -> None:
 
 def test_all_completed_double_submit_is_controlled() -> None:
     store, _ = _approved()
-    store.close_sprint(1, [], all_completed=True)
+    workflow = store.close_sprint(1, [], all_completed=True)
+    assert store.close_sprint(1, [], all_completed=True)["workflow_id"] == workflow["workflow_id"]
+    store.approve_replanning(workflow["workflow_id"])
 
     with pytest.raises(ValueError, match="последовательно"):
         store.close_sprint(1, [], all_completed=True)
@@ -218,7 +227,7 @@ def test_t13_t14_status_and_closed_history_survive_restart() -> None:
             directory / "catalog.sqlite3", seed_tables=scenario_tables(scenario())
         )
         store, _ = _approved(PlanDraftStore(repository_provider=lambda: repository))
-        store.close_sprint(1, [], all_completed=True)
+        _close_and_approve(store, 1)
 
         restarted = PlanDraftStore(repository_provider=lambda: repository)
         restored = restarted.approved()
@@ -257,10 +266,10 @@ def test_all_completed_sprint_six_closes_quarter_without_sprint_seven() -> None:
     store, _ = _approved()
     result = None
     for sprint in range(1, 7):
-        result = store.close_sprint(sprint, [], all_completed=True)
+        result, _ = _close_and_approve(store, sprint)
 
     assert result is not None
-    assert result["status"] == "SPRINT_CLOSED"
+    assert result["status"] == "READY_FOR_REVIEW"
     assert result["quarter_completed"] is True
     assert result["current_sprint"] == 6
     assert store.approved()["_planning_state"]["quarter_status"] == "COMPLETED"
@@ -286,9 +295,9 @@ def test_t16_sprint_with_zero_due_tasks_closes_successfully() -> None:
     approved = store.approve(draft["draft"]["id"])
     assert next(row for row in approved["tasks"] if row["task_id"] == "LONG")["completion_sprint"] == 2
 
-    workflow = store.close_sprint(1, [], all_completed=True)
+    workflow, _ = _close_and_approve(store, 1)
 
-    assert workflow["status"] == "SPRINT_CLOSED"
+    assert workflow["status"] == "READY_FOR_REVIEW"
     assert workflow["replanning_required"] is False
     assert workflow["sprint_result"]["completed_count"] == 0
     assert next(row for row in store.approved()["tasks"] if row["task_id"] == "LONG")
@@ -304,18 +313,19 @@ def test_t17_frontend_uses_backend_lifecycle_projection() -> None:
     assert "all_completed: deviationAnswer === 'no'" in source
     assert "sprintData.presentation_state === 'CLOSED'" in source
     assert "task?.current_status" in source
-    assert "sprint === currentSprint() ? 'current' : ''" in source
+    assert "sprintData.presentation_state === 'CURRENT' ? 'selected' : ''" in source
+    assert "sprint === currentSprint() ? 'selected' : ''" not in source
     assert "const dashboard = await window.postcodeApi.getDashboard();" in source
     assert "index === 0 ? 'current'" not in source
     assert "class=\"sprint-card historical" in source
     assert "outcome.label" in source
     assert ".sprint-card.historical.completed" in styles
     assert 'label = "Завершено"' in lifecycle
-    assert "result.replanning_required === false" in source
+    assert "result.status === 'SPRINT_CLOSED'" in source
     assert "show('current-sprint')" in source
     assert "!hasPendingReplan()" in source
     assert "Загрузите фактические результаты" not in markup
-    assert "Результаты перепланирования" in markup
+    assert "Проверьте изменения перед утверждением нового плана." in markup
 
 
 def test_sprint_close_form_excludes_irrelevant_controls_from_native_validation() -> None:

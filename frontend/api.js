@@ -32,6 +32,7 @@ window.postcodeApi = (() => {
     getReplanDraft: () => request('/api/replanning/draft'),
     retryReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/retry`, {method: 'POST'}),
     approveReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/approve`, {method: 'POST'}),
+    cancelReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/cancel`, {method: 'POST'}),
     getTasks: () => request('/api/tasks'),
     getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     getRisks: () => request('/api/risks'),

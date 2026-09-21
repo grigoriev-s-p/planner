@@ -65,20 +65,20 @@ def test_replanning_route_is_guarded_and_pending_review_has_contextual_entry() -
 
     assert "page === 'recalc' && data.ready && !hasPendingReplan()" in source
     assert "show('current-sprint', 'replace')" in source
-    assert "Требуется подтверждение изменений плана" in source
-    assert 'data-page="recalc">Посмотреть изменения' in source
+    assert "Требуется подтверждение факта спринта" in source
+    assert 'data-page="recalc">Открыть проверку' in source
     assert "data.replanWorkflow = {workflow_id: workflowId, status: 'APPROVED'}" in source
     assert "show('current-sprint')" in source
 
 
-def test_close_sprint_navigation_uses_replanning_required_flag() -> None:
+def test_close_sprint_navigation_requires_review_for_new_workflows() -> None:
     source = (FRONTEND / "app.js").read_text(encoding="utf-8")
     close_flow = source[
         source.index("async function closeCurrentSprint"):
         source.index("function renderStar")
     ]
 
-    fast_path = close_flow.index("result.replanning_required === false")
+    fast_path = close_flow.index("result.status === 'SPRINT_CLOSED'")
     current_sprint = close_flow.index("show('current-sprint')", fast_path)
     review = close_flow.index("show('recalc')", current_sprint)
     assert fast_path < current_sprint < review

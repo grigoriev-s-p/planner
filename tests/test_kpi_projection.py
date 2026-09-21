@@ -270,6 +270,8 @@ def test_frontend_exposes_pi_comparison_sprint_badges_and_result_dialog() -> Non
     assert "Есть отклонения от плана?" in html
     assert 'name="hasPlanDeviations"' in html
     assert "data-fact-sp" in app
+    assert 'min="1" max="${attr(startingSp)}" step="1" data-fact-sp' in app
+    assert "Number.isInteger(row.remaining_story_points)" in app
     assert 'id="sprintResultDialog"' in html
     assert 'method="dialog" class="sprint-result-shell"' in html
     assert 'id="confirmSprintResult"' in html

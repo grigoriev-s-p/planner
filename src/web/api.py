@@ -284,6 +284,11 @@ class PlanDraftStore:
                 "closed_sprint": 0,
                 "trigger": "APPROVE",
             }
+            if self._repository_provider is not None and draft.tables:
+                # Scenario entities stay draft-only until the plan is approved.
+                # Approval also makes newly created entities part of the
+                # persistent working catalog.
+                self._repository_provider().merge_tables(deepcopy(draft.tables))
             self._approved = self._persist(
                 _with_official_week0_kpi_denominator(approved)
             )
@@ -630,14 +635,17 @@ class PlanDraftStore:
             "workflow_id": workflow["workflow_id"],
         }
         candidate = project_management_kpis(candidate)
-        saved = self.replace_approved(candidate)
         workflow.update({
-            "status": "SPRINT_CLOSED",
-            "kind": "QUARTER_CLOSED" if quarter_completed else "SPRINT_CLOSED",
+            "status": "READY_FOR_REVIEW",
+            "kind": (
+                "QUARTER_CLOSE_REVIEW"
+                if quarter_completed
+                else "SPRINT_CLOSE_REVIEW"
+            ),
             "replanning_required": False,
+            "review_required": True,
             "current_sprint": current_sprint,
             "quarter_completed": quarter_completed,
-            "approved_revision": (saved.get("approved_snapshot") or {}).get("revision"),
             "sprint_result": {
                 "completed_task_ids": sorted(due_ids),
                 "unfinished_task_ids": [],
@@ -646,8 +654,15 @@ class PlanDraftStore:
                 "task_results": [deepcopy(actual_by_task[key]) for key in sorted(actual_by_task)],
                 "kpi": sprint_kpi(candidate, sprint_number),
             },
-            "draft_plan": None,
-            "diff": None,
+            "draft_plan": candidate,
+            "diff": {
+                "closed_sprint": sprint_number,
+                "changed_count": 0,
+                "changed_tasks": [],
+                "affected_elements": [],
+                "affected_team_ids": [],
+                "affected_engineer_ids": [],
+            },
             "error": None,
         })
         return self._save_replan_workflow(workflow)
@@ -676,16 +691,48 @@ class PlanDraftStore:
                 latest
                 and latest.get("base_approved_token") == base_token
                 and int(latest.get("sprint_number") or 0) == sprint_number
+                and latest.get("status") in {
+                    "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+                }
             ):
-                if latest.get("actual_fingerprint") != actual_fingerprint:
-                    raise RuntimeError(
-                        "Факт этого спринта уже сохранён. Используйте существующий черновик или повторите пересчёт."
-                    )
-                if all_completed and latest.get("status") == "ACTUAL_SAVED":
+                if latest.get("actual_fingerprint") == actual_fingerprint:
+                    if latest.get("status") == "ACTUAL_SAVED":
+                        if all_completed:
+                            return self._close_without_replanning(
+                                approved, sprint_number, results, latest
+                            )
+                        return self._build_replan_workflow(latest, approved)
+                    return latest
+
+                # Until explicit approval, a saved fact remains editable.  A
+                # corrected fact replaces only its review draft; Approved Plan
+                # remains untouched.
+                latest.update({
+                    "status": "ACTUAL_SAVED",
+                    "actual_fingerprint": actual_fingerprint,
+                    "actual": {
+                        "sprint_number": sprint_number,
+                        "all_completed": all_completed,
+                        "results": deepcopy(results),
+                    },
+                    "actual_persisted": True,
+                    "replanning_required": not all_completed,
+                    "review_required": True,
+                    "draft_plan": None,
+                    "diff": None,
+                    "error": None,
+                })
+                for key in (
+                    "kind", "sprint_result", "current_sprint",
+                    "quarter_completed", "approved_revision", "approved_plan",
+                ):
+                    latest.pop(key, None)
+                latest = self._save_replan_workflow(latest)
+                if all_completed:
                     return self._close_without_replanning(
                         approved, sprint_number, results, latest
                     )
-                return latest
+                return self._build_replan_workflow(latest, approved)
             now = datetime.now(timezone.utc).isoformat()
             workflow = {
                 "workflow_id": uuid4().hex,
@@ -703,6 +750,7 @@ class PlanDraftStore:
                 },
                 "actual_persisted": True,
                 "replanning_required": not all_completed,
+                "review_required": True,
                 "draft_plan": None,
                 "diff": None,
                 "error": None,
@@ -731,7 +779,40 @@ class PlanDraftStore:
             workflow["status"] = "ACTUAL_SAVED"
             workflow["error"] = None
             workflow = self._save_replan_workflow(workflow)
+            if workflow.get("actual", {}).get("all_completed"):
+                return self._close_without_replanning(
+                    approved,
+                    int(workflow["sprint_number"]),
+                    deepcopy(workflow["actual"].get("results") or []),
+                    workflow,
+                )
             return self._build_replan_workflow(workflow, approved)
+
+    def cancel_replanning(self, workflow_id: str) -> dict:
+        """Discard an unapproved sprint fact without changing Approved Plan."""
+
+        approved = self.approved()
+        if approved is None:
+            raise RuntimeError("Утверждённый план не найден.")
+        with self._lock:
+            workflow = self.replan_workflow(workflow_id)
+            if workflow is None:
+                raise KeyError(workflow_id)
+            if workflow.get("status") == "CANCELLED":
+                return workflow
+            if workflow.get("status") not in {
+                "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+            }:
+                raise RuntimeError("Можно отменить только неподтверждённый факт спринта.")
+            if workflow.get("base_approved_token") != self._approved_token(approved):
+                raise RuntimeError("Черновик устарел: утверждённый план уже изменился.")
+            workflow.update({
+                "status": "CANCELLED",
+                "draft_plan": None,
+                "diff": None,
+                "cancelled_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return self._save_replan_workflow(workflow)
 
     def approve_replanning(self, workflow_id: str) -> dict:
         approved = self.approved()
@@ -755,7 +836,11 @@ class PlanDraftStore:
                 ).get("revision"),
                 "closed_sprint": int(workflow["sprint_number"]),
                 "actual_result_sprint": int(workflow["sprint_number"]),
-                "trigger": "REPLAN_APPROVE",
+                "trigger": (
+                    "REPLAN_APPROVE"
+                    if workflow.get("replanning_required")
+                    else "SPRINT_CLOSE_APPROVE"
+                ),
                 "workflow_id": workflow_id,
             }
             saved = self.replace_approved(candidate)
@@ -1408,6 +1493,16 @@ def retry_replan_draft(workflow_id: str) -> dict:
 def approve_replan_draft(workflow_id: str) -> dict:
     try:
         return plan_drafts.approve_replanning(workflow_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Черновик пересчёта не найден.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/replanning/drafts/{workflow_id}/cancel")
+def cancel_replan_draft(workflow_id: str) -> dict:
+    try:
+        return plan_drafts.cancel_replanning(workflow_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Черновик пересчёта не найден.") from error
     except RuntimeError as error:
