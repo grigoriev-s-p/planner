@@ -95,6 +95,22 @@ def issue_codes(audit: dict) -> set[str]:
 
 
 class DataPreflightAuditTests(unittest.TestCase):
+    def test_active_catalog_conflict_exposes_strict_id_decision(self) -> None:
+        conflict = {
+            "table": "tasks", "entity_type": "task", "entity_id": "B",
+            "saved": [{"task_id": "B", "summary": "Текущее"}],
+            "excel": [{"task_id": "B", "summary": "Из Excel"}],
+        }
+        audit = preflight_for(
+            merge_warnings=("Задача B уже существует. Оставлена текущая версия.",),
+            merge_conflicts=(conflict,),
+        )
+
+        assert audit["existing_entities"][0]["decision_key"] == "task:B"
+        assert audit["existing_entities"][0]["differences"] == [{
+            "label": "Название", "current": "Текущее", "incoming": "Из Excel",
+        }]
+
     def test_clean_dataset_has_no_dialog(self) -> None:
         audit = preflight_for()
         self.assertFalse(audit["show_dialog"])

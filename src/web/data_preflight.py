@@ -151,6 +151,71 @@ def _catalog_conflict_issues(preview: CatalogMergeResult) -> list[dict[str, Any]
     return result
 
 
+def _existing_entity_records(preview: CatalogMergeResult) -> list[dict[str, Any]]:
+    """Group active catalog conflicts into strict-ID import decisions."""
+
+    labels = {"task": "Задача", "engineer": "Инженер", "team": "Команда"}
+    field_labels = {
+        "summary": "Название", "name": "Имя", "team_name": "Название команды",
+        "team_id": "Команда", "status": "Статус", "rung": "Приоритет Rung",
+        "story_points": "Story Points", "initiative_id": "Инициатива",
+        "role": "Роль", "grade": "Грейд", "capacity_rate": "Занятость",
+        "technology": "Навык", "required_hours": "Требуемые часы",
+        "snapshot_date": "Дата снимка", "velocity_achieved": "Производительность",
+        "planned_sp": "Плановые Story Points",
+    }
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for conflict in preview.conflicts:
+        entity_type = _text(conflict.get("entity_type"))
+        entity_id = _text(conflict.get("entity_id"))
+        if entity_type in labels and entity_id:
+            grouped[(entity_type, entity_id)].append(dict(conflict))
+
+    records = []
+    for (entity_type, entity_id), conflicts in sorted(grouped.items()):
+        differences = []
+        current_rows: list[dict[str, Any]] = []
+        incoming_rows: list[dict[str, Any]] = []
+        for conflict in conflicts:
+            current = [dict(row) for row in conflict.get("saved") or []]
+            incoming = [dict(row) for row in conflict.get("excel") or []]
+            current_rows.extend(current)
+            incoming_rows.extend(incoming)
+            fields = sorted(
+                set().union(*(row.keys() for row in [*current, *incoming]))
+                if current or incoming else set(),
+                key=lambda field: (field not in field_labels, field_labels.get(field, field)),
+            )
+            for field in fields:
+                if field not in field_labels:
+                    continue
+                saved_values = [row.get(field) for row in current]
+                excel_values = [row.get(field) for row in incoming]
+                if saved_values == excel_values:
+                    continue
+                differences.append({
+                    "label": field_labels[field],
+                    "current": saved_values[0] if len(saved_values) == 1 else saved_values,
+                    "incoming": excel_values[0] if len(excel_values) == 1 else excel_values,
+                })
+        representative = (incoming_rows or current_rows or [{}])[0]
+        display_name = (
+            representative.get("summary") or representative.get("name")
+            or representative.get("team_name") or entity_id
+        )
+        records.append({
+            "decision_key": f"{entity_type}:{entity_id}",
+            "entity_type": entity_type,
+            "entity_label": labels[entity_type],
+            "entity_id": entity_id,
+            "display_name": display_name,
+            "current": current_rows,
+            "incoming": incoming_rows,
+            "differences": differences,
+        })
+    return records
+
+
 def build_data_preflight(
     parsed: ParsedDataset,
     normalized: NormalizedDataset,
@@ -553,6 +618,7 @@ def build_data_preflight(
         "summary": counts,
         "groups": groups,
         "archived_entities": [dict(item) for item in merge_preview.archived_entities],
+        "existing_entities": _existing_entity_records(merge_preview),
         "import_summary": dict(merge_preview.summary or {}),
     }
 
@@ -569,6 +635,7 @@ def structural_preflight(message: str) -> dict[str, Any]:
         "show_dialog": True,
         "summary": {"critical": 1, "warning": 0, "info": 0},
         "archived_entities": [],
+        "existing_entities": [],
         "import_summary": {},
         "groups": [{
             "category": "structure", "title": CATEGORY_TITLES["structure"],

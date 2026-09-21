@@ -80,6 +80,7 @@ class CatalogMergeResult:
     restored: dict[str, int] | None = None
     restored_updated: dict[str, int] | None = None
     kept_archived: dict[str, int] | None = None
+    updated: dict[str, int] | None = None
     summary: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +93,7 @@ class CatalogMergeResult:
             "restored": dict(self.restored or {}),
             "restored_updated": dict(self.restored_updated or {}),
             "kept_archived": dict(self.kept_archived or {}),
+            "updated": dict(self.updated or {}),
             "summary": dict(self.summary or {}),
         }
 
@@ -874,6 +876,7 @@ class CatalogRepository:
         *,
         dry_run: bool = False,
         archive_decisions: Mapping[str, str] | None = None,
+        existing_decisions: Mapping[str, str] | None = None,
     ) -> CatalogMergeResult:
         """Atomically add entities, or inspect the exact merge without writing."""
 
@@ -889,6 +892,7 @@ class CatalogRepository:
         }
         archived_entities = self._archived_entity_records(current, materialized, archived)
         decisions = {str(key): str(value).upper() for key, value in (archive_decisions or {}).items()}
+        active_decisions = {str(key): str(value).upper() for key, value in (existing_decisions or {}).items()}
         allowed_decisions = {"KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"}
         known_archive_keys = {item["decision_key"] for item in archived_entities}
         active_entity_keys = {
@@ -910,6 +914,12 @@ class CatalogRepository:
             item["decision_key"]: decisions.get(item["decision_key"], "KEEP_ARCHIVED")
             for item in archived_entities
         }
+        allowed_active_decisions = {"KEEP_CURRENT", "UPDATE"}
+        unknown_active_decisions = set(active_decisions) - active_entity_keys
+        if unknown_active_decisions:
+            raise ArchiveValidationError("Решение относится к неизвестной активной записи.")
+        if any(value not in allowed_active_decisions for value in active_decisions.values()):
+            raise ArchiveValidationError("Выберите допустимое действие для существующей записи.")
         entity_summary = {"new": 0, "active_existing": 0, "archived": len(archived_entities)}
 
         referenced_archived_teams = {
@@ -932,6 +942,12 @@ class CatalogRepository:
         new_entity_ids: dict[str, set[str]] = {}
         rows_to_insert: dict[str, list[dict[str, Any]]] = {}
         rows_to_delete: list[tuple[str, str]] = []
+        updated_entities: dict[str, int] = {}
+        for decision_key, decision in active_decisions.items():
+            if decision != "UPDATE" or ":" not in decision_key:
+                continue
+            entity_type = decision_key.split(":", 1)[0]
+            updated_entities[entity_type] = updated_entities.get(entity_type, 0) + 1
         for table_name, (entity_type, field, label) in entity_specs.items():
             existing_groups = self._groups(current.get(table_name, []), field)
             incoming_groups = self._groups(materialized.get(table_name, []), field)
@@ -950,14 +966,9 @@ class CatalogRepository:
                     continue
                 if entity_id in existing_groups:
                     entity_summary["active_existing"] += 1
-                    kept[table_name] += len(rows)
                     old = sorted(_comparison_payload(row) for row in existing_groups[entity_id])
                     new = sorted(_comparison_payload(row) for row in rows)
                     if old != new:
-                        warnings.append(
-                            f"{label} {entity_id} уже существует. "
-                            "Данные из Excel не применены."
-                        )
                         conflicts.append({
                             "table": table_name,
                             "entity_type": entity_type,
@@ -965,6 +976,22 @@ class CatalogRepository:
                             "saved": [dict(row) for row in existing_groups[entity_id]],
                             "excel": [dict(row) for row in rows],
                         })
+                    decision = active_decisions.get(
+                        self._archive_decision_key(entity_type, entity_id), "KEEP_CURRENT"
+                    )
+                    if decision == "UPDATE" and old != new:
+                        rows_to_delete.extend(
+                            (table_name, _row_identity(table_name, row))
+                            for row in existing_groups[entity_id]
+                        )
+                        rows_to_insert[table_name].extend(rows)
+                    else:
+                        kept[table_name] += len(rows)
+                        if old != new:
+                            warnings.append(
+                                f"{label} {entity_id} уже существует. "
+                                "Оставлена текущая версия."
+                            )
                     continue
                 rows_to_insert[table_name].extend(rows)
                 entity_summary["new"] += 1
@@ -987,6 +1014,15 @@ class CatalogRepository:
                 if entity_id in new_entity_ids.get(entity_type, set()):
                     continue
                 saved_rows = current_groups.get(entity_id, [])
+                decision = active_decisions.get(
+                    self._archive_decision_key(entity_type, entity_id), "KEEP_CURRENT"
+                )
+                if decision == "UPDATE":
+                    rows_to_delete.extend(
+                        (table_name, _row_identity(table_name, row)) for row in saved_rows
+                    )
+                    rows_to_insert[table_name].extend(incoming_rows)
+                    continue
                 if sorted(_comparison_payload(row) for row in saved_rows) == sorted(
                     _comparison_payload(row) for row in incoming_rows
                 ):
@@ -1002,6 +1038,16 @@ class CatalogRepository:
                     "saved": [dict(row) for row in saved_rows],
                     "excel": [dict(row) for row in incoming_rows],
                 })
+            selected_update_ids = {
+                key.split(":", 1)[1]
+                for key, decision in active_decisions.items()
+                if decision == "UPDATE" and key.startswith(f"{entity_type}:")
+            }
+            for entity_id in selected_update_ids - set(incoming_groups):
+                rows_to_delete.extend(
+                    (table_name, _row_identity(table_name, row))
+                    for row in current_groups.get(entity_id, [])
+                )
 
         # Automatic title extraction is refreshable, while explicit/manual
         # requirements and user rejections are durable overrides.  Re-importing
@@ -1018,6 +1064,12 @@ class CatalogRepository:
                 kept[table_name] = kept.get(table_name, 0) + len(incoming_rows)
                 continue
             saved_rows = current_groups.get(entity_id, [])
+            if active_decisions.get(self._archive_decision_key("task", entity_id)) == "UPDATE":
+                rows_to_delete.extend(
+                    (table_name, _row_identity(table_name, row)) for row in saved_rows
+                )
+                rows_to_insert[table_name].extend(incoming_rows)
+                continue
             saved_manual = [
                 row for row in saved_rows
                 if _text(row.get("source")).casefold() != "title"
@@ -1038,6 +1090,16 @@ class CatalogRepository:
                     rows_to_insert[table_name].append(row)
                 else:
                     kept[table_name] = kept.get(table_name, 0) + 1
+        selected_task_updates = {
+            key.split(":", 1)[1]
+            for key, decision in active_decisions.items()
+            if decision == "UPDATE" and key.startswith("task:")
+        }
+        for entity_id in selected_task_updates - set(incoming_groups):
+            rows_to_delete.extend(
+                (table_name, _row_identity(table_name, row))
+                for row in current_groups.get(entity_id, [])
+            )
 
         independent_tables = set(materialized) - set(rows_to_insert)
         for table_name in independent_tables:
@@ -1061,6 +1123,7 @@ class CatalogRepository:
                 tuple(conflicts),
                 tuple(archived_entities),
                 {}, {}, {"archived": sum(1 for value in decisions.values() if value == "KEEP_ARCHIVED")},
+                updated_entities,
                 entity_summary,
             )
 
@@ -1141,6 +1204,7 @@ class CatalogRepository:
         return CatalogMergeResult(
             added, kept, tuple(dict.fromkeys(warnings)), tuple(conflicts),
             tuple(archived_entities), restored, restored_updated, kept_archived,
+            updated_entities,
             entity_summary,
         )
 

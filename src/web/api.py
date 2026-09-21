@@ -109,6 +109,7 @@ class SprintActualRequest(BaseModel):
 
 class ConstructorUploadDecisionRequest(BaseModel):
     decisions: dict[str, Literal["KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"]] = Field(default_factory=dict)
+    existing_decisions: dict[str, Literal["KEEP_CURRENT", "UPDATE"]] = Field(default_factory=dict)
 
 
 class SkillExtractionRequest(BaseModel):
@@ -1736,6 +1737,7 @@ def continue_constructor_plan_upload(
             build_constructor_plan_from_prepared(
                 prepared, get_catalog_repository(),
                 archive_decisions=(request.decisions if request else None),
+                existing_decisions=(request.existing_decisions if request else None),
             )
         )
     except ConstructorDatasetUploadError as error:

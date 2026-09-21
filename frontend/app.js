@@ -1663,6 +1663,7 @@ async function closeCurrentSprint(event) {
 }
 
 function renderRisks() {
+  updateRiskStatusIndicators();
   $$('[data-risk-hub-tab]', $('#page-risks')).forEach((button) => {
     const active = button.dataset.riskHubTab === state.riskHubTab;
     button.classList.toggle('active', active);
@@ -1672,6 +1673,24 @@ function renderRisks() {
   if (state.riskHubTab === 'teams') { closeRiskModal(); renderStarTeams(); }
   if (state.riskHubTab === 'risks') renderRiskList();
   if (state.riskHubTab === 'skills') { closeRiskModal(); renderStarSkills(); }
+}
+
+function updateRiskStatusIndicators() {
+  const risks = Array.isArray(data.risks) ? data.risks : [];
+  const hasRisks = risks.length > 0;
+  const title = hasRisks ? `Есть активные риски: ${risks.length}` : 'Активных рисков нет';
+  $$('[data-page="risks"]').forEach((element) => {
+    element.classList.toggle('risk-nav-has-risks', hasRisks);
+    element.classList.toggle('risk-nav-clear', !hasRisks);
+    element.dataset.riskCount = String(risks.length);
+    element.title = title;
+  });
+  $$('[data-risk-hub-tab="risks"]').forEach((element) => {
+    element.classList.toggle('risk-tab-has-risks', hasRisks);
+    element.classList.toggle('risk-tab-clear', !hasRisks);
+    element.dataset.riskCount = String(risks.length);
+    element.title = title;
+  });
 }
 
 function busRiskTag(competency) {
@@ -2363,6 +2382,7 @@ function hydrate(payload) {
   data.tasks = payload.tasks || [];
   data.initiatives = payload.initiatives || [];
   data.risks = payload.risks || [];
+  updateRiskStatusIndicators();
   data.teams = payload.teams || [];
   data.engineers = payload.engineers || [];
   data.starMap = payload.star_map || {teams: [], engineers: []};

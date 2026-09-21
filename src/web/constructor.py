@@ -20,7 +20,7 @@ from zipfile import BadZipFile
 from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel, Field
 
-from src.data.normalization import normalize
+from src.data.normalization import NormalizedDataset, normalize
 from src.data.parser import DatasetParsingError, parse_workbook
 from src.data.validation import validate
 from src.skills import (
@@ -122,6 +122,66 @@ class PreparedConstructorUpload:
 
 
 ARCHIVE_DECISIONS = {"KEEP_ARCHIVED", "RESTORE", "RESTORE_UPDATE"}
+EXISTING_DECISIONS = {"KEEP_CURRENT", "UPDATE"}
+
+
+def _deduplicate_normalized_dataset(
+    dataset: NormalizedDataset,
+) -> tuple[NormalizedDataset, dict[str, Any]]:
+    """Remove repeated Excel rows deterministically before validation.
+
+    Entity IDs are strict for tasks.  Multi-team/multi-role engineer rows stay
+    valid and are deduplicated by their full assignment identity.
+    """
+
+    identities = {
+        "tasks.csv": ("task_id",),
+        "task_role_effort.csv": ("task_id", "role"),
+        "task_dependencies.csv": ("blocking_task_id", "blocked_task_id", "dependency_type"),
+        "engineers.csv": ("engineer_id", "team_id", "role"),
+        "engineer_skills.csv": ("engineer_id", "technology"),
+        "task_skill_requirements.csv": ("task_id", "role", "technology"),
+        "team_history.csv": ("team_id", "snapshot_date"),
+        "planning_results.csv": ("value",),
+        "plan_mismatch_reasons.csv": ("value",),
+        "task_closure_results.csv": ("value",),
+    }
+    cleaned: dict[str, list[dict[str, Any]]] = {}
+    details: list[dict[str, Any]] = []
+    removed_total = 0
+    for table_name, rows in dataset.tables.items():
+        fields = identities.get(table_name)
+        if not fields:
+            cleaned[table_name] = [dict(row) for row in rows]
+            continue
+        latest: dict[tuple[str, ...], tuple[int, dict[str, Any]]] = {}
+        unique_without_identity: list[tuple[int, dict[str, Any]]] = []
+        duplicate_ids: set[str] = set()
+        for index, source in enumerate(rows):
+            row = dict(source)
+            key = tuple(_clean_text(row.get(field)) for field in fields)
+            if not any(key):
+                unique_without_identity.append((index, row))
+                continue
+            if key in latest:
+                duplicate_ids.add(" / ".join(value for value in key if value))
+                removed_total += 1
+            latest[key] = (index, row)
+        combined = [*unique_without_identity, *latest.values()]
+        cleaned[table_name] = [row for _, row in sorted(combined, key=lambda item: item[0])]
+        removed = len(rows) - len(cleaned[table_name])
+        if removed:
+            details.append({
+                "table": table_name,
+                "removed": removed,
+                "identities": sorted(duplicate_ids),
+            })
+    return NormalizedDataset(
+        tables=cleaned,
+        effort_task_ids=set(dataset.effort_task_ids),
+        effort_roles=set(dataset.effort_roles),
+        placeholder_sources=dict(dataset.placeholder_sources),
+    ), {"removed_total": removed_total, "tables": details}
 
 
 def _validated_archive_decisions(
@@ -174,6 +234,20 @@ def _validated_archive_decisions(
                 "Восстановите задачу или исправьте зависимость."
             )
     return result
+
+
+def _validated_existing_decisions(
+    prepared: PreparedConstructorUpload,
+    decisions: dict[str, str] | None,
+) -> dict[str, str]:
+    records = prepared.audit.get("existing_entities") or []
+    known = {str(item.get("decision_key")) for item in records}
+    supplied = {str(key): str(value).upper() for key, value in (decisions or {}).items()}
+    if set(supplied) - known:
+        raise ConstructorDatasetUploadError("Решение относится к неизвестной существующей записи.")
+    if any(value not in EXISTING_DECISIONS for value in supplied.values()):
+        raise ConstructorDatasetUploadError("Выберите допустимое действие для существующей записи.")
+    return {key: supplied.get(key, "KEEP_CURRENT") for key in known}
 
 
 def _clean_text(value: Any) -> str:
@@ -660,7 +734,7 @@ def prepare_constructor_workbook(
             workbook = Path(directory) / safe_name
             workbook.write_bytes(content)
             parsed = parse_workbook(workbook)
-            normalized = normalize(parsed)
+            normalized, deduplication = _deduplicate_normalized_dataset(normalize(parsed))
             validation = validate(normalized)
             imported_tables = {
                 table_name: normalized.tables[csv_name]
@@ -679,6 +753,7 @@ def prepare_constructor_workbook(
             audit = build_data_preflight(
                 parsed, normalized, validation, merge_preview
             )
+            audit["deduplication"] = deduplication
     except (
         DatasetParsingError,
         BadZipFile,
@@ -703,6 +778,7 @@ def build_constructor_plan_from_prepared(
     prepared: PreparedConstructorUpload,
     repository: CatalogRepository,
     archive_decisions: dict[str, str] | None = None,
+    existing_decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Merge an accepted audited snapshot and build its Base Plan once."""
 
@@ -713,8 +789,11 @@ def build_constructor_plan_from_prepared(
 
     try:
         decisions = _validated_archive_decisions(prepared, archive_decisions)
+        active_decisions = _validated_existing_decisions(prepared, existing_decisions)
         merge_result = repository.merge_tables(
-            prepared.tables, archive_decisions=decisions
+            prepared.tables,
+            archive_decisions=decisions,
+            existing_decisions=active_decisions,
         )
         planning_tables = _include_archived_done_blocker_context(
             repository.active_planning_tables(), repository
