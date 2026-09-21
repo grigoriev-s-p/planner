@@ -1218,6 +1218,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/admin/reset-data")
+def reset_all_data() -> dict:
+    """Clear the working catalog, plan history and transient server drafts."""
+
+    deleted = get_catalog_repository().reset_all_data()
+    plan_drafts.reset()
+    prepared_uploads.reset()
+    return {
+        "status": "reset",
+        "deleted": deleted,
+        "message": "Все данные сайта удалены.",
+    }
+
+
 @app.get("/api/dashboard")
 def dashboard() -> dict:
     return _dashboard_with_lifecycle()
