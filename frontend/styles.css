@@ -266,3 +266,11 @@ body.constructor-modal-open{overflow:hidden}
 
 /* Make the risk status visible before opening the page. */
 .nav-link.risk-nav-has-risks,.nav-link.risk-nav-has-risks:hover,.nav-link.risk-nav-has-risks.active{background:#b53b37;border-color:#e17a74;color:#fff}.nav-link.risk-nav-clear,.nav-link.risk-nav-clear:hover,.nav-link.risk-nav-clear.active{background:#2f7e4c;border-color:#72bd8c;color:#fff}.nav-link.risk-nav-has-risks::after,.nav-link.risk-nav-clear::after{display:inline-grid;place-items:center;width:20px;height:20px;margin-left:7px;border-radius:50%;font-size:13px;font-weight:900;line-height:1;color:#fff}.nav-link.risk-nav-has-risks::after{content:'!';background:#ef746f}.nav-link.risk-nav-clear::after{content:'✓';background:#57b777}.subtab.risk-tab-has-risks,.subtab.risk-tab-has-risks:hover,.subtab.risk-tab-has-risks.active{background:#fff0ef;color:#a73531;border:1px solid #f0aaa5}.subtab.risk-tab-clear,.subtab.risk-tab-clear:hover,.subtab.risk-tab-clear.active{background:#eaf8ee;color:#287443;border:1px solid #a9d9b7}
+
+/* Keep engineer criticality cards readable when competency names are long. */
+.entity-detail-grid .competency-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.entity-detail-grid .competency-summary{min-width:0}
+.entity-detail-grid .competency-summary>div{min-width:0}
+.entity-detail-grid .competency-summary h3{overflow-wrap:anywhere;word-break:break-word}
+.entity-detail-grid .competency-summary>b{flex:0 0 auto}
+@media(max-width:620px){.entity-detail-grid .competency-card-grid{grid-template-columns:1fr}}
