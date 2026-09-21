@@ -28,7 +28,7 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         for page_id in (
-            "planning", "current-plan", "tasks", "task-detail", "risks", "recalc", "star"
+            "planning", "current-plan", "tasks", "task-detail", "risks", "recalc"
         ):
             self.assertIn(f'id="page-{page_id}"', page.text)
         self.assertNotIn('id="page-home"', page.text)
@@ -185,14 +185,39 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         frontend = Path(__file__).resolve().parents[1] / "frontend"
         html = (frontend / "index.html").read_text(encoding="utf-8")
         app_source = (frontend / "app.js").read_text(encoding="utf-8")
+        styles = (frontend / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="starQuarterOnly"', html)
         self.assertIn("function starGraph", app_source)
         self.assertNotIn("startStarGraphForce", app_source)
         self.assertIn('id="selectedCompetencyPanel"', html)
-        star_html = html.split('id="page-star"', 1)[1].split("</section>", 1)[0]
-        self.assertNotIn("ЗВЁЗДНАЯ КАРТА КОМАНДЫ", star_html)
-        self.assertNotIn("РИСКИ И BUS FACTOR", star_html)
+        self.assertNotIn('id="page-star"', html)
+        self.assertIn('data-risk-hub-tab="teams"', html)
+        self.assertIn('data-risk-hub-tab="risks"', html)
+        self.assertIn('data-risk-hub-tab="skills"', html)
+        risk_tabs = html.split('aria-label="Разделы страницы рисков"', 1)[1].split('</div>', 1)[0]
+        self.assertLess(risk_tabs.index('data-risk-hub-tab="risks"'), risk_tabs.index('data-risk-hub-tab="teams"'))
+        self.assertLess(risk_tabs.index('data-risk-hub-tab="teams"'), risk_tabs.index('data-risk-hub-tab="skills"'))
+        self.assertIn('class="subtab active" data-risk-hub-tab="risks"', risk_tabs)
+        self.assertIn("riskHubTab: 'risks'", app_source)
+        self.assertNotIn('data-risk-hub-tab="distribution"', html)
+        self.assertNotIn('id="starDistribution"', html)
+        self.assertIn("data.starMap?.company", app_source)
+        self.assertIn("item.scope === 'company' ? 'Вся компания'", app_source)
+        self.assertIn('disabled aria-disabled="true"', app_source)
+        self.assertIn("width:min(360px,calc(100% - 36px))", styles)
+        self.assertIn("overflow-x:hidden;overflow-y:auto", styles)
+        self.assertIn("grid-template-columns:repeat(auto-fit,minmax(125px,1fr))", styles)
+        risk_page = html.split('id="page-risks"', 1)[1].split('</section>', 1)[0]
+        self.assertNotIn('ПРОФИЛЬ КОМАНДЫ', risk_page)
+        self.assertNotIn('КОМАНДА × КОМПЕТЕНЦИИ', risk_page)
+        self.assertNotIn('data-archive-entity="team"', app_source)
+        self.assertNotIn('id="teamMembers"', risk_page)
+        self.assertNotIn('id="teamWorkload"', risk_page)
+        self.assertNotIn('id="teamTasks"', risk_page)
+        self.assertNotIn('ИНЖЕНЕРЫ × ТЕХНОЛОГИИ', risk_page)
+        self.assertNotIn('Наличие, без выдуманных уровней', risk_page)
+        self.assertNotIn('id="heatScope"', risk_page)
 
     def test_kpi_endpoint_exposes_structured_unavailable_fact_without_internal_ids(self) -> None:
         response = self.client.get("/api/kpis")
@@ -268,6 +293,10 @@ class ProductAPIIntegrationTests(unittest.TestCase):
         self.assertNotIn('Focus Factor', constructor_source)
         self.assertIn('+ Добавить задачу', index_source)
         self.assertIn("/api/plan-constructor/plan", api_source)
+        self.assertIn("/api/admin/reset-data", api_source)
+        self.assertIn('id="openResetData"', index_source)
+        self.assertIn('id="resetDataDialog"', index_source)
+        self.assertIn("postcode.plan-constructor.v2", app_source)
         self.assertIn("/api/plan-constructor/plan/upload", api_source)
         for old_demo_name in (
             "sampleTasks",
@@ -328,8 +357,9 @@ class FrontendRefinementTests(unittest.TestCase):
     def test_top_navigation_includes_task_catalog(self) -> None:
         navigation = self.html.split('<nav class="nav"', 1)[1].split("</nav>", 1)[0]
         self.assertNotIn('data-page="constructor"', navigation)
-        for page in ("home", "planning", "current-sprint", "tasks", "engineers", "teams", "risks", "star"):
+        for page in ("home", "planning", "current-sprint", "tasks", "engineers", "teams", "risks"):
             self.assertIn(f'data-page="{page}"', navigation)
+        self.assertNotIn('data-page="star"', navigation)
         self.assertIn('data-page="tasks">Задачи</button>', navigation)
         self.assertIn('data-page="engineers">Инженеры</button>', navigation)
         self.assertIn('data-page="teams">Команды</button>', navigation)
@@ -449,6 +479,23 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertNotIn("function renderHome()", self.app)
         self.assertEqual(self.app.count("function renderPlanning()"), 1)
 
+    def test_home_shows_live_plan_risk_counts(self) -> None:
+        planning_html = self.html.split('id="page-current-plan"', 1)[1].split(
+            'id="page-current-sprint"', 1
+        )[0]
+        render_risks = self.app.split("function renderPlanRiskSummary()", 1)[1].split(
+            "function renderPlanning()", 1
+        )[0]
+        self.assertIn('id="planRiskSummary"', planning_html)
+        self.assertIn("Внимание, риски по плану", render_risks)
+        for severity in ("RED", "ORANGE", "YELLOW"):
+            self.assertIn(f"counts.{severity}", render_risks)
+        self.assertIn("target.classList.toggle('clear', clear)", render_risks)
+        self.assertIn("${clear ? '✓' : '!'}", render_risks)
+        self.assertIn('data-page="risks"', render_risks)
+        self.assertIn(".plan-risk-summary{", self.styles)
+        self.assertIn(".plan-risk-summary.clear{", self.styles)
+
     def test_home_navigation_keeps_legacy_and_contextual_returns(self) -> None:
         self.assertIn("'current-plan'", self.app.split("const knownPages", 1)[1].split(";", 1)[0])
         self.assertIn("page = canonicalPage(page);", self.app)
@@ -482,6 +529,27 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn(".board-viewport{overflow:hidden", self.styles)
         for forbidden in ("priority_label", "status_label", "initiative_id", "portion(task, sprint)"):
             self.assertNotIn(forbidden, render_planning)
+
+    def test_current_sprint_uses_single_column_task_rows_with_details_action(self) -> None:
+        current_sprint_page = self.html.split('id="page-current-sprint"', 1)[1].split(
+            'id="page-tasks"', 1
+        )[0]
+        render_current_sprint = self.app.split("function renderCurrentSprint()", 1)[1].split(
+            "function renderSprintCloseDialog", 1
+        )[0]
+        self.assertIn('id="currentSprintTasks"', current_sprint_page)
+        self.assertNotIn("Не в текущем спринте", current_sprint_page)
+        self.assertNotIn("currentSprintLaterTasks", self.app)
+        self.assertIn("current-sprint-task-more", render_current_sprint)
+        self.assertIn("'Подробнее'", render_current_sprint)
+        self.assertIn("rungBadge(task)", render_current_sprint)
+        self.assertIn("data-toggle-current-sprint-task", render_current_sprint)
+        self.assertIn("current-sprint-task-details", render_current_sprint)
+        self.assertIn("Задействованные инженеры", render_current_sprint)
+        self.assertIn("assignment.task_hours", render_current_sprint)
+        self.assertIn("assignment.team_ids", render_current_sprint)
+        self.assertIn(".current-sprint-task-list{grid-template-columns:1fr", self.styles)
+        self.assertIn(".current-sprint-engineer-load", self.styles)
 
     def test_initiatives_and_excluded_tasks_use_backend_results(self) -> None:
         self.assertIn('id="completedInitiatives"', self.html)
@@ -517,7 +585,7 @@ class FrontendRefinementTests(unittest.TestCase):
 
     def test_task_detail_uses_real_dependencies_and_cross_team_allocations(self) -> None:
         detail = self.app.split("function renderTaskDetail()", 1)[1].split(
-            "function renderRisks()", 1
+            "function riskEvidenceValue", 1
         )[0]
         self.assertIn("task.dependencies?.incoming", detail)
         self.assertIn("task.dependencies?.outgoing", detail)

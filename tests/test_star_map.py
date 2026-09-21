@@ -90,11 +90,16 @@ def test_company_star_map_counts_unique_active_engineers() -> None:
 
     company = _company_star_map_team(engineers, teams)
     python = next(item for item in company["competency_modes"]["all"]["technologies"] if item["technology"] == "Python")
+    quarter_python = next(item for item in company["competency_modes"]["quarter"]["technologies"] if item["technology"] == "Python")
 
     assert company["team_name"] == "Вся компания"
     assert company["member_count"] == 2
     assert python["team_bus_factor"] == 2
+    assert python["organization_bus_factor"] == 2
     assert python["engineer_ids"] == ["E1", "E2"]
+    assert quarter_python["team_bus_factor"] == 2
+    assert quarter_python["organization_bus_factor"] == 2
+    assert quarter_python["engineer_ids"] == ["E1", "E2"]
 
 
 def test_star_map_reports_team_skill_coverage_percentages() -> None:

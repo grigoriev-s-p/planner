@@ -186,6 +186,42 @@ class CatalogMergeTests(unittest.TestCase):
         self.repo.merge_tables({"tasks": [catalog_tables()["tasks"][0]]})
         self.assertIn("TASK-OLD", {row["task_id"] for row in self.repo.tables()["tasks"]})
 
+    def test_reset_all_data_clears_catalog_history_and_prevents_reseeding(self) -> None:
+        self.repo.save_approved_plan({"plan": {"tasks": []}})
+        self.repo.save_replan_workflow({"workflow_id": "workflow-1", "status": "DRAFT"})
+
+        deleted = self.repo.reset_all_data()
+
+        self.assertGreater(deleted["catalog_rows"], 0)
+        self.assertEqual(deleted["plan_snapshots"], 1)
+        self.assertEqual(deleted["replan_workflows"], 1)
+        self.assertTrue(all(not rows for rows in self.repo.tables().values()))
+        self.assertIsNone(self.repo.load_approved_plan())
+        self.assertIsNone(self.repo.latest_replan_workflow())
+
+        restarted = CatalogRepository(
+            self.repo.database_path, seed_tables=catalog_tables()
+        )
+        self.assertTrue(all(not rows for rows in restarted.tables().values()))
+
+    def test_reset_data_api_clears_persistent_and_transient_state(self) -> None:
+        client = TestClient(app)
+        draft = plan_drafts.create({"plan": {}, "tasks": []})
+        with patch("src.web.api.get_catalog_repository", return_value=self.repo):
+            response = client.post("/api/admin/reset-data")
+            empty_dashboard = client.get("/api/dashboard")
+            empty_catalog = client.get("/api/plan-constructor/catalog")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "reset")
+        self.assertTrue(all(not rows for rows in self.repo.tables().values()))
+        with self.assertRaises(KeyError):
+            plan_drafts.snapshot(draft["draft"]["id"])
+        self.assertEqual(empty_dashboard.status_code, 200, empty_dashboard.text)
+        self.assertEqual(empty_dashboard.json()["tasks"], [])
+        self.assertEqual(empty_catalog.status_code, 200, empty_catalog.text)
+        self.assertEqual(empty_catalog.json()["tasks"], [])
+
     def test_linked_data_conflict_is_reported_without_overwrite(self) -> None:
         result = self.repo.merge_tables({
             "task_role_effort": [

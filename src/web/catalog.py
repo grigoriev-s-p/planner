@@ -220,8 +220,44 @@ class CatalogRepository:
                     payload TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS catalog_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
+
+    def reset_all_data(self) -> dict[str, int]:
+        """Remove every mutable catalog and planning record atomically.
+
+        The bootstrap marker is deliberately retained.  Without it, the next
+        process start would interpret the empty catalog as a fresh install and
+        silently restore the processed seed dataset.
+        """
+
+        tables = (
+            "current_plan_snapshot",
+            "replan_workflows",
+            "plan_snapshots",
+            "catalog_row_overrides",
+            "entity_lifecycle",
+            "catalog_rows",
+        )
+        with self._connect() as connection:
+            deleted = {
+                table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in tables
+            }
+            for table in tables:
+                connection.execute(f"DELETE FROM {table}")
+            connection.execute(
+                "DELETE FROM sqlite_sequence WHERE name='plan_snapshots'"
+            )
+            connection.execute(
+                "INSERT INTO catalog_metadata(key,value) VALUES('bootstrap_state','reset') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
+        return deleted
 
     def save_approved_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Append an immutable approved snapshot and make it current."""
@@ -307,8 +343,16 @@ class CatalogRepository:
         self, tables: Mapping[str, Iterable[Mapping[str, Any]]]
     ) -> None:
         with self._connect() as connection:
+            bootstrap = connection.execute(
+                "SELECT value FROM catalog_metadata WHERE key='bootstrap_state'"
+            ).fetchone()
+            if bootstrap:
+                return
             count = connection.execute("SELECT COUNT(*) FROM catalog_rows").fetchone()[0]
             if count:
+                connection.execute(
+                    "INSERT INTO catalog_metadata(key,value) VALUES('bootstrap_state','seeded')"
+                )
                 return
             now = datetime.now(timezone.utc).isoformat()
             for table_name, rows in tables.items():
@@ -328,6 +372,9 @@ class CatalogRepository:
                         "VALUES(?,?,?,?)",
                         (table_name, row_key, _json_payload(row), now),
                     )
+            connection.execute(
+                "INSERT INTO catalog_metadata(key,value) VALUES('bootstrap_state','seeded')"
+            )
 
     def tables(self) -> dict[str, list[dict[str, Any]]]:
         result: dict[str, list[dict[str, Any]]] = {}

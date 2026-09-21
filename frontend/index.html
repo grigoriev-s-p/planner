@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260920-12">
+  <link rel="stylesheet" href="/styles.css?v=20260921-21">
 </head>
 <body>
   <div class="shell">
@@ -19,7 +19,6 @@
         <button type="button" class="nav-link" data-manager-nav data-page="engineers">Инженеры</button>
         <button type="button" class="nav-link" data-manager-nav data-page="teams">Команды</button>
         <button type="button" class="nav-link" data-manager-nav data-page="risks">Риски</button>
-        <button type="button" class="nav-link" data-manager-nav data-page="star">Звёздная карта</button>
         <button type="button" class="nav-link" data-engineer-nav data-page="engineer-sprint" hidden>Мой спринт</button>
         <button type="button" class="nav-link" data-engineer-nav data-page="engineer-quarter" hidden>Мой квартал</button>
         <button type="button" class="nav-link" data-engineer-nav data-page="engineer-tasks" hidden>Мои задачи</button>
@@ -72,6 +71,7 @@
 
       <section class="page active" id="page-current-plan" aria-labelledby="currentPlanTitle">
         <div class="page-intro planning-hero"><div><h1 id="currentPlanTitle">Текущий план</h1><p>Актуальный квартальный план по спринтам, инициативам и причинам решений.</p></div></div>
+        <aside class="plan-risk-summary" id="planRiskSummary" aria-live="polite"><div class="empty-state">Загружаем риски плана…</div></aside>
         <div class="panel planning-board-panel"><div class="panel-heading align-end"><div><h2>Квартал по спринтам</h2><p class="hint">Нажмите на задачу, чтобы открыть подробную информацию.</p></div><div class="legend"><span><i class="legend-mark blue"></i>Текущий спринт</span></div></div><div class="board-viewport"><div id="sprintBoard" class="sprint-board"></div></div></div>
         <section class="panel kpi-panel" aria-labelledby="kpiTitle"><div class="panel-heading"><div><h2 id="kpiTitle">Ожидаемый KPI плана</h2><p class="hint">Результат при успешном выполнении всех задач текущего квартального плана.</p></div><button class="kpi-details-toggle" id="toggleKpiDetails" type="button" data-toggle-kpi-details aria-expanded="false" aria-controls="kpiDetails">Подробнее <span aria-hidden="true">⌄</span></button></div><div id="planKpis"><div class="empty-state">Загружаем KPI…</div></div></section>
         <div id="kpiDetails" class="kpi-details" hidden>
@@ -81,6 +81,7 @@
           </div>
           <article class="panel outside-panel"><div class="panel-heading"><h2>Почему задачи не вошли в план</h2><span class="tag red">Сгруппировано по причине</span></div><div id="outsideTasks" class="excluded-groups"></div></article>
         </div>
+        <button class="reset-data-fab" id="openResetData" type="button">Сбросить данные</button>
       </section>
 
       <section class="page" id="page-current-sprint" aria-labelledby="currentSprintTitle">
@@ -88,10 +89,9 @@
         <div class="page-intro planning-hero current-sprint-hero"><div><div class="eyebrow">ТЕКУЩЕЕ СОСТОЯНИЕ</div><h1 id="currentSprintTitle">Текущий спринт</h1><p id="currentSprintIntro">Задачи, команды и запланированная загрузка.</p></div><div class="page-intro-icon">✓</div></div>
         <div id="currentSprintNotice"></div>
         <div id="currentSprintSummary" class="current-sprint-summary"></div>
-        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Задачи спринта</h2><p class="hint">Утверждённая работа текущего спринта и назначения сотрудников.</p></div><span class="tag" id="currentSprintTaskCount">0</span></div><div id="currentSprintTasks" class="current-sprint-task-list"></div></article>
+        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Задачи спринта</h2><p class="hint">ID, название, SP, Rung и команда. Откройте задачу для подробностей.</p></div><span class="tag" id="currentSprintTaskCount">0</span></div><div id="currentSprintTasks" class="current-sprint-task-list"></div></article>
         <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Загрузка команд</h2><p class="hint">Story Points и человеко-часы показаны раздельно.</p></div></div><div id="currentSprintTeamLoad" class="current-sprint-team-grid"></div></article>
         <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Помощь другим командам</h2><p class="hint">Только реальные cross-team назначения текущего спринта.</p></div></div><div id="currentSprintCrossTeam" class="current-sprint-help-list"></div></article>
-        <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Не в текущем спринте</h2><p class="hint">Задачи утверждённого квартального плана, запланированные позже.</p></div></div><div id="currentSprintLaterTasks" class="current-sprint-later-list"></div></article>
       </section>
 
       <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
@@ -192,21 +192,18 @@
         </div>
       </section>
 
-      <section class="page" id="page-risks" aria-labelledby="risksTitle">
-        <div class="page-intro"><div><div class="eyebrow">ФАКТОРЫ СРЫВА</div><h1 id="risksTitle">Риски</h1><p>Критические выходы за квартал, каскадные сдвиги зависимостей и конкретные ресурсные дефициты с числовым evidence.</p></div><div class="page-intro-icon">◇</div></div>
-        <div class="panel risk-toolbar">
-          <div class="risk-toolbar-left"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button></div></div>
-          <label class="risk-search-label" for="riskSearch"><span>Поиск задачи / риска</span><input id="riskSearch" class="risk-search-input" type="search" placeholder="Например, AI-303, дефицит, PRODF-7125"></label>
-        </div>
-        <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
-      </section>
-
       <section class="page" id="page-recalc" aria-labelledby="recalcTitle"><div class="page-intro"><div><div class="eyebrow">ПРОВЕРКА ИЗМЕНЕНИЙ</div><h1 id="recalcTitle">Изменения плана</h1><p id="recalcSubtitle">Проверьте изменения перед утверждением нового плана.</p></div><div class="page-intro-icon">↻</div></div><div id="recalcResult" hidden></div></section>
 
-      <section class="page" id="page-star" aria-labelledby="starTitle"><div class="page-intro"><div><div class="eyebrow">TEAM INTELLIGENCE</div><h1 id="starTitle">Звёздная карта</h1><p>Покрытие компетенций команды, кадровые риски и люди, от которых зависит результат.</p></div><div class="page-intro-icon">✳</div></div><div class="subnav" role="tablist" aria-label="Разделы звёздной карты"><button class="subtab active" data-star-tab="teams" type="button" role="tab" aria-selected="true">Карта команды</button><button class="subtab" data-star-tab="skills" type="button" role="tab" aria-selected="false">Навыки</button><button class="subtab" data-star-tab="distribution" type="button" role="tab" aria-selected="false">Распределение</button></div>
-        <div id="starTeams" class="star-view active"><div class="panel team-selector"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h2>Выберите команду</h2><p class="hint">Карта, фильтры и риски обновятся вместе.</p></div><div class="team-selector-control"><label for="starTeamSelect">Команда</label><select id="starTeamSelect" aria-label="Выбрать команду"></select></div></div><div id="teamMetrics" class="bf-summary"></div><div id="teamLifecycleActions"></div><div class="star-command-layout"><aside class="panel star-filter-panel"><h2 class="star-filter-heading">Фильтры</h2><label class="star-filter-field"><span>Инженер</span><input id="starEngineerSearch" class="star-plain-search" type="search" placeholder="Поиск по инженерам" autocomplete="off"></label><label class="star-quarter-toggle"><input id="starQuarterOnly" type="checkbox"><span>Только текущий квартал</span></label><div class="star-filter-section"><h3>Роли</h3><div id="starRoleFilters" class="star-check-list"></div></div><div class="star-filter-section"><h3>Легенда</h3><div class="star-legend"><span><i class="safe"></i>Достаточное покрытие</span><span><i class="warn"></i>Требует внимания</span><span><i class="critical"></i>Критично (BF = 1)</span></div></div></aside><article class="panel star-network-panel"><div class="panel-heading"><div><div class="eyebrow">КОМАНДА × КОМПЕТЕНЦИИ</div><h2 id="teamGraphTitle">Звёздная карта</h2><div id="starGraphMode" class="graph-mode-toggle" role="group" aria-label="Тип компетенции"><button type="button" data-star-mode="technology" class="active">Технологии</button><button type="button" data-star-mode="role">Роли</button></div></div><button class="info-tip" type="button" aria-label="Что такое Bus Factor" data-tooltip="Bus Factor показывает, сколько инженеров способны покрыть конкретную компетенцию. Чем меньше значение, тем выше зависимость команды от отдельных специалистов.">i</button></div><div id="teamGraph" class="team-graph" aria-live="polite"></div><div id="competencyMap" class="competency-map" aria-live="polite" hidden></div><div id="competencyDetail" class="competency-detail" aria-live="polite"></div></article><aside class="star-risk-column"><article class="panel bus-risk-panel"><div class="eyebrow">ПРИОРИТЕТЫ</div><h2>Bus Factor</h2><p class="hint">Компетенции с наибольшей зависимостью.</p><div id="busRiskList" class="bus-risk-list"></div></article></aside></div><div class="star-bottom-grid"><article class="panel selected-competency-panel" id="selectedCompetencyPanel" hidden></article><article class="panel star-team-profile-details"><div class="eyebrow">КОМПЕТЕНЦИИ С BF = 1</div><h2>Единичные носители технологий</h2><div id="starTeamProfileDetails"></div></article></div><div class="two-cols"><article class="panel"><div class="eyebrow">СОСТАВ</div><h2>Специалисты</h2><div class="table-scroll" id="teamMembers"></div></article><article class="panel"><div class="eyebrow">ЗАГРУЗКА · ЧАСЫ</div><h2>Доступность команды</h2><div id="teamWorkload"></div></article></div><article class="panel"><div class="eyebrow">ЗАДАЧИ И ИНИЦИАТИВЫ</div><h2>Текущая работа</h2><div id="teamTasks" class="table-scroll"></div></article></div>
-        <div id="starSkills" class="star-view"><article class="panel"><div class="panel-heading"><div><div class="eyebrow">ИНЖЕНЕРЫ × ТЕХНОЛОГИИ</div><h2>Карта компетенций</h2></div><span class="tag">Наличие, без выдуманных уровней</span></div><div class="filters three"><label>Команда<select id="skillTeam"></select></label><label>Роль<select id="skillRole"></select></label><label>Технология<select id="skillTech"></select></label></div><label class="check-label"><input type="checkbox" id="criticalOnly"> Только компетенции с Bus Factor = 1</label><p class="hint" id="heatScope"></p><div id="heatmap" class="table-scroll"></div><p class="hint">«Есть» означает наличие технологии в исходных данных. Числовые уровни навыка не создаются.</p></article></div>
-        <div id="starDistribution" class="star-view"><article class="panel"><div class="eyebrow">НЕСКОЛЬКО КОМАНД / ОДИН ИНЖЕНЕР</div><h2>Распределение сотрудников</h2><p class="hint">Доступность инженера показана отдельно для каждой команды и суммарно за спринт.</p><div id="distributionTable" class="table-scroll"></div></article></div>
+      <section class="page" id="page-risks" aria-labelledby="risksTitle"><div class="page-intro"><div><div class="eyebrow">TEAM INTELLIGENCE</div><h1 id="risksTitle">Риски</h1><p>Покрытие компетенций команд, риски текущего плана и люди, от которых зависит результат.</p></div><div class="page-intro-icon">◇</div></div><div class="subnav" role="tablist" aria-label="Разделы страницы рисков"><button class="subtab active" data-risk-hub-tab="risks" type="button" role="tab" aria-selected="true">Риски</button><button class="subtab" data-risk-hub-tab="teams" type="button" role="tab" aria-selected="false">Звёздная карта</button><button class="subtab" data-risk-hub-tab="skills" type="button" role="tab" aria-selected="false">Карта компетенций</button></div>
+        <div id="starTeams" class="star-view"><div class="panel team-selector"><div><h2>Выберите команду</h2><p class="hint">Карта, фильтры и риски обновятся вместе.</p></div><div class="team-selector-control"><div id="teamLifecycleActions"></div><label for="starTeamSelect">Команда</label><select id="starTeamSelect" aria-label="Выбрать команду"></select></div></div><div id="teamMetrics" class="bf-summary"></div><div class="star-command-layout"><aside class="panel star-filter-panel"><h2 class="star-filter-heading">Фильтры</h2><label class="star-filter-field"><span>Инженер</span><input id="starEngineerSearch" class="star-plain-search" type="search" placeholder="Поиск по инженерам" autocomplete="off"></label><label class="star-quarter-toggle"><input id="starQuarterOnly" type="checkbox"><span>Только текущий квартал</span></label><div class="star-filter-section"><h3>Роли</h3><div id="starRoleFilters" class="star-check-list"></div></div><div class="star-filter-section"><h3>Легенда</h3><div class="star-legend"><span><i class="safe"></i>Достаточное покрытие</span><span><i class="warn"></i>Требует внимания</span><span><i class="critical"></i>Критично (BF = 1)</span></div></div></aside><article class="panel star-network-panel"><div class="panel-heading"><div><h2 id="teamGraphTitle">Звёздная карта</h2><div id="starGraphMode" class="graph-mode-toggle" role="group" aria-label="Тип компетенции"><button type="button" data-star-mode="technology" class="active">Технологии</button><button type="button" data-star-mode="role">Роли</button></div></div><button class="info-tip" type="button" aria-label="Что такое Bus Factor" data-tooltip="Bus Factor показывает, сколько инженеров способны покрыть конкретную компетенцию. Чем меньше значение, тем выше зависимость команды от отдельных специалистов.">i</button></div><div id="teamGraph" class="team-graph" aria-live="polite"></div><div id="competencyMap" class="competency-map" aria-live="polite" hidden></div><div id="competencyDetail" class="competency-detail" aria-live="polite"></div></article><aside class="star-risk-column"><article class="panel bus-risk-panel"><div class="eyebrow">ПРИОРИТЕТЫ</div><h2>Bus Factor</h2><p class="hint">Компетенции с наибольшей зависимостью.</p><div id="busRiskList" class="bus-risk-list"></div></article></aside></div><div class="star-bottom-grid"><article class="panel selected-competency-panel" id="selectedCompetencyPanel" hidden></article><article class="panel star-team-profile-details"><div class="eyebrow">КОМПЕТЕНЦИИ С BF = 1</div><h2>Единичные носители технологий</h2><div id="starTeamProfileDetails"></div></article></div></div>
+        <div id="starSkills" class="star-view"><article class="panel"><div class="panel-heading"><div><h2>Карта компетенций</h2></div></div><div class="filters three"><label>Команда<select id="skillTeam"></select></label><label>Роль<select id="skillRole"></select></label><label>Технология<select id="skillTech"></select></label></div><label class="check-label"><input type="checkbox" id="criticalOnly"> Только компетенции с Bus Factor = 1</label><div id="heatmap" class="table-scroll"></div><p class="hint">«Есть» означает наличие технологии в исходных данных. Числовые уровни навыка не создаются.</p></article></div>
+        <div id="riskHubRisks" class="star-view active">
+          <div class="panel risk-toolbar">
+            <div class="risk-toolbar-left"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button></div></div>
+            <label class="risk-search-label" for="riskSearch"><span>Поиск задачи / риска</span><input id="riskSearch" class="risk-search-input" type="search" placeholder="Например, AI-303, дефицит, PRODF-7125"></label>
+          </div>
+          <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
+        </div>
       </section>
     </main>
     <dialog class="data-preflight-dialog" id="dataPreflightDialog" aria-labelledby="dataPreflightTitle">
@@ -253,11 +250,22 @@
         <div class="archive-actions"><button class="btn btn-outline" type="button" data-close-archive>Отмена</button><button class="btn btn-danger" id="confirmArchive" type="submit" disabled>Удалить</button></div>
       </form>
     </dialog>
+    <dialog class="reset-data-dialog" id="resetDataDialog" aria-labelledby="resetDataDialogTitle">
+      <form id="resetDataForm">
+        <button class="drawer-close" type="button" data-close-reset-data aria-label="Закрыть">×</button>
+        <div class="eyebrow">ПОЛНЫЙ СБРОС</div>
+        <h2 id="resetDataDialogTitle">Удалить все данные сайта?</h2>
+        <p>Будут безвозвратно удалены все задачи, команды, инженеры, планы, история спринтов и серверные черновики. Файлы датасетов на диске останутся без изменений.</p>
+        <label class="reset-data-confirm"><input id="resetDataConfirm" type="checkbox"><span>Я понимаю, что отменить сброс нельзя</span></label>
+        <div id="resetDataError" class="constructor-errors" hidden></div>
+        <div class="archive-actions"><button class="btn btn-outline" type="button" data-close-reset-data>Отмена</button><button class="btn btn-danger" id="confirmResetData" type="submit" disabled>Удалить все данные</button></div>
+      </form>
+    </dialog>
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260919-9"></script>
+  <script src="/api.js?v=20260921-10"></script>
   <script src="/constructor.js?v=20260919-9"></script>
-  <script src="/app.js?v=20260921-1"></script>
+  <script src="/app.js?v=20260921-10"></script>
 </body>
 </html>
