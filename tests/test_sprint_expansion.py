@@ -121,6 +121,25 @@ def test_ignore_keeps_approved_unchanged_but_persists_next_sprint_baseline(tmp_p
     assert saved["_planning_state"]["sprint_baselines"]["2"]["planned_sp"] == 0
 
 
+def test_approve_without_selected_additions_keeps_approved_plan_unchanged(tmp_path, monkeypatch):
+    approved, tables = _approved()
+    repository = CatalogRepository(tmp_path / "catalog.sqlite3", seed_tables=tables)
+    store = PlanDraftStore(repository_provider=lambda: repository)
+    store.replace_approved(approved)
+    monkeypatch.setattr(api, "get_catalog_repository", lambda: repository)
+    monkeypatch.setattr(api, "plan_drafts", store)
+
+    api.refresh_sprint_expansion()
+    before = repository.load_approved_plan()
+    result = api.approve_sprint_expansion()
+
+    assert result["proposal"]["status"] == "APPROVED"
+    assert result["proposal"]["selected_ids"] == []
+    assert repository.load_approved_plan() == before
+    assert len(repository.approved_plan_history()) == 1
+    assert result["proposal"]["sprint_baseline"]["source_revision"] == 1
+
+
 def test_reserved_sp_keeps_existing_future_task_and_pushes_addition_later():
     tables = _tables()
     tables["tasks"] = [{**tables["tasks"][0], "story_points": 7}, tables["tasks"][1]]

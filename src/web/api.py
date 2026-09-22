@@ -3009,7 +3009,19 @@ def approve_sprint_expansion() -> dict:
         proposal = _expansion_proposal(require_open=True)
         selected_ids = _selected_expansion_task_ids(proposal)
         if not selected_ids:
-            raise RuntimeError("Сначала выберите хотя бы одну рекомендацию или пропустите предложения.")
+            approved = plan_drafts.approved()
+            candidate = freeze_sprint_baseline(
+                deepcopy(approved), int(proposal["triggered_by_sprint"]) + 1)
+            sprint = str(int(proposal["triggered_by_sprint"]) + 1)
+            proposal["sprint_baseline"] = deepcopy(
+                candidate["_planning_state"]["sprint_baselines"][sprint])
+            proposal["sprint_baseline"]["source_revision"] = (
+                approved.get("approved_snapshot") or {}).get("revision")
+            proposal["status"] = "APPROVED"
+            proposal["selected_ids"] = []
+            proposal["rejected_ids"] = []
+            updated = get_catalog_repository().save_replan_workflow(proposal)
+            return {"approved": approved, "proposal": updated}
         approved = plan_drafts.approved()
         repository = get_catalog_repository()
         catalog = repository.active_planning_tables()
