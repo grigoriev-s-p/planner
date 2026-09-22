@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260922-10">
+  <link rel="stylesheet" href="/styles.css?v=20260922-11">
 </head>
 <body>
   <div class="shell">
@@ -290,9 +290,10 @@
       </form>
     </dialog>
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
+    <div class="global-loading-indicator" id="globalLoadingIndicator" popover="manual" role="status" aria-live="polite" aria-label="Выполняется загрузка"><span class="global-loading-spinner" aria-hidden="true"></span><span class="visually-hidden">Выполняется загрузка</span></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260921-17"></script>
+  <script src="/api.js?v=20260922-18"></script>
   <script src="/constructor.js?v=20260922-32"></script>
   <script src="/app.js?v=20260922-38"></script>
 </body>
