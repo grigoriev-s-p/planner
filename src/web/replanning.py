@@ -92,6 +92,11 @@ def _preferred_engineer_hours_by_task(
     carry_over_task_ids = carry_over_task_ids or set()
     result: dict[str, dict[str, float]] = {}
     for task_id, task in tasks.items():
+        # For an unfinished task only the explicitly submitted positive
+        # carry-over is a continuity preference.  Copying the old allocation
+        # would keep people whose contribution has remaining=0 attached.
+        if task_id in carry_over_task_ids:
+            continue
         by_engineer: dict[str, float] = defaultdict(float)
         for row in task.get("allocations") or []:
             sprint = int(row.get("sprint") or 0)
@@ -462,6 +467,7 @@ def build_remaining_horizon_plan(
     approved: dict[str, Any],
     sprint_number: int,
     results: list[dict[str, Any]],
+    availability_constraints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Freeze closed sprints and rebuild only the open horizon."""
 
@@ -469,6 +475,8 @@ def build_remaining_horizon_plan(
     tables = deepcopy(state.get("tables") or {})
     if not tables:
         raise ValueError("У утверждённого плана отсутствует planning context.")
+    if availability_constraints is not None:
+        tables["engineer_availability"] = deepcopy(availability_constraints)
     completed_through = int(state.get("completed_through_sprint") or 0)
     if sprint_number != completed_through + 1:
         raise ValueError("Спринты должны закрываться последовательно.")
@@ -528,11 +536,28 @@ def build_remaining_horizon_plan(
         if task_id in actual_completed:
             continue
         if task_id in result_by_id:
-            remaining_by_task[task_id] = {
-                str(role): float(hours)
-                for role, hours in result_by_id[task_id]["remaining_role_hours"].items()
-                if float(hours) > 0
-            }
+            engineer_work = result_by_id[task_id].get("remaining_engineer_work") or []
+            if engineer_work:
+                role_totals: dict[str, float] = defaultdict(float)
+                for item in engineer_work:
+                    hours = float(item.get("remaining_hours") or 0.0)
+                    role = str(item.get("role") or "")
+                    if role and hours > 0:
+                        role_totals[role] += hours
+                for role, hours in (
+                    result_by_id[task_id].get("remaining_role_hours") or {}
+                ).items():
+                    role_totals[str(role)] = max(
+                        role_totals.get(str(role), 0.0), float(hours or 0.0)
+                    )
+                remaining_by_task[task_id] = dict(role_totals)
+                result_by_id[task_id]["remaining_role_hours"] = dict(role_totals)
+            else:
+                remaining_by_task[task_id] = {
+                    str(role): float(hours)
+                    for role, hours in result_by_id[task_id]["remaining_role_hours"].items()
+                    if float(hours) > 0
+                }
         else:
             derived = _remaining_from_plan(task, sprint_number)
             if derived:
@@ -543,9 +568,9 @@ def build_remaining_horizon_plan(
         remaining_by_task,
         current_tasks,
     )
-    # Hours and SP describe the same residual work, but SP entered by the
-    # manager is authoritative for KPI and for the next planner run.  Keep the
-    # legacy hours-derived value only for older clients that do not send SP.
+    # SP always follows the immutable original estimate and denominator.
+    # A client-provided value is display metadata only and cannot change the
+    # conservation rule used by replanning.
     for task_id, roles in remaining_by_task.items():
         task = current_tasks.get(task_id) or {}
         starting_sp = float(
@@ -553,21 +578,7 @@ def build_remaining_horizon_plan(
             if task.get("remaining_story_points") is not None
             else task.get("story_points") or 0.0
         )
-        row = result_by_id.get(task_id)
-        explicit_sp = row.get("remaining_story_points") if row else None
-        if explicit_sp is not None:
-            remaining_sp = float(explicit_sp)
-            if remaining_sp <= 0:
-                raise ValueError(
-                    f"Для задачи {task_id} укажите положительный остаток SP."
-                )
-            if remaining_sp > starting_sp + 1e-9:
-                raise ValueError(
-                    f"Остаток {remaining_sp:g} SP для {task_id} "
-                    f"превышает текущий объём {starting_sp:g} SP."
-                )
-        else:
-            remaining_sp = min(remaining_story_points.get(task_id, 0.0), starting_sp)
+        remaining_sp = min(remaining_story_points.get(task_id, 0.0), starting_sp)
         remaining_story_points[task_id] = remaining_sp
 
     # Persist the conservation equation for audit and frozen sprint history:
@@ -604,10 +615,37 @@ def build_remaining_horizon_plan(
             for role, hours in roles.items()
         )
 
-    carry_over = {
-        task_id: row.get("remaining_engineer_allocations") or {}
+    carry_over: dict[str, dict[str, float]] = {}
+    for task_id, row in result_by_id.items():
+        if row.get("task_completed"):
+            continue
+        by_engineer: dict[str, float] = defaultdict(float)
+        for engineer_id, hours in (row.get("remaining_engineer_allocations") or {}).items():
+            if float(hours) > 0:
+                by_engineer[str(engineer_id)] += float(hours)
+        if not by_engineer:
+            for item in row.get("remaining_engineer_work") or []:
+                engineer_id = str(item.get("engineer_id") or "")
+                hours = float(item.get("remaining_hours") or 0.0)
+                if engineer_id and hours > 0:
+                    by_engineer[engineer_id] += hours
+        if by_engineer:
+            carry_over[task_id] = dict(by_engineer)
+    selected_replacements = {
+        task_id: {
+            str(engineer_id): float(hours)
+            for engineer_id, hours in (
+                row.get("replacement_engineer_allocations") or {}
+            ).items()
+            if float(hours) > 0
+        }
         for task_id, row in result_by_id.items()
-        if not row.get("task_completed") and row.get("remaining_engineer_allocations")
+        if not row.get("task_completed") and row.get("replacement_engineer_allocations")
+    }
+    moved_task_ids = {
+        task_id
+        for task_id, row in result_by_id.items()
+        if not row.get("task_completed") and row.get("move_remaining_task")
     }
     carry_over_task_ids = {
         task_id for task_id, row in result_by_id.items()
@@ -653,6 +691,15 @@ def build_remaining_horizon_plan(
     preferred_engineer_hours = _preferred_engineer_hours_by_task(
         current_tasks, sprint_number, carry_over_task_ids
     )
+    preferred_engineer_hours.update(selected_replacements)
+    planning_carry_over = {
+        task_id: selected_replacements.get(task_id, allocations)
+        for task_id, allocations in carry_over.items()
+    }
+    # A replacement selected by the user may come from another team.  The
+    # selected engineer is still validated after planning and task ownership
+    # remains unchanged.
+    cross_team_tasks.update(selected_replacements)
 
     if sprint_number < 6:
         candidate = deepcopy(PlanningAPIService.from_tables(
@@ -669,13 +716,16 @@ def build_remaining_horizon_plan(
                 "unavailable_engineer_ids_by_sprint": {
                     sprint_number + 1: unavailable_next
                 },
-                "carry_over_engineer_hours_by_task": carry_over,
+                "carry_over_engineer_hours_by_task": planning_carry_over,
                 "carry_over_task_ids": carry_over_task_ids,
                 "prior_task_ownership_by_task": prior_ownership,
                 "story_points_override_by_task": remaining_story_points,
                 "original_total_required_hours_by_task": original_total_hours,
                 "preferred_engineer_hours_by_task": preferred_engineer_hours,
                 "reference_plan_by_task": reference_plan,
+                "earliest_sprint_by_task": {
+                    task_id: sprint_number + 2 for task_id in moved_task_ids
+                },
             },
         ).dashboard)
     else:
@@ -708,6 +758,23 @@ def build_remaining_horizon_plan(
     completed_ids = set(actual_completed)
     candidate["tasks"] = [row for row in candidate["tasks"] if row["task_id"] not in completed_ids]
     new_tasks = _task_map(candidate)
+    for task_id, replacements in selected_replacements.items():
+        task = new_tasks.get(task_id) or {}
+        next_sprint_rows = [
+            row for row in task.get("allocations") or []
+            if int(row.get("sprint") or 0) == sprint_number + 1
+        ]
+        for engineer_id, required_hours in replacements.items():
+            assigned = sum(
+                float(row.get("allocated_hours") or 0.0)
+                for row in next_sprint_rows
+                if str(row.get("engineer_id") or "") == engineer_id
+            )
+            if assigned + 1e-9 < required_hours:
+                raise ValueError(
+                    f"Выбранная замена {engineer_id} не может принять "
+                    f"{required_hours:g} ч задачи {task_id} в Sprint {sprint_number + 1}."
+                )
     candidate["tasks"] = [
         _merge_task(current_tasks.get(task_id), task, sprint_number)
         for task_id, task in new_tasks.items()

@@ -29,6 +29,11 @@ window.postcodeApi = (() => {
     closeSprint: (payload) => request('/api/replanning/close-sprint', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     }),
+    getEngineerAvailability: () => request('/api/engineers/availability'),
+    updateEngineerAvailability: (updates) => request('/api/engineers/availability', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({updates}),
+    }),
+    getReplacementCandidates: (taskId, engineerId, sprint, role = '', hours = 0) => request(`/api/replanning/replacement-candidates?task_id=${encodeURIComponent(taskId)}&engineer_id=${encodeURIComponent(engineerId)}&sprint=${encodeURIComponent(sprint)}&role=${encodeURIComponent(role)}&hours=${encodeURIComponent(hours)}`),
     getReplanDraft: () => request('/api/replanning/draft'),
     retryReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/retry`, {method: 'POST'}),
     approveReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/approve`, {method: 'POST'}),

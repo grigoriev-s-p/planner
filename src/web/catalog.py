@@ -232,6 +232,17 @@ class CatalogRepository:
                     payload TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS engineer_availability (
+                    engineer_id TEXT NOT NULL,
+                    sprint INTEGER NOT NULL CHECK (sprint BETWEEN 1 AND 6),
+                    availability_rate REAL NOT NULL CHECK (availability_rate IN (0, 0.5, 1)),
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (engineer_id, sprint, source_type, source_id)
+                );
                 CREATE TABLE IF NOT EXISTS catalog_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -251,6 +262,7 @@ class CatalogRepository:
             "current_plan_snapshot",
             "replan_workflows",
             "plan_snapshots",
+            "engineer_availability",
             "catalog_row_overrides",
             "entity_lifecycle",
             "catalog_rows",
@@ -270,6 +282,55 @@ class CatalogRepository:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
         return deleted
+
+    def availability_constraints(self) -> list[dict[str, Any]]:
+        """Load all capacity constraints once for an in-memory planning run."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT engineer_id,sprint,availability_rate,source_type,source_id,"
+                "reason,created_at,updated_at FROM engineer_availability "
+                "ORDER BY sprint,engineer_id,source_type,source_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_availability_constraints(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Upsert future constraints atomically; rate 1 resets a source override."""
+
+        from src.planning.availability import validate_availability_rate
+
+        prepared = []
+        now = datetime.now(timezone.utc).isoformat()
+        for source in rows:
+            engineer_id = _text(source.get("engineer_id"))
+            sprint = int(source.get("sprint") or 0)
+            rate = validate_availability_rate(source.get("availability_rate"))
+            source_type = _text(source.get("source_type")) or "MANUAL"
+            source_id = _text(source.get("source_id")) or "manual"
+            if not engineer_id or not 1 <= sprint <= 6:
+                raise ValueError("engineer_id and sprint 1..6 are required")
+            prepared.append((engineer_id, sprint, rate, source_type, source_id,
+                             _text(source.get("reason")) or None))
+        with self._connect() as connection:
+            for engineer_id, sprint, rate, source_type, source_id, reason in prepared:
+                if rate == 1.0:
+                    connection.execute(
+                        "DELETE FROM engineer_availability WHERE engineer_id=? AND sprint=? "
+                        "AND source_type=? AND source_id=?",
+                        (engineer_id, sprint, source_type, source_id),
+                    )
+                    continue
+                connection.execute(
+                    "INSERT INTO engineer_availability(engineer_id,sprint,availability_rate,"
+                    "source_type,source_id,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(engineer_id,sprint,source_type,source_id) DO UPDATE SET "
+                    "availability_rate=excluded.availability_rate,reason=excluded.reason,"
+                    "updated_at=excluded.updated_at",
+                    (engineer_id, sprint, rate, source_type, source_id, reason, now, now),
+                )
+        return self.availability_constraints()
 
     def save_approved_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Append an immutable approved snapshot and make it current."""
@@ -1287,6 +1348,10 @@ class CatalogRepository:
             row for row in tables["task_dependencies"]
             if _text(row.get("blocked_task_id")) in active_task_ids
             and _text(row.get("blocking_task_id")) in planning_task_ids
+        ]
+        result["engineer_availability"] = [
+            row for row in self.availability_constraints()
+            if _text(row.get("engineer_id")) in active_engineer_ids
         ]
         return result
 

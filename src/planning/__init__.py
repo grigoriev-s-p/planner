@@ -1,5 +1,12 @@
 """Resource checks and deterministic quarterly baseline planning."""
 
+from .availability import (
+    ALLOWED_AVAILABILITY_RATES,
+    availability_rate_index,
+    effective_capacity_hours,
+    validate_availability_rate,
+)
+
 from .eligibility import (
     EligibilityContext,
     EligibilityReason,
@@ -51,6 +58,7 @@ from .scoring import (
 
 __all__ = [
     "BaselineQuarterPlanner",
+    "ALLOWED_AVAILABILITY_RATES",
     "EligibilityContext",
     "DecisionReason",
     "ExplanationStatus",
@@ -82,6 +90,9 @@ __all__ = [
     "InitiativePlanningExplanation",
     "TaskScore",
     "build_quarter_plan",
+    "availability_rate_index",
+    "effective_capacity_hours",
+    "validate_availability_rate",
     "calculate_task_score",
     "check_task_eligibility",
     "check_task_feasibility",

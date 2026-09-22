@@ -247,6 +247,7 @@ class BaselineQuarterPlanner:
         start_sprint: int = 1,
         actual_completed_tasks: dict[str, int] | None = None,
         unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
+        engineer_availability_rates_by_sprint: Mapping[int, Mapping[str, float]] | None = None,
         carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
         carry_over_task_ids: set[str] | None = None,
         prior_task_ownership_by_task: Mapping[str, Any] | None = None,
@@ -254,6 +255,7 @@ class BaselineQuarterPlanner:
         original_total_required_hours_by_task: Mapping[str, float] | None = None,
         preferred_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
         reference_plan_by_task: Mapping[str, Mapping[str, Any]] | None = None,
+        earliest_sprint_by_task: Mapping[str, int] | None = None,
     ):
         self.context = context
         self.feasibility = FeasibilityService(context)
@@ -272,6 +274,17 @@ class BaselineQuarterPlanner:
             int(sprint): {str(engineer_id) for engineer_id in engineer_ids}
             for sprint, engineer_ids in (unavailable_engineer_ids_by_sprint or {}).items()
         }
+        self.engineer_availability_rates_by_sprint = {
+            int(sprint): {
+                str(engineer_id): float(rate)
+                for engineer_id, rate in rates.items()
+            }
+            for sprint, rates in (engineer_availability_rates_by_sprint or {}).items()
+        }
+        for sprint, engineer_ids in self.unavailable_engineer_ids_by_sprint.items():
+            rates = self.engineer_availability_rates_by_sprint.setdefault(sprint, {})
+            for engineer_id in engineer_ids:
+                rates[engineer_id] = 0.0
         self.carry_over_engineer_hours_by_task = {
             str(task_id): {
                 str(engineer_id): max(float(hours), 0.0)
@@ -303,6 +316,10 @@ class BaselineQuarterPlanner:
         self.reference_plan_by_task = {
             str(task_id): dict(value)
             for task_id, value in (reference_plan_by_task or {}).items()
+        }
+        self.earliest_sprint_by_task = {
+            str(task_id): max(self.start_sprint, min(int(sprint), SPRINT_COUNT + 1))
+            for task_id, sprint in (earliest_sprint_by_task or {}).items()
         }
         self.tasks = {
             task_id: dict(task)
@@ -584,7 +601,7 @@ class BaselineQuarterPlanner:
         completed_tasks: dict[str, int],
     ) -> tuple[int | None, tuple[FeasibilityReason, ...], tuple[str, ...]]:
         blockers = self._incoming_blockers(task_id)
-        earliest = self.start_sprint
+        earliest = self.earliest_sprint_by_task.get(task_id, self.start_sprint)
         reasons: list[FeasibilityReason] = []
         for blocker in blockers:
             timing = dependency_timing(
@@ -756,6 +773,9 @@ class BaselineQuarterPlanner:
                         sprint_number, set()
                     ),
                     preferred_engineer_ids=set(preferred_engineer_hours),
+                    availability_rates=self.engineer_availability_rates_by_sprint.get(
+                        sprint_number, {}
+                    ),
                 )
                 if not feasibility.can_start:
                     attempts.append(
@@ -1798,6 +1818,7 @@ def build_quarter_plan(
     start_sprint: int = 1,
     actual_completed_tasks: dict[str, int] | None = None,
     unavailable_engineer_ids_by_sprint: Mapping[int, set[str]] | None = None,
+    engineer_availability_rates_by_sprint: Mapping[int, Mapping[str, float]] | None = None,
     carry_over_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
     carry_over_task_ids: set[str] | None = None,
     prior_task_ownership_by_task: Mapping[str, Any] | None = None,
@@ -1805,6 +1826,7 @@ def build_quarter_plan(
     original_total_required_hours_by_task: Mapping[str, float] | None = None,
     preferred_engineer_hours_by_task: Mapping[str, Mapping[str, float]] | None = None,
     reference_plan_by_task: Mapping[str, Mapping[str, Any]] | None = None,
+    earliest_sprint_by_task: Mapping[str, int] | None = None,
 ) -> QuarterPlan:
     """Build the scored plan; resource state and atomic rollback are automatic."""
 
@@ -1818,6 +1840,7 @@ def build_quarter_plan(
         start_sprint=start_sprint,
         actual_completed_tasks=actual_completed_tasks,
         unavailable_engineer_ids_by_sprint=unavailable_engineer_ids_by_sprint,
+        engineer_availability_rates_by_sprint=engineer_availability_rates_by_sprint,
         carry_over_engineer_hours_by_task=carry_over_engineer_hours_by_task,
         carry_over_task_ids=carry_over_task_ids,
         prior_task_ownership_by_task=prior_task_ownership_by_task,
@@ -1825,4 +1848,5 @@ def build_quarter_plan(
         original_total_required_hours_by_task=original_total_required_hours_by_task,
         preferred_engineer_hours_by_task=preferred_engineer_hours_by_task,
         reference_plan_by_task=reference_plan_by_task,
+        earliest_sprint_by_task=earliest_sprint_by_task,
     ).plan()

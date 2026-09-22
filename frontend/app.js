@@ -18,6 +18,8 @@ const state = {
   teamSortKey: 'name', teamSortDirection: 'asc',
   developmentTeam: 'all', developmentRole: 'all', developmentSkill: 'all',
   developmentLoading: false, developmentError: null,
+  selectedTrainingCandidates: {}, expandedTrainingCandidateSelectors: {},
+  availabilityVisibleEngineers: {page: new Set(), close: new Set()},
 };
 
 const data = {
@@ -28,6 +30,7 @@ const data = {
   replanWorkflow: null,
   engineerWorkspace: null, engineerCatalog: [],
   development: null,
+  availability: null,
 };
 
 const starViewport = {
@@ -446,6 +449,7 @@ function show(page, historyMode = 'push') {
   $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === ({'task-detail': 'tasks', 'team-detail': 'teams', 'engineer-detail': 'engineers'}[page] || page)));
   closeEmployee();
   renderPage(page);
+  if (page === 'current-sprint') loadFutureAvailability();
   if (historyMode) window.history[historyMode === 'replace' ? 'replaceState' : 'pushState']({page, taskId: state.taskId}, '', pageLocation(page));
   window.scrollTo({top: 0, behavior: 'instant'});
 }
@@ -829,25 +833,43 @@ function developmentTaskCountLabel(value) {
   return `${number(count)} ЗАДАЧ`;
 }
 
-function developmentCandidate(candidate, primary = false) {
-  return `<article class="development-candidate ${primary ? 'primary' : ''} ${candidate.quarter_unassigned ? 'unassigned' : ''}"><div><div class="development-candidate-name"><button type="button" class="table-button" data-open-employee="${attr(candidate.engineer_id)}">${escapeHtml(candidate.name || candidate.engineer_id)} ↗</button>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</div><span>${escapeHtml((candidate.roles || []).join(', ') || 'Роль не указана')} · ${escapeHtml(candidate.grade || 'Grade не указан')}</span></div><b>${number(candidate.score_percent)}%</b><ul>${(candidate.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></article>`;
+function developmentCandidateMeta(candidate) {
+  return `${escapeHtml((candidate.roles || []).join(', ') || 'Роль не указана')} · ${escapeHtml(candidate.grade || 'Grade не указан')}`;
+}
+
+function developmentSelectedCandidate(candidate) {
+  return `<span class="development-selected-candidate-copy"><b>${escapeHtml(candidate.engineer_id)}</b><small>${developmentCandidateMeta(candidate)}</small>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</span><strong>${number(candidate.score_percent)}%</strong><i aria-hidden="true">⌄</i>`;
+}
+
+function developmentCandidateSelector(item, candidates) {
+  const key = String(item.recommendation_id || `${item.team_id}-${item.deficit?.type}-${developmentDeficitTitle(item)}`);
+  if (!candidates.length) {
+    return `<section class="development-training-choice"><span>Кандидат на дообучение</span><div class="development-no-candidates">Подходящих кандидатов нет</div><button class="btn btn-blue development-train-button" type="button" disabled>Дообучить</button></section>`;
+  }
+  const selectedId = candidates.some((candidate) => candidate.engineer_id === state.selectedTrainingCandidates[key])
+    ? state.selectedTrainingCandidates[key]
+    : candidates[0].engineer_id;
+  state.selectedTrainingCandidates[key] = selectedId;
+  const selected = candidates.find((candidate) => candidate.engineer_id === selectedId) || candidates[0];
+  const expanded = Boolean(state.expandedTrainingCandidateSelectors[key]);
+  const listId = `training-candidates-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const rows = candidates.map((candidate) => {
+    const active = candidate.engineer_id === selectedId;
+    return `<button class="development-candidate-option ${active ? 'selected' : ''}" type="button" role="radio" aria-checked="${active}" data-select-training-candidate="${attr(candidate.engineer_id)}" data-training-recommendation="${attr(key)}"><span class="development-candidate-radio" aria-hidden="true"></span><span><b>${escapeHtml(candidate.engineer_id)}</b><small>${developmentCandidateMeta(candidate)}</small>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</span><strong>${number(candidate.score_percent)}%</strong></button>`;
+  }).join('');
+  return `<section class="development-training-choice" data-training-selector="${attr(key)}"><span>Кандидат на дообучение</span><button class="development-candidate-selector-toggle" type="button" data-toggle-training-candidates="${attr(key)}" aria-expanded="${expanded}" aria-controls="${attr(listId)}">${developmentSelectedCandidate(selected)}</button><div class="development-candidate-options" id="${attr(listId)}" role="radiogroup" ${expanded ? '' : 'hidden'}>${rows}</div><button class="btn btn-blue development-train-button" type="button" data-train-selected-candidate="${attr(key)}">Дообучить</button></section>`;
 }
 
 function developmentRecommendationCard(item) {
-  const action = item.recommendation?.primary_action;
   const candidates = item.recommendation?.candidates || [];
   const deficit = item.deficit || {};
-  const taskLinks = (item.tasks || []).map((task) => `<button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}${task.title && task.title !== task.task_id ? ` · ${escapeHtml(task.title)}` : ''}</button>`).join('');
+  const taskLinks = (item.tasks || []).map((task) => `<button type="button" class="development-task-id" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}</button>`).join('');
   const planCritical = item.category === 'PLAN_CRITICAL';
   const busFactor = deficit.bus_factor == null ? '' : `<div><span>Bus Factor</span><b>BF ${number(deficit.bus_factor)}</b></div>`;
-  const hire = `<div class="development-hire-profile"><span>Альтернатива: профиль для найма</span><b>${escapeHtml(item.recommendation?.hire_profile?.label || 'Дополнительный специалист')}</b><p>Количество специалистов и влияние на план не прогнозируются — план пересчитывается после фактического изменения состава.</p></div>`;
-  const primary = candidates.length
-    ? `<div class="development-primary"><span>Приоритетный кандидат на дообучение</span>${developmentCandidate(candidates[0], true)}</div>`
-    : '<div class="empty-state">Подходящих кандидатов на дообучение в команде не найдено.</div>';
-  const alternatives = candidates.length > 1 ? `<details class="development-alternatives"><summary>Остальные кандидаты (${number(candidates.length - 1)})</summary>${candidates.slice(1).map((candidate) => developmentCandidate(candidate)).join('')}</details>` : '';
+  const candidateSelector = developmentCandidateSelector(item, candidates);
   const title = developmentDeficitTitle(item);
   const scopeLabel = item.scope === 'company' ? 'Вся компания' : item.team_id;
-  return `<details class="panel development-card ${String(item.severity || '').toLowerCase()} ${planCritical ? 'plan-critical' : ''}"><summary class="development-card-summary" aria-label="Открыть рекомендацию: ${attr(title)}"><div class="development-card-summary-copy"><span>${escapeHtml(scopeLabel)}</span><h2>${escapeHtml(title)}</h2></div><div class="development-card-summary-status"><span class="development-action upskill_or_hire">${developmentActionLabel(action)}</span><i aria-hidden="true">⌄</i></div></summary><div class="development-card-body"><div class="eyebrow">${deficit.type === 'ROLE' ? 'РОЛЬ' : 'НАВЫК'} · ${developmentTaskCountLabel(item.priority?.covered_task_count || (item.tasks || []).length)}</div><div class="development-facts">${busFactor}</div><div class="development-task-demand"><span>${planCritical ? 'Незапланированные задачи с этим требованием' : 'Задачи квартала с этим требованием'}</span><div>${taskLinks || '<span class="muted">Связанные задачи не определены</span>'}</div></div>${primary}${alternatives}${hire}</div></details>`;
+  return `<details class="panel development-card ${String(item.severity || '').toLowerCase()} ${planCritical ? 'plan-critical' : ''}"><summary class="development-card-summary" aria-label="Открыть рекомендацию: ${attr(title)}"><div class="development-card-summary-copy"><span>${escapeHtml(scopeLabel)}</span><h2>${escapeHtml(title)}</h2></div><div class="development-card-summary-status"><span class="development-action upskill_or_hire">ДООБУЧИТЬ ИЛИ НАНЯТЬ</span><i aria-hidden="true">⌄</i></div></summary><div class="development-card-body"><div class="eyebrow">${deficit.type === 'ROLE' ? 'РОЛЬ' : 'НАВЫК'} · ${developmentTaskCountLabel(item.priority?.covered_task_count || (item.tasks || []).length)}</div><div class="development-facts">${busFactor}</div><div class="development-task-demand"><span>${planCritical ? 'Незапланированные задачи с этим требованием' : 'Задачи квартала с этим требованием'}</span><div class="development-task-id-list">${taskLinks || '<span class="muted">Связанные задачи не определены</span>'}</div></div>${candidateSelector}</div></details>`;
 }
 
 function developmentCategorySection(title, description, items, critical = false) {
@@ -1449,11 +1471,13 @@ function renderReplanWorkflow(workflow) {
   }
   const diff = workflow.diff || {};
   const changes = diff.affected_elements || diff.changed_tasks || [];
+  const availabilityChanges = diff.availability_changes || [];
   const isQuarterClose = workflow.kind === 'QUARTER_CLOSE_REVIEW';
-  const content = changes.length
-    ? `<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
+  const availabilityContent = availabilityChanges.length ? `<div class="replan-change-list">${availabilityChanges.map((change) => `<article class="replan-change-card"><div class="replan-change-card-heading"><div><b>${escapeHtml(change.engineer_id)}</b><h3>Доступность · Sprint ${number(change.sprint)}</h3></div><div class="replan-change-tags"><span>Изменена доступность</span></div></div><div class="replan-change-details"><div class="replan-detail"><span>Доля capacity</span><b>${percent(Number(change.before_rate) * 100)} → ${percent(Number(change.after_rate) * 100)}</b></div></div></article>`).join('')}</div>` : '';
+  const content = changes.length || availabilityChanges.length
+    ? `${availabilityContent}<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
     : '<div class="replan-no-changes"><b>Изменений в плане не требуется</b><p>Фактический результат сохранён, а оставшийся план бизнес-эквивалентен утверждённому.</p></div>';
-  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} сохранён как черновик. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length ? 'Утвердить изменения' : 'Подтвердить завершение спринта'}</button></div></article>`;
+  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length || availabilityChanges.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} сохранён как черновик. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length || availabilityChanges.length ? 'Утвердить изменения' : 'Подтвердить завершение спринта'}</button></div></article>`;
 }
 
 function editSprintActual(workflowId) {
@@ -1575,7 +1599,7 @@ function renderCurrentSprint() {
     const team = teamBy(teamId);
     const sp = teamSprintResource(teamId, sprint);
     const usedHours = Number(team.source_used_hours_by_sprint?.[String(sprint)] || 0);
-    const capacityHours = Number(team.member_capacity_hours || 0);
+    const capacityHours = Number(team.member_capacity_hours_by_sprint?.[String(sprint)] ?? team.member_capacity_hours ?? 0);
     const roleHours = {};
     allocations.filter((row) => row.source_team_id === teamId).forEach((row) => { roleHours[row.role] = Number(roleHours[row.role] || 0) + Number(row.allocated_hours || 0); });
     return `<section class="current-sprint-team-card"><h3><button class="table-button" type="button" data-open-team="${attr(teamId)}">${escapeHtml(team.name || teamId)} ↗</button></h3><div class="team-load-line"><span>SP команды</span><b>${number(sp.used)} / ${number(sp.capacity)} SP</b></div>${meter(sp.used, sp.capacity)}<div class="team-load-line"><span>Часы сотрудников</span><b>${number(usedHours)} / ${number(capacityHours)} ч</b></div>${meter(usedHours, capacityHours)}<div class="team-role-load">${Object.entries(roleHours).map(([role, hours]) => `<span><b>${escapeHtml(role)}</b>${number(hours)} ч запланировано</span>`).join('') || '<span>Назначений по ролям нет</span>'}</div></section>`;
@@ -1584,6 +1608,104 @@ function renderCurrentSprint() {
   const crossTeam = allocations.filter((row) => row.cross_team);
   $('#currentSprintCrossTeam').innerHTML = crossTeam.length ? crossTeam.map((row) => `<article class="current-sprint-help"><button type="button" class="table-button" data-open-employee="${attr(row.engineer_id)}">${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</button><span>${escapeHtml(row.source_team_id)} → ${escapeHtml(row.owner_team_id)}</span><span>${escapeHtml(row.role)}</span><button type="button" class="table-button" data-open-task="${attr(row.task_id)}">${escapeHtml(row.task_id)}</button><strong>${number(row.allocated_hours)} ч</strong></article>`).join('') : empty('Межкомандная помощь в текущем спринте не используется.');
 
+}
+
+function availabilityGridMarkup(payload, scope) {
+  const sprints = [];
+  for (let sprint = Number(payload?.current_sprint || currentSprint()) + 1; sprint <= 6; sprint += 1) sprints.push(sprint);
+  if (!sprints.length) return empty('Будущих спринтов в квартале нет.');
+  const allRows = payload?.engineers || [];
+  const constrained = new Set(allRows.filter((row) => Object.values(row.availability_by_sprint || {}).some((value) => Number(value.availability_rate) !== 1)).map((row) => row.engineer_id));
+  const visible = state.availabilityVisibleEngineers[scope] || new Set();
+  const rows = allRows.filter((row) => constrained.has(row.engineer_id) || visible.has(row.engineer_id));
+  const controls = `<div class="availability-controls"><select data-availability-add-select="${attr(scope)}"><option value="">Выберите инженера</option>${allRows.filter((row) => !rows.includes(row)).map((row) => `<option value="${attr(row.engineer_id)}">${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)} · ${escapeHtml(row.engineer_id)}</option>`).join('')}</select><button class="btn btn-outline" type="button" data-availability-add="${attr(scope)}">+ Добавить</button></div>`;
+  const columns = scope === 'close'
+    ? `grid-template-columns:minmax(145px,1.25fr) repeat(${sprints.length},minmax(88px,1fr))`
+    : `grid-template-columns:minmax(220px,1.3fr) repeat(${sprints.length},minmax(135px,1fr))`;
+  return `${controls}${rows.length ? `<div class="availability-table"><div class="availability-head" style="${columns}"><b>Инженер</b>${sprints.map((sprint) => `<b>Sprint ${sprint}</b>`).join('')}</div>${rows.map((row) => {
+    const engineer = engineerBy(row.engineer_id);
+    return `<div class="availability-row" style="${columns}"><span><strong>${escapeHtml(engineer?.name || row.engineer_id)}</strong><small>${escapeHtml(row.engineer_id)} · база ${number(row.base_capacity_hours)} ч</small></span>${sprints.map((sprint) => {
+      const current = Number(row.availability_by_sprint?.[String(sprint)]?.availability_rate ?? 1);
+      const base = Number(row.base_capacity_hours || 0);
+      return `<select data-availability-scope="${attr(scope)}" data-availability-engineer="${attr(row.engineer_id)}" data-availability-sprint="${sprint}" data-original-rate="${current}"><option value="1" ${current === 1 ? 'selected' : ''}>100% · ${number(base)} ч</option><option value="0.5" ${current === .5 ? 'selected' : ''}>50% · ${number(base * .5)} ч</option><option value="0" ${current === 0 ? 'selected' : ''}>0% · 0 ч</option></select>`;
+    }).join('')}</div>`;
+  }).join('')}</div>` : '<p class="hint">Индивидуальные ограничения пока не заданы.</p>'}`;
+}
+
+function addAvailabilityEngineer(scope) {
+  const select = $(`[data-availability-add-select="${scope}"]`);
+  if (!select?.value) return;
+  state.availabilityVisibleEngineers[scope].add(select.value);
+  renderFutureAvailability();
+}
+
+async function findReplacement(button) {
+  const card = button.closest('[data-close-task]');
+  const row = button.closest('.fact-engineer-row');
+  const engineerId = button.dataset.findReplacement;
+  const input = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, row);
+  const role = input?.dataset.factEngineerRole || '';
+  const hours = Number(input?.value || 0);
+  const select = $('[data-replacement-for]', row);
+  if (!(hours > 0)) { showToast('Сначала укажите положительный остаток часов.'); return; }
+  button.disabled = true;
+  try {
+    const payload = await window.postcodeApi.getReplacementCandidates(
+      card.dataset.closeTask, engineerId, currentSprint() + 1, role, hours,
+    );
+    const candidates = payload.roles?.[0]?.candidates || [];
+    select.innerHTML = `<option value="">Выберите решение</option>${candidates.map((candidate) => `<option value="${attr(candidate.engineer_id)}">${escapeHtml(engineerBy(candidate.engineer_id)?.name || candidate.engineer_id)} · ${escapeHtml(candidate.team_id || 'без команды')} · свободно ${number(candidate.free_hours)} ч${candidate.cross_team ? ' · из другой команды' : ''}</option>`).join('')}<option value="__MOVE__">Перенести задачу</option>`;
+    select.dataset.candidatesLoaded = 'true';
+    select.focus();
+    if (!candidates.length) showToast('Подходящей замены нет. Выберите перенос задачи.');
+  } catch (error) {
+    showToast(`Не удалось подобрать замену: ${error?.message || error}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderFutureAvailability() {
+  if (!data.availability) return;
+  if ($('#futureAvailabilityGrid')) $('#futureAvailabilityGrid').innerHTML = availabilityGridMarkup(data.availability, 'page');
+  if ($('#sprintFutureAvailability')) $('#sprintFutureAvailability').innerHTML = availabilityGridMarkup(data.availability, 'close');
+  if ($('#futureAvailabilityState')) {
+    const conflicts = data.availability.conflicts || [];
+    $('#futureAvailabilityState').innerHTML = conflicts.length
+      ? `<div class="constructor-errors">Найдено конфликтов с утверждённым планом: ${conflicts.length}. После закрытия спринта будет создан черновик пересчёта.</div>`
+      : '';
+  }
+}
+
+async function loadFutureAvailability() {
+  try {
+    data.availability = await window.postcodeApi.getEngineerAvailability();
+    renderFutureAvailability();
+  } catch (error) {
+    if ($('#futureAvailabilityState')) $('#futureAvailabilityState').innerHTML = `<div class="constructor-errors">${escapeHtml(error?.message || 'Не удалось загрузить доступность.')}</div>`;
+  }
+}
+
+function collectAvailabilityUpdates(scope) {
+  return $$(`[data-availability-scope="${scope}"]`).filter((select) => Number(select.value) !== Number(select.dataset.originalRate)).map((select) => ({
+    engineer_id: select.dataset.availabilityEngineer,
+    sprint: Number(select.dataset.availabilitySprint),
+    availability_rate: Number(select.value),
+    source_type: 'MANUAL',
+    source_id: 'manual',
+  }));
+}
+
+async function saveFutureAvailability() {
+  const updates = collectAvailabilityUpdates('page');
+  if (!updates.length) { showToast('Изменений доступности нет.'); return; }
+  try {
+    data.availability = await window.postcodeApi.updateEngineerAvailability(updates);
+    renderFutureAvailability();
+    showToast(data.availability.requires_replanning ? 'Доступность сохранена. План требует пересчёта.' : 'Доступность сохранена.');
+  } catch (error) {
+    showToast(`Не удалось сохранить доступность: ${error?.message || error}`);
+  }
 }
 
 function renderSprintCloseDialog(actual = null) {
@@ -1598,8 +1720,18 @@ function renderSprintCloseDialog(actual = null) {
   $('#sprintCloseTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
     const saved = savedResults.get(String(task.task_id));
     const roles = {...roleHoursForTask(task, sprint), ...(saved?.remaining_role_hours || {})};
+    const allocations = (task.allocations || []).filter((row) => Number(row.sprint) === sprint);
+    const savedWork = new Map((saved?.remaining_engineer_work || []).map((row) => [`${row.engineer_id}\u001f${row.role}`, row]));
+    const unavailable = new Set(saved?.unavailable_engineer_ids || []);
+    const allocatedRoles = new Set(allocations.map((row) => String(row.role)));
+    const engineerWork = allocations.map((row) => {
+      const key = `${row.engineer_id}\u001f${row.role}`;
+      const remaining = savedWork.get(key)?.remaining_hours ?? 0;
+      return `<div class="fact-engineer-row"><span><b>${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</b><small>${escapeHtml(row.role)} · план ${number(row.allocated_hours)} ч</small></span><span class="fact-role-input"><input type="number" min="0" step="any" value="${attr(remaining)}" data-fact-engineer="${attr(row.engineer_id)}" data-fact-engineer-role="${attr(row.role)}" data-fact-planned-hours="${attr(row.allocated_hours)}" disabled><i>ч</i></span><label class="fact-unavailable-person"><input type="checkbox" data-fact-unavailable="${attr(row.engineer_id)}" ${unavailable.has(String(row.engineer_id)) ? 'checked' : ''} disabled><span>Был недоступен</span></label><div class="replacement-picker" hidden><p class="replacement-help">Сначала нажмите «Подобрать замену». После проверки роли и свободных часов доступные инженеры появятся в списке справа.</p><button class="btn btn-outline" type="button" data-find-replacement="${attr(row.engineer_id)}">Подобрать замену</button><select data-replacement-for="${attr(row.engineer_id)}" data-replacement-role="${attr(row.role)}"><option value="">Выберите решение</option><option value="__MOVE__">Перенести задачу</option></select></div></div>`;
+    }).join('');
+    const unallocatedRoles = Object.entries(roles).filter(([role]) => !allocatedRoles.has(String(role))).map(([role, hours]) => `<div class="fact-engineer-row"><span><b>Роль без назначения</b><small>${escapeHtml(role)}</small></span><span class="fact-role-input"><input type="number" min="0" step="any" value="${attr(saved?.remaining_role_hours?.[role] ?? hours ?? 0)}" data-fact-role="${attr(role)}" disabled><i>ч</i></span></div>`).join('');
     const startingSp = Number(task.remaining_story_points ?? task.story_points ?? 0);
-    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="1" max="${attr(startingSp)}" step="1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>Целое число, не более ${number(startingSp)} SP. Выполненное будет рассчитано автоматически.</small></div><p>Сколько ещё потребуется времени</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
+    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность сотрудника</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="1" max="${attr(startingSp)}" step="1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>SP будет проверено backend по исходной пропорции часов.</small></div><p>Остаток по назначенным инженерам</p><div class="fact-engineers">${engineerWork}${unallocatedRoles}</div></div></article>`;
   }).join('') : empty('В этом спринте нет задач.');
   $('#sprintUnfinishedSection').hidden = true;
   $$('input[name="hasPlanDeviations"]').forEach((input) => { input.checked = false; });
@@ -1624,6 +1756,7 @@ function renderSprintCloseDialog(actual = null) {
     syncSprintCloseControls();
     $('#confirmCloseCurrentSprint').disabled = false;
   }
+  renderFutureAvailability();
 }
 
 function syncSprintCloseControls() {
@@ -1637,11 +1770,20 @@ function syncSprintCloseControls() {
     $('[data-task-reason]', card).disabled = !taskEnabled;
     $('[data-fact-sp]', card).disabled = !taskEnabled;
     $$('[data-fact-role]', card).forEach((input) => { input.disabled = !taskEnabled; });
+    $$('[data-fact-engineer]', card).forEach((input) => { input.disabled = !taskEnabled; });
+    const unavailableEnabled = taskEnabled && $('[data-task-reason]', card)?.value === 'Недоступность сотрудника';
+    $$('[data-fact-unavailable]', card).forEach((input) => {
+      input.disabled = !unavailableEnabled;
+      if (!unavailableEnabled) input.checked = false;
+      const picker = input.closest('.fact-engineer-row')?.querySelector('.replacement-picker');
+      if (picker) picker.hidden = !(unavailableEnabled && input.checked);
+    });
   });
 }
 
 function openSprintCloseDialog(actual = null) {
   renderSprintCloseDialog(actual);
+  loadFutureAvailability();
   $('#sprintCloseDialog').showModal();
 }
 
@@ -1681,8 +1823,30 @@ async function closeCurrentSprint(event) {
     $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
       if (!$('[data-task-deviation]', card)?.checked) return;
       const remaining = {};
-      $$('[data-fact-role]', card).forEach((input) => { const value = Number(input.value); if (value > 0) remaining[input.dataset.factRole] = value; });
-      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_story_points: Number($('[data-fact-sp]', card)?.value), starting_story_points: Number(card.dataset.startingSp), remaining_role_hours: remaining, remaining_engineer_allocations: {}, unavailable_next_sprint: false, unavailable_engineer_ids: []});
+      const engineerWork = $$('[data-fact-engineer]', card).map((input) => {
+        const value = Number(input.value || 0);
+        if (value > 0) remaining[input.dataset.factEngineerRole] = Number(remaining[input.dataset.factEngineerRole] || 0) + value;
+        return {engineer_id: input.dataset.factEngineer, role: input.dataset.factEngineerRole, planned_hours: Number(input.dataset.factPlannedHours || 0), remaining_hours: value};
+      });
+      $$('[data-fact-role]', card).forEach((input) => {
+        const value = Number(input.value || 0);
+        if (value > 0) remaining[input.dataset.factRole] = Number(remaining[input.dataset.factRole] || 0) + value;
+      });
+      const engineerAllocations = {};
+      engineerWork.forEach((row) => { if (row.remaining_hours > 0) engineerAllocations[row.engineer_id] = Number(engineerAllocations[row.engineer_id] || 0) + row.remaining_hours; });
+      const unavailableIds = $$('[data-fact-unavailable]', card).filter((input) => input.checked).map((input) => input.dataset.factUnavailable);
+      const replacementAllocations = {};
+      let moveRemainingTask = false;
+      unavailableIds.forEach((engineerId) => {
+        const row = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, card)?.closest('.fact-engineer-row');
+        const remainingHours = Number($('[data-fact-engineer]', row)?.value || 0);
+        const decision = $('[data-replacement-for]', row)?.value || '';
+        if (!(remainingHours > 0)) return;
+        if (decision === '__MOVE__') moveRemainingTask = true;
+        else if (decision) replacementAllocations[decision] = Number(replacementAllocations[decision] || 0) + remainingHours;
+      });
+      if (moveRemainingTask) Object.keys(replacementAllocations).forEach((engineerId) => delete replacementAllocations[engineerId]);
+      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_story_points: Number($('[data-fact-sp]', card)?.value), starting_story_points: Number(card.dataset.startingSp), remaining_role_hours: remaining, remaining_engineer_allocations: engineerAllocations, remaining_engineer_work: engineerWork, replacement_engineer_allocations: replacementAllocations, move_remaining_task: moveRemainingTask, unavailable_next_sprint: false, unavailable_engineer_ids: unavailableIds});
     });
   }
   const results = [...byTask.values()];
@@ -1693,6 +1857,25 @@ async function closeCurrentSprint(event) {
   }
   if (results.some((row) => !row.incomplete_reason)) {
     $('#sprintCloseError').textContent = 'Для каждой задачи выберите причину отклонения.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  if (results.some((row) => row.incomplete_reason === 'Недоступность сотрудника' && !row.unavailable_engineer_ids.length)) {
+    $('#sprintCloseError').textContent = 'Для причины «Недоступность сотрудника» выберите хотя бы одного назначенного инженера.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  const unresolvedReplacement = results.some((result) => {
+    if (result.incomplete_reason !== 'Недоступность сотрудника') return false;
+    const card = $(`[data-close-task="${CSS.escape(result.task_id)}"]`, $('#sprintCloseTasks'));
+    return result.unavailable_engineer_ids.some((engineerId) => {
+      const row = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, card)?.closest('.fact-engineer-row');
+      const remainingHours = Number($('[data-fact-engineer]', row)?.value || 0);
+      return remainingHours > 0 && !$('[data-replacement-for]', row)?.value;
+    });
+  });
+  if (unresolvedReplacement) {
+    $('#sprintCloseError').textContent = 'Для каждого недоступного инженера с остатком работы выберите замену или перенос задачи.';
     $('#sprintCloseError').hidden = false;
     return;
   }
@@ -1714,6 +1897,7 @@ async function closeCurrentSprint(event) {
       sprint_number: sprint,
       all_completed: deviationAnswer === 'no',
       results,
+      future_availability: collectAvailabilityUpdates('close'),
     });
   } catch (error) {
     $('#sprintCloseError').textContent = `Не удалось закрыть спринт: ${error?.message || error}`;
@@ -2234,7 +2418,7 @@ function openEmployee(engineerId) {
   const memberships = engineer.capacity_buckets.map((bucket) => bucket.team_id
     ? `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч ↗</button>`
     : `<div class="profile-link">Без команды · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч</div>`).join('');
-  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${memberships || '<p>Без команды</p>'}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
+  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.effective_capacity_hours_by_sprint?.[String(sprint)] ?? engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${memberships || '<p>Без команды</p>'}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
   $('#employeeDrawer').classList.add('open');
   $('#employeeDrawer').setAttribute('aria-hidden', 'false');
 }
@@ -2300,6 +2484,7 @@ function bindEvents() {
   $('#competencyQuarterOnly')?.addEventListener('change', (event) => { state.starQuarterOnly = event.target.checked; state.skillTech = 'all'; renderStarSkills(); });
   $('#criticalOnly').addEventListener('change', (event) => { state.criticalOnly = event.target.checked; renderStarSkills(); });
   $('#openSprintCloseDialog').addEventListener('click', () => openSprintCloseDialog());
+  $('#saveFutureAvailability')?.addEventListener('click', saveFutureAvailability);
   $('#sprintCloseForm').addEventListener('submit', closeCurrentSprint);
   $('#sprintCloseDialog').addEventListener('click', (event) => { if (event.target === $('#sprintCloseDialog')) closeSprintCloseDialog(); });
   $('#confirmSprintResult').addEventListener('click', closeSprintResult);
@@ -2343,6 +2528,50 @@ function bindEvents() {
   $('#riskDialog')?.addEventListener('close', () => { state.riskModalOpen = false; renderRisks(); });
   $('#riskSearch')?.addEventListener('input', (event) => { state.riskSearch = event.target.value; renderRisks(); });
   document.addEventListener('click', (event) => {
+    const trainingToggle = event.target.closest('[data-toggle-training-candidates]');
+    if (trainingToggle) {
+      const key = trainingToggle.dataset.toggleTrainingCandidates;
+      const selector = trainingToggle.closest('[data-training-selector]');
+      const options = $('.development-candidate-options', selector);
+      const expanded = trainingToggle.getAttribute('aria-expanded') !== 'true';
+      state.expandedTrainingCandidateSelectors[key] = expanded;
+      trainingToggle.setAttribute('aria-expanded', String(expanded));
+      if (options) options.hidden = !expanded;
+      return;
+    }
+    const trainingCandidate = event.target.closest('[data-select-training-candidate]');
+    if (trainingCandidate) {
+      const key = trainingCandidate.dataset.trainingRecommendation;
+      const engineerId = trainingCandidate.dataset.selectTrainingCandidate;
+      const recommendation = (data.development?.recommendations || []).find(
+        (item) => String(item.recommendation_id) === key,
+      );
+      const candidate = (recommendation?.recommendation?.candidates || []).find(
+        (item) => item.engineer_id === engineerId,
+      );
+      const selector = trainingCandidate.closest('[data-training-selector]');
+      const toggle = $('[data-toggle-training-candidates]', selector);
+      if (!candidate || !toggle) return;
+      state.selectedTrainingCandidates[key] = engineerId;
+      state.expandedTrainingCandidateSelectors[key] = false;
+      toggle.innerHTML = developmentSelectedCandidate(candidate);
+      toggle.setAttribute('aria-expanded', 'false');
+      $$('.development-candidate-option', selector).forEach((option) => {
+        const selected = option.dataset.selectTrainingCandidate === engineerId;
+        option.classList.toggle('selected', selected);
+        option.setAttribute('aria-checked', String(selected));
+      });
+      const options = $('.development-candidate-options', selector);
+      if (options) options.hidden = true;
+      toggle.focus();
+      return;
+    }
+    const trainCandidate = event.target.closest('[data-train-selected-candidate]');
+    if (trainCandidate) { showToast('Функция дообучения будет доступна позже.'); return; }
+    const addAvailability = event.target.closest('[data-availability-add]');
+    if (addAvailability) { addAvailabilityEngineer(addAvailability.dataset.availabilityAdd); return; }
+    const replacement = event.target.closest('[data-find-replacement]');
+    if (replacement) { findReplacement(replacement); return; }
     const approveReplanButton = event.target.closest('[data-approve-replan]');
     if (approveReplanButton) { approveReplan(approveReplanButton.dataset.approveReplan); return; }
     const editSprintActualButton = event.target.closest('[data-edit-sprint-actual]');
@@ -2458,6 +2687,8 @@ function bindEvents() {
     if (event.target.id === 'developmentSkillFilter') { state.developmentSkill = event.target.value; renderDevelopment(); return; }
     if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); return; }
     if (event.target.matches('[data-task-deviation]')) { syncSprintCloseControls(); return; }
+    if (event.target.matches('[data-task-reason]')) { syncSprintCloseControls(); return; }
+    if (event.target.matches('[data-fact-unavailable]')) { syncSprintCloseControls(); return; }
     if (event.target.name === 'hasPlanDeviations') { syncSprintCloseControls(); $('#confirmCloseCurrentSprint').disabled = false; $('#sprintCloseError').hidden = true; }
   });
   document.addEventListener('input', (event) => {
