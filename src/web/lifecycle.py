@@ -67,6 +67,7 @@ def _outcome(task: dict[str, Any], sprint_number: int, actual: dict[str, Any] | 
         "incomplete_reason": (actual or {}).get("incomplete_reason"),
         "starting_story_points": (actual or {}).get("starting_story_points"),
         "completed_story_points": (actual or {}).get("completed_story_points"),
+        "completed_early": bool((actual or {}).get("completed_early")),
         "remaining_story_points": (actual or {}).get("remaining_story_points"),
         "remaining_role_hours": deepcopy((actual or {}).get("remaining_role_hours") or {}),
         "remaining_engineer_work": deepcopy((actual or {}).get("remaining_engineer_work") or []),
@@ -111,9 +112,13 @@ def capture_closed_sprint(
             task, sprint_number, actual_by_task.get(task_id)
         )
         frozen_tasks.append(snapshot)
+    frozen_baseline = ((approved.get("_planning_state") or {}).get(
+        "sprint_baselines"
+    ) or {}).get(str(sprint_number))
     return {
         "sprint_number": sprint_number,
         "planned_revision": (approved.get("approved_snapshot") or {}).get("revision"),
+        "sprint_baseline": deepcopy(frozen_baseline) if frozen_baseline else None,
         "tasks": frozen_tasks,
     }
 

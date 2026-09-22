@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.star_map import StarMapService
-from src.web.api import _company_star_map_team
+from src.web.api import _active_star_map, _company_star_map_team
+from src.web.constructor import build_catalog_snapshot
 
 
 def _payload() -> dict:
@@ -62,6 +65,48 @@ def test_star_map_counts_unique_multi_team_engineer_once() -> None:
     python = next(item for item in team["skill_coverage"] if item["technology"] == "Python")
     assert team["member_count"] == 2
     assert python["engineer_count"] == 2
+
+
+def test_active_star_map_normalizes_role_aliases_before_bf_projection() -> None:
+    """The role node must use the same canonical identity as BusFactorService."""
+
+    tables = {
+        "tasks": [],
+        "task_role_effort": [],
+        "task_dependencies": [],
+        "task_skill_requirements": [],
+        "engineers": [
+            {"engineer_id": "E1", "team_id": "A", "role": "ДевОпс", "capacity_rate": 1.0},
+            {"engineer_id": "E2", "team_id": "B", "role": "Девопс", "capacity_rate": 1.0},
+        ],
+        "engineer_skills": [],
+        "team_history": [
+            {"team_id": "A", "team_name": "A"},
+            {"team_id": "B", "team_name": "B"},
+        ],
+    }
+
+    star = _active_star_map(tables, build_catalog_snapshot(tables), None, [])
+    team_a = next(item for item in star["teams"] if item["team_id"] == "A")
+    role = next(item for item in team_a["competency_modes"]["all"]["roles"] if item["role"] == "Девопс")
+
+    assert role["team_bus_factor"] == 1
+    assert role["organization_bus_factor"] == 2
+
+
+def test_star_map_frontend_uses_one_filtered_source_for_graph_and_risks() -> None:
+    source = (Path(__file__).resolve().parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+
+    assert "state.starRoleFilters = (state.starRoleFilters || []).filter" in source
+    assert "const items = starGraphItems(team);" in source
+    assert "legacyCompetencies" not in source
+
+
+def test_star_map_frontend_uses_member_count_for_team_summary() -> None:
+    source = (Path(__file__).resolve().parents[1] / "frontend" / "app.js").read_text(encoding="utf-8")
+
+    assert "const memberCount = busTeam.member_count ?? busTeam.engineer_count;" in source
+    assert "['Инженеров', memberCount, 'neutral']" in source
 
 
 def test_star_map_exposes_cross_team_flow() -> None:

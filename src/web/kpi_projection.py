@@ -86,9 +86,18 @@ def _sprint_fact(
 
     closed = history.get(sprint_number) or {}
     transferred_sp = 0.0
+    early_completed_sp = 0.0
     for task in closed.get("tasks") or []:
         outcome = task.get("outcome") or {}
         if outcome.get("completed"):
+            # The sprint commitment already includes this task's allocation
+            # for the closing sprint. An explicitly early completion delivers
+            # its full remaining scope now, so only the part above that
+            # commitment is additional Say/Do delivery.
+            if outcome.get("completed_early"):
+                completed_sp = _number(outcome.get("completed_story_points"))
+                planned_task_sp = _number(task.get("sprint_capacity_sp_load"))
+                early_completed_sp += max(completed_sp - planned_task_sp, 0.0)
             continue
         planned_task_sp = _number(task.get("sprint_capacity_sp_load"))
         # A task may have been intentionally split between several sprints.
@@ -104,7 +113,7 @@ def _sprint_fact(
             max(residual_sp - planned_future_sp, 0.0), planned_task_sp
         )
     transferred_sp = min(transferred_sp, baseline_sp)
-    return max(baseline_sp - transferred_sp, 0.0), transferred_sp
+    return max(baseline_sp - transferred_sp + early_completed_sp, 0.0), transferred_sp
 
 
 def _committed_sprint_sp(
@@ -243,6 +252,13 @@ def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
             actual_sp = None
             transferred_sp = None
             percentage = None
+        unavailable_reason = None
+        if not has_actual:
+            unavailable_reason = "UNAVAILABLE_NO_ACTUAL"
+        elif not frozen:
+            unavailable_reason = "UNAVAILABLE_NO_BASELINE"
+        elif baseline_sp <= 0:
+            unavailable_reason = "UNAVAILABLE_ZERO_COMMITMENT"
         sprint_kpis.append({
             "sprint": sprint_number,
             "baseline_sp": baseline_sp,
@@ -254,6 +270,7 @@ def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
             "completion_percent": percentage,
             "has_actual": has_actual,
             "baseline_confirmed": bool(frozen),
+            "unavailable_reason": unavailable_reason,
             "target_min_percent": SAY_DO_MIN_PERCENT,
             "target_max_percent": SAY_DO_MAX_PERCENT,
             "status": _status(percentage, SAY_DO_MIN_PERCENT, SAY_DO_MAX_PERCENT),
