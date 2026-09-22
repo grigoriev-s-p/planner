@@ -1,25 +1,58 @@
 'use strict';
 
+window.postcodeLoading = (() => {
+  let pending = 0;
+
+  function render() {
+    const indicator = document.getElementById('globalLoadingIndicator');
+    if (!indicator) return;
+    const active = pending > 0;
+    if (typeof indicator.showPopover === 'function') {
+      if (active && !indicator.matches(':popover-open')) indicator.showPopover();
+      if (!active && indicator.matches(':popover-open')) indicator.hidePopover();
+    } else {
+      indicator.hidden = !active;
+    }
+    indicator.setAttribute('aria-busy', String(active));
+  }
+
+  return Object.freeze({
+    begin() {
+      pending += 1;
+      render();
+    },
+    end() {
+      pending = Math.max(0, pending - 1);
+      render();
+    },
+  });
+})();
+
 window.postcodeApi = (() => {
   async function request(path, options = {}) {
-    const response = await fetch(path, {
-      ...options,
-      headers: {'Accept': 'application/json', ...(options.headers || {})},
-    });
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const payload = await response.json();
-        const detail = payload.detail;
-        if (typeof detail === 'string') message = detail;
-        else if (detail?.message) message = [detail.message, ...(detail.errors || [])].join('\n');
-        else if (Array.isArray(detail)) message = detail.map((item) => item.msg || String(item)).join('\n');
-      } catch (_) {
-        // The status is still sufficient for a user-facing availability error.
+    window.postcodeLoading.begin();
+    try {
+      const response = await fetch(path, {
+        ...options,
+        headers: {'Accept': 'application/json', ...(options.headers || {})},
+      });
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const payload = await response.json();
+          const detail = payload.detail;
+          if (typeof detail === 'string') message = detail;
+          else if (detail?.message) message = [detail.message, ...(detail.errors || [])].join('\n');
+          else if (Array.isArray(detail)) message = detail.map((item) => item.msg || String(item)).join('\n');
+        } catch (_) {
+          // The status is still sufficient for a user-facing availability error.
+        }
+        throw new Error(message);
       }
-      throw new Error(message);
+      return await response.json();
+    } finally {
+      window.postcodeLoading.end();
     }
-    return response.json();
   }
 
   return Object.freeze({
