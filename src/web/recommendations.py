@@ -698,11 +698,27 @@ class RecommendationDraft:
 
     def _refresh_available(self) -> None:
         accepted_ids = {item["change_id"] for item in self.accepted}
-        available = [
-            deepcopy(item) for recommendation_id, item in self._all_recommendations.items()
-            if recommendation_id not in accepted_ids and recommendation_id not in self.rejected
-            and set(item.get("requires", [])).issubset(accepted_ids)
-        ]
+        accepted_actions = self._accepted_actions()
+        available = []
+        for recommendation_id, stored in self._all_recommendations.items():
+            if (
+                recommendation_id in accepted_ids
+                or recommendation_id in self.rejected
+                or not set(stored.get("requires", [])).issubset(accepted_ids)
+            ):
+                continue
+            # Older persisted/test recommendation records may not contain the
+            # executable action. They can still be listed, but cannot be
+            # recalculated against the current draft.
+            if "action" not in stored:
+                available.append(deepcopy(stored))
+                continue
+            candidate = self._plan([*accepted_actions, stored["action"]])
+            current = self._recommendation(stored["action"], self.current_plan, candidate)
+            if current is None:
+                continue
+            current["requires"] = deepcopy(stored.get("requires", []))
+            available.append(current)
         available.sort(key=lambda item: (
             TYPE_ORDER.get(item.get("type"), 99), -_number(item.get("rung")),
             _task(self.base_plan, item.get("task_id") or "").get("baseline_start_date") or "9999-12-31",
@@ -765,7 +781,9 @@ class RecommendationDraft:
             "current_plan_fingerprint": current_fingerprint,
             "best_selected": current_fingerprint == self.best_fingerprint,
             "recommendations_revision": self.recommendations_revision,
-            "needs_refresh": False, "changed_tasks": deepcopy(self.last_changed_tasks),
+            "needs_refresh": False,
+            "changed_tasks": deepcopy(self.last_changed_tasks),
+            "current_changes": self._changed_tasks(self.base_plan, self.current_plan),
             "timings_ms": deepcopy(self.timings_ms),
         }
         return payload
@@ -777,10 +795,13 @@ class RecommendationDraft:
         previous = self.current_plan
         started = perf_counter()
         candidate = self._plan([*self._accepted_actions(), recommendation["action"]])
-        if self._recommendation(
+        current_recommendation = self._recommendation(
             recommendation["action"], self.current_plan, candidate
-        ) is None:
+        )
+        if current_recommendation is None:
             raise KeyError(recommendation_id)
+        current_recommendation["requires"] = deepcopy(recommendation.get("requires", []))
+        recommendation = current_recommendation
         self.timings_ms["atomic_simulation"] = round((perf_counter() - started) * 1000, 2)
         label = recommendation["title"]
         if recommendation["type"] == "CROSS_TEAM_HELP":
@@ -812,11 +833,13 @@ class RecommendationDraft:
 
     def apply_all(self) -> None:
         previous = self.current_plan
-        existing = {item["change_id"] for item in self.accepted}
+        final_changes = {
+            item["task_id"]: item
+            for item in self._changed_tasks(self.base_plan, self.optimized_plan)
+        }
+        self.accepted = []
         for action in self.optimized_actions:
             change_id = _signature(action)
-            if change_id in existing:
-                continue
             recommendation = self._all_recommendations.get(change_id, {})
             label = recommendation.get("title") or "Изменение лучшего варианта"
             if recommendation.get("type") == "CROSS_TEAM_HELP":
@@ -825,12 +848,26 @@ class RecommendationDraft:
             elif recommendation.get("type") == "TASK_REASSIGNMENT":
                 row = (recommendation.get("task_reassignment") or [{}])[0]
                 label = f"{row.get('task_id') or recommendation.get('task_id')} → {row.get('to_team') or 'другая команда'}"
+            task_ids = recommendation.get("tasks") or _action_task_ids(action)
+            action_changes = [final_changes[task_id] for task_id in task_ids if task_id in final_changes]
+            summary = recommendation.get("effect", {}).get("summary") or "Изменение из сохранённого лучшего варианта."
+            if len(action_changes) == 1:
+                change = action_changes[0]
+                if change["change"] == "added_to_plan":
+                    summary = "Задача добавлена в квартальный план."
+                elif change["change"] == "moved":
+                    summary = f"Перенос: Sprint {change['from_sprint']} → Sprint {change['to_sprint']}."
+                elif change["change"] == "cross_team_added":
+                    summary = "К задаче подключена помощь другой команды."
+                elif change["change"] == "reassigned":
+                    summary = "Задача перераспределена между командами."
             self.accepted.append({
                 "change_id": change_id, "action": deepcopy(action),
                 "title": label,
-                "task_id": recommendation.get("task_id") or min(_action_task_ids(action), default=None),
-                "tasks": deepcopy(recommendation.get("tasks") or _action_task_ids(action)),
-                "summary": recommendation.get("effect", {}).get("summary") or "Изменение из сохранённого лучшего варианта.",
+                "task_id": recommendation.get("task_id") or min(task_ids, default=None),
+                "tasks": deepcopy(task_ids),
+                "summary": summary,
+                "task_changes": deepcopy(action_changes),
             })
         self.rejected.clear()
         self.current_plan = deepcopy(self.optimized_plan)

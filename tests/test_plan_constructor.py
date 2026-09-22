@@ -17,6 +17,7 @@ from src.web.constructor import (
     ScenarioValidationError,
     build_constructor_catalog,
     build_constructor_plan,
+    build_constructor_plan_from_workbook,
     scenario_tables,
     validate_constructor_scenario,
 )
@@ -172,6 +173,59 @@ class ConstructorDomainTests(unittest.TestCase):
         draft.apply_all()
         self.assertEqual(draft.current_plan, draft.optimized_plan)
         self.assertEqual(draft.best_fingerprint, best_fingerprint)
+
+    def test_current_changes_are_empty_after_return_to_base_plan(self) -> None:
+        draft = RecommendationDraft(
+            build_constructor_plan(ConstructorScenario(**self.cross_team_payload()))
+        )
+        recommendation_id = next(iter(draft.recommendations))
+
+        draft.apply(recommendation_id)
+        self.assertTrue(draft.snapshot("draft")["optimization"]["current_changes"])
+
+        draft.undo(recommendation_id)
+
+        self.assertEqual(draft.current_plan, draft.base_plan)
+        self.assertEqual(
+            draft.snapshot("draft")["optimization"]["current_changes"], []
+        )
+
+    @unittest.skipUnless(RAW_WORKBOOK.is_file(), "raw workbook is absent")
+    def test_qa_9022_recommendation_tracks_the_current_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = CatalogRepository(Path(directory) / "catalog.sqlite3")
+            draft = RecommendationDraft(build_constructor_plan_from_workbook(
+                RAW_WORKBOOK.name, RAW_WORKBOOK.read_bytes(), repository
+            ))
+
+        task = lambda: next(
+            item for item in draft.current_plan["tasks"]
+            if item["task_id"] == "QA-9022"
+        )
+        self.assertEqual(task()["completion_sprint"], 1)
+        self.assertFalse(any(
+            item.get("task_id") == "QA-9022"
+            for item in draft.recommendations.values()
+        ))
+
+        draft.apply_all()
+        accepted = next(
+            item for item in draft.accepted if item.get("task_id") == "QA-9022"
+        )
+        self.assertEqual(task()["completion_sprint"], 2)
+        self.assertEqual(accepted["summary"], "Перенос: Sprint 1 → Sprint 2.")
+
+        draft.undo(accepted["change_id"])
+        available = next(
+            item for item in draft.recommendations.values()
+            if item.get("task_id") == "QA-9022"
+        )
+        self.assertEqual(available["effect"]["before_sprint"], 3)
+        self.assertEqual(available["effect"]["after_sprint"], 2)
+
+        draft.reset()
+        self.assertEqual(task()["completion_sprint"], 1)
+        self.assertEqual(draft.snapshot("draft")["optimization"]["current_changes"], [])
 
     def test_recommendations_use_start_date_after_type_and_rung(self) -> None:
         draft = object.__new__(RecommendationDraft)
