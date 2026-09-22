@@ -493,6 +493,9 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("Внешняя помощь", constructor_source)
         self.assertIn("Команда выполняет", constructor_source)
         self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+        self.assertIn("function appliedRecommendationTaskIds()", constructor_source)
+        self.assertIn("previewPlan?.optimization?.accepted_changes", constructor_source)
+        self.assertIn("changedTaskEffects.forEach", constructor_source)
 
     def test_constructor_preview_prioritizes_recommendations_and_groups_exclusions(self) -> None:
         constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
