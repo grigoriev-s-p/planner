@@ -130,6 +130,31 @@ def _committed_sprint_sp(
     )
 
 
+def freeze_sprint_baseline(payload: dict[str, Any], sprint_number: int) -> dict[str, Any]:
+    """Persist the approved commitment once, before work on this sprint starts."""
+
+    if not 1 <= sprint_number <= 6:
+        return payload
+    state = payload.setdefault("_planning_state", {})
+    baselines = state.setdefault("sprint_baselines", {})
+    if str(sprint_number) in baselines:
+        return payload
+    sprint = next((row for row in (payload.get("plan") or {}).get("sprints") or []
+                   if int(row.get("sprint_number") or 0) == sprint_number), None)
+    if sprint is None:
+        return payload
+    rows = [{"task_id": str(row.get("task_id")),
+             "planned_sp": _number(row.get("capacity_sp_load"))}
+            for row in sprint.get("tasks") or [] if row.get("task_id")]
+    baselines[str(sprint_number)] = {
+        "sprint": sprint_number,
+        "planned_sp": sum(row["planned_sp"] for row in rows),
+        "tasks": rows,
+        "source_revision": None,
+    }
+    return payload
+
+
 def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
     """Recalculate both management KPIs from immutable baseline and facts.
 
@@ -190,6 +215,7 @@ def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
         int(row.get("sprint_number") or 0): row
         for row in state.get("closed_sprint_history") or []
     }
+    sprint_baselines = state.get("sprint_baselines") or {}
     original_tasks = state.get("original_task_baseline") or {}
     baseline_rows = {
         int(row.get("sprint") or 0): row
@@ -203,11 +229,11 @@ def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
     for sprint_number in range(1, 7):
         source = baseline_rows.get(sprint_number) or current_rows.get(sprint_number) or {}
         has_actual = sprint_number <= completed_through and sprint_number in history
-        baseline_sp = _committed_sprint_sp(
-            history,
-            sprint_number,
-            _number(source.get("baseline_sp")),
-        ) if has_actual else _number(source.get("baseline_sp"))
+        frozen = sprint_baselines.get(str(sprint_number)) or {}
+        baseline_sp = (_number(frozen["planned_sp"]) if "planned_sp" in frozen
+                       else _committed_sprint_sp(history, sprint_number,
+                                                  _number(source.get("baseline_sp")))
+                       if has_actual else _number(source.get("baseline_sp")))
         if has_actual:
             actual_sp, transferred_sp = _sprint_fact(
                 history, sprint_number, baseline_sp, original_tasks
@@ -227,6 +253,7 @@ def project_management_kpis(payload: dict[str, Any]) -> dict[str, Any]:
             "remaining_sp": transferred_sp,
             "completion_percent": percentage,
             "has_actual": has_actual,
+            "baseline_confirmed": bool(frozen),
             "target_min_percent": SAY_DO_MIN_PERCENT,
             "target_max_percent": SAY_DO_MAX_PERCENT,
             "status": _status(percentage, SAY_DO_MIN_PERCENT, SAY_DO_MAX_PERCENT),

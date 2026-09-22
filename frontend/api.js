@@ -38,6 +38,12 @@ window.postcodeApi = (() => {
     retryReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/retry`, {method: 'POST'}),
     approveReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/approve`, {method: 'POST'}),
     cancelReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/cancel`, {method: 'POST'}),
+    getSprintExpansion: () => request('/api/sprint-expansion'),
+    refreshSprintExpansion: () => request('/api/sprint-expansion/refresh', {method: 'POST'}),
+    selectSprintExpansion: (recommendationId, action) => request(`/api/sprint-expansion/recommendations/${encodeURIComponent(recommendationId)}/${action}`, {method: 'POST'}),
+    applyAllSprintExpansion: () => request('/api/sprint-expansion/apply-all', {method: 'POST'}),
+    ignoreSprintExpansion: () => request('/api/sprint-expansion/ignore', {method: 'POST'}),
+    approveSprintExpansion: () => request('/api/sprint-expansion/approve', {method: 'POST'}),
     getTasks: () => request('/api/tasks'),
     createTask: (payload) => request('/api/tasks', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
@@ -47,6 +53,13 @@ window.postcodeApi = (() => {
     permanentlyDeleteEntity: (entityType, entityId) => request(`/api/${entityType}s/${encodeURIComponent(entityId)}/permanent`, {method: 'DELETE'}),
     getRisks: () => request('/api/risks'),
     getDevelopmentRecommendations: () => request('/api/development/recommendations'),
+    analyzeTraining: (payload) => request('/api/development/trainings/analyze', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
+    confirmTraining: (payload) => request('/api/development/trainings/confirm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    }),
+    getEngineerTrainings: (engineerId) => request(`/api/engineers/${encodeURIComponent(engineerId)}/trainings`),
     getTeams: () => request('/api/teams'),
     createTeam: (payload) => request('/api/teams', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),

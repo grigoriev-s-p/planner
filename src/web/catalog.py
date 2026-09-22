@@ -243,6 +243,20 @@ class CatalogRepository:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (engineer_id, sprint, source_type, source_id)
                 );
+                CREATE TABLE IF NOT EXISTS training_plans (
+                    training_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS engineer_capability_overlays (
+                    engineer_id TEXT NOT NULL,
+                    capability_type TEXT NOT NULL,
+                    capability_value TEXT NOT NULL,
+                    effective_from_sprint INTEGER NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    PRIMARY KEY (engineer_id,capability_type,capability_value,source_type,source_id)
+                );
                 CREATE TABLE IF NOT EXISTS catalog_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -263,6 +277,8 @@ class CatalogRepository:
             "replan_workflows",
             "plan_snapshots",
             "engineer_availability",
+            "engineer_capability_overlays",
+            "training_plans",
             "catalog_row_overrides",
             "entity_lifecycle",
             "catalog_rows",
@@ -332,36 +348,149 @@ class CatalogRepository:
                 )
         return self.availability_constraints()
 
+    def training_plans(self, engineer_id: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM training_plans ORDER BY updated_at,training_id"
+            ).fetchall()
+        plans = [json.loads(row["payload"]) for row in rows]
+        return [row for row in plans if engineer_id is None or row["engineer_id"] == engineer_id]
+
+    def capability_overlays(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT engineer_id,capability_type,capability_value,effective_from_sprint,"
+                "source_type,source_id FROM engineer_capability_overlays "
+                "ORDER BY engineer_id,capability_type,capability_value"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _write_training(connection: sqlite3.Connection, plan: Mapping[str, Any]) -> None:
+        from src.planning.availability import validate_availability_rate
+
+        training = dict(plan)
+        training_id = _text(training.get("training_id"))
+        engineer_id = _text(training.get("engineer_id"))
+        sprints = [int(value) for value in training.get("selected_sprints") or []]
+        rate = validate_availability_rate(training.get("availability_rate"))
+        if not training_id or not engineer_id or not sprints:
+            raise ValueError("Некорректный план дообучения.")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "INSERT INTO training_plans(training_id,payload,updated_at) VALUES(?,?,?)",
+            (training_id, _json_payload(training), now),
+        )
+        if rate < 1:
+            connection.executemany(
+                "INSERT INTO engineer_availability(engineer_id,sprint,availability_rate,"
+                "source_type,source_id,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                [(engineer_id, sprint, rate, "TRAINING", training_id,
+                  "Дообучение", now, now) for sprint in sprints],
+            )
+
+    @staticmethod
+    def _complete_training(connection: sqlite3.Connection, completed_through: int) -> None:
+        if completed_through <= 0:
+            return
+        rows = connection.execute("SELECT training_id,payload FROM training_plans").fetchall()
+        for row in rows:
+            plan = json.loads(row["payload"])
+            if plan.get("status") in {"CANCELLED", "COMPLETED"}:
+                continue
+            last = max(int(value) for value in plan["selected_sprints"])
+            if last > completed_through:
+                continue
+            plan["status"] = "COMPLETED"
+            plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                "UPDATE training_plans SET payload=?,updated_at=? WHERE training_id=?",
+                (_json_payload(plan), plan["updated_at"], row["training_id"]),
+            )
+            for kind, value in (("ROLE", plan.get("target_role")),
+                                ("SKILL", plan.get("target_skill"))):
+                if value:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO engineer_capability_overlays("
+                        "engineer_id,capability_type,capability_value,effective_from_sprint,"
+                        "source_type,source_id) VALUES(?,?,?,?,?,?)",
+                        (plan["engineer_id"], kind, value, last + 1,
+                         "TRAINING", row["training_id"]),
+                    )
+
+    def save_training_plan(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._write_training(connection, plan)
+        return dict(plan)
+
+    def save_approved_with_training(
+        self, payload: Mapping[str, Any], plan: Mapping[str, Any], workflow: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Publish reviewed plan and training constraints in one SQLite transaction."""
+
+        with self._connect() as connection:
+            current = connection.execute(
+                "SELECT snapshots.revision FROM current_plan_snapshot current "
+                "JOIN plan_snapshots snapshots ON snapshots.snapshot_id=current.snapshot_id "
+                "WHERE current.singleton=1"
+            ).fetchone()
+            if current is None or int(current["revision"]) != int(
+                workflow.get("base_approved_revision") or 0
+            ):
+                raise RuntimeError("Черновик устарел: утверждённый план уже изменился.")
+            saved = self._write_approved(connection, payload)
+            self._write_training(connection, plan)
+            completed = int((saved.get("_planning_state") or {}).get("completed_through_sprint") or 0)
+            self._complete_training(connection, completed)
+            updated = {**dict(workflow), "status": "APPROVED", "approved_plan": saved,
+                       "approved_revision": saved["approved_snapshot"]["revision"],
+                       "approved_at": datetime.now(timezone.utc).isoformat()}
+            updated["updated_at"] = updated["approved_at"]
+            connection.execute(
+                "INSERT INTO replan_workflows(workflow_id,payload,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(workflow_id) DO UPDATE SET payload=excluded.payload,"
+                "updated_at=excluded.updated_at",
+                (updated["workflow_id"], _json_payload(updated), updated["approved_at"]),
+            )
+        return saved, updated
+
+    def _write_approved(self, connection: sqlite3.Connection,
+                        payload: Mapping[str, Any]) -> dict[str, Any]:
+        saved = deepcopy(dict(payload))
+        now = datetime.now(timezone.utc).isoformat()
+        previous = connection.execute(
+            "SELECT COALESCE(MAX(revision), 0) FROM plan_snapshots"
+        ).fetchone()[0]
+        revision = int(previous) + 1
+        for baseline in ((saved.get("_planning_state") or {}).get("sprint_baselines") or {}).values():
+            if baseline.get("source_revision") is None:
+                baseline["source_revision"] = revision
+        cursor = connection.execute(
+            "INSERT INTO plan_snapshots(revision,payload,created_at) VALUES(?,?,?)",
+            (revision, _json_payload(saved), now),
+        )
+        snapshot_id = int(cursor.lastrowid)
+        saved["approved_snapshot"] = {
+            "snapshot_id": snapshot_id, "revision": revision, "created_at": now,
+        }
+        connection.execute(
+            "UPDATE plan_snapshots SET payload=? WHERE snapshot_id=?",
+            (_json_payload(saved), snapshot_id),
+        )
+        connection.execute(
+            "INSERT INTO current_plan_snapshot(singleton,snapshot_id) VALUES(1,?) "
+            "ON CONFLICT(singleton) DO UPDATE SET snapshot_id=excluded.snapshot_id",
+            (snapshot_id,),
+        )
+        completed = int((saved.get("_planning_state") or {}).get("completed_through_sprint") or 0)
+        self._complete_training(connection, completed)
+        return saved
+
     def save_approved_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Append an immutable approved snapshot and make it current."""
 
-        saved = deepcopy(dict(payload))
-        now = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
-            previous = connection.execute(
-                "SELECT COALESCE(MAX(revision), 0) FROM plan_snapshots"
-            ).fetchone()[0]
-            revision = int(previous) + 1
-            cursor = connection.execute(
-                "INSERT INTO plan_snapshots(revision,payload,created_at) VALUES(?,?,?)",
-                (revision, _json_payload(saved), now),
-            )
-            snapshot_id = int(cursor.lastrowid)
-            saved["approved_snapshot"] = {
-                "snapshot_id": snapshot_id,
-                "revision": revision,
-                "created_at": now,
-            }
-            connection.execute(
-                "UPDATE plan_snapshots SET payload=? WHERE snapshot_id=?",
-                (_json_payload(saved), snapshot_id),
-            )
-            connection.execute(
-                "INSERT INTO current_plan_snapshot(singleton,snapshot_id) VALUES(1,?) "
-                "ON CONFLICT(singleton) DO UPDATE SET snapshot_id=excluded.snapshot_id",
-                (snapshot_id,),
-            )
-        return saved
+            return self._write_approved(connection, payload)
 
     def load_approved_plan(self) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -408,9 +537,53 @@ class CatalogRepository:
     def latest_replan_workflow(self) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT payload FROM replan_workflows ORDER BY updated_at DESC LIMIT 1"
+                "SELECT payload FROM replan_workflows WHERE workflow_id NOT LIKE 'expansion-%' "
+                "ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
         return json.loads(row["payload"]) if row else None
+
+    def latest_expansion_proposal(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM replan_workflows WHERE workflow_id LIKE 'expansion-%' "
+                "ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def save_approved_with_expansion(
+        self, payload: Mapping[str, Any], proposal: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Publish additions and their decision as one revision transaction."""
+
+        with self._connect() as connection:
+            current = connection.execute(
+                "SELECT snapshots.revision FROM current_plan_snapshot current "
+                "JOIN plan_snapshots snapshots ON snapshots.snapshot_id=current.snapshot_id "
+                "WHERE current.singleton=1"
+            ).fetchone()
+            catalog = connection.execute(
+                "SELECT value FROM catalog_metadata WHERE key='catalog_revision'"
+            ).fetchone()
+            if current is None or int(current["revision"]) != int(proposal["base_approved_revision"]):
+                raise RuntimeError("Утверждённый план изменился. Обновите предложения.")
+            if (int(catalog[0]) if catalog else 0) != int(proposal["catalog_revision"]):
+                raise RuntimeError("Каталог изменился. Обновите предложения.")
+            availability = [dict(row) for row in connection.execute(
+                "SELECT engineer_id,sprint,availability_rate,source_type,source_id,"
+                "reason,created_at,updated_at FROM engineer_availability "
+                "ORDER BY sprint,engineer_id,source_type,source_id"
+            ).fetchall()]
+            if availability != proposal.get("base_availability_constraints"):
+                raise RuntimeError("Доступность изменилась. Обновите предложения.")
+            saved = self._write_approved(connection, payload)
+            updated = {**dict(proposal), "status": "APPROVED",
+                       "approved_revision": saved["approved_snapshot"]["revision"],
+                       "approved_at": datetime.now(timezone.utc).isoformat()}
+            connection.execute(
+                "UPDATE replan_workflows SET payload=?,updated_at=? WHERE workflow_id=?",
+                (_json_payload(updated), updated["approved_at"], updated["workflow_id"]),
+            )
+        return saved, updated
 
     def _seed_if_empty(
         self, tables: Mapping[str, Iterable[Mapping[str, Any]]]
@@ -1340,6 +1513,38 @@ class CatalogRepository:
             row for row in tables["engineer_skills"]
             if _text(row.get("engineer_id")) in active_engineer_ids
         ]
+        # Completed training qualifies the same person for an additional role
+        # or skill; duplicate role rows keep the existing membership bucket.
+        approved = self.load_approved_plan() or {}
+        current_sprint = min(
+            int((approved.get("_planning_state") or {}).get("completed_through_sprint") or 0) + 1,
+            6,
+        )
+        for overlay in self.capability_overlays():
+            if int(overlay["effective_from_sprint"]) > current_sprint:
+                continue
+            engineer_id = _text(overlay.get("engineer_id"))
+            value = _text(overlay.get("capability_value"))
+            if engineer_id not in active_engineer_ids or not value:
+                continue
+            if overlay["capability_type"] == "SKILL":
+                if not any(_text(row.get("engineer_id")) == engineer_id
+                           and _text(row.get("technology")) == value
+                           for row in result["engineer_skills"]):
+                    result["engineer_skills"].append({"engineer_id": engineer_id,
+                                                       "technology": value,
+                                                       "effective_from_sprint": overlay["effective_from_sprint"]})
+            elif overlay["capability_type"] == "ROLE":
+                members = [row for row in result["engineers"]
+                           if _text(row.get("engineer_id")) == engineer_id]
+                for row in members:
+                    if not any(_text(existing.get("engineer_id")) == engineer_id
+                               and _text(existing.get("team_id")) == _text(row.get("team_id"))
+                               and _text(existing.get("role")) == value
+                               for existing in result["engineers"]):
+                        result["engineers"].append({**row, "role": value,
+                                                    "capability_source": "TRAINING",
+                                                    "effective_from_sprint": overlay["effective_from_sprint"]})
         result["team_history"] = [
             row for row in tables["team_history"]
             if _text(row.get("team_id")) not in archived_teams
