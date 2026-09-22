@@ -818,9 +818,16 @@ class RecommendationDraft:
             if change_id in existing:
                 continue
             recommendation = self._all_recommendations.get(change_id, {})
+            label = recommendation.get("title") or "Изменение лучшего варианта"
+            if recommendation.get("type") == "CROSS_TEAM_HELP":
+                row = (recommendation.get("engineer_help") or [{}])[0]
+                label = f"{row.get('engineer_name') or row.get('engineer_id') or 'Специалист'} помогает {row.get('target_team') or 'команде'}"
+            elif recommendation.get("type") == "TASK_REASSIGNMENT":
+                row = (recommendation.get("task_reassignment") or [{}])[0]
+                label = f"{row.get('task_id') or recommendation.get('task_id')} → {row.get('to_team') or 'другая команда'}"
             self.accepted.append({
                 "change_id": change_id, "action": deepcopy(action),
-                "title": recommendation.get("title") or "Изменение лучшего варианта",
+                "title": label,
                 "task_id": recommendation.get("task_id") or min(_action_task_ids(action), default=None),
                 "tasks": deepcopy(recommendation.get("tasks") or _action_task_ids(action)),
                 "summary": recommendation.get("effect", {}).get("summary") or "Изменение из сохранённого лучшего варианта.",
