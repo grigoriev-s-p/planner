@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2942bb">
   <title>PostCode — планирование команд</title>
-  <link rel="stylesheet" href="/styles.css?v=20260922-01">
+  <link rel="stylesheet" href="/styles.css?v=20260921-36">
 </head>
 <body>
   <div class="shell">
@@ -34,7 +34,7 @@
       <section class="page engineer-page" id="page-engineer-tasks" aria-labelledby="engineerTasksTitle"><div id="engineerTasksContent"></div></section>
 
       <section class="page" id="page-planning" aria-labelledby="planningTitle">
-        <div class="page-intro"><div><h1 id="planningTitle">Планирование</h1><p>Сформируйте состав задач и команд для построения квартального плана.</p></div><div class="page-intro-icon" aria-hidden="true">✶</div></div>
+        <div class="page-intro"><div><h1 id="planningTitle">Планирование</h1></div><div class="page-intro-icon" aria-hidden="true">✶</div></div>
         <div class="constructor-mode-switch" role="tablist" aria-label="Сценарий построения плана"><button class="constructor-mode-button active" type="button" role="tab" aria-selected="true" data-constructor-mode="manual">Составить вручную</button><button class="constructor-mode-button" type="button" role="tab" aria-selected="false" data-constructor-mode="upload">Загрузить датасет</button></div>
 
         <section id="constructorManualMode" class="constructor-mode-view">
@@ -63,8 +63,8 @@
 
         <section id="constructorUploadMode" class="constructor-mode-view" hidden>
           <div class="panel constructor-dataset-panel">
-            <div class="constructor-dataset-copy"><span class="constructor-upload-icon" aria-hidden="true">↑</span><div><h2>Автоматическое планирование из Excel</h2><p id="constructorDatasetStatus" aria-live="polite">Загрузите датасет — planner сам выберет задачи, команды и распределит работу по шести спринтам.</p></div></div>
-            <div class="constructor-dataset-actions"><input id="constructorDatasetInput" type="file" accept=".xlsx,.xlsm" hidden><button class="btn btn-blue" id="uploadConstructorDataset" type="button">Загрузить и построить план</button></div>
+            <div class="constructor-dataset-copy"><span class="constructor-upload-icon" aria-hidden="true">↑</span><div><h2>Построение квартального плана</h2><p id="constructorDatasetStatus" aria-live="polite">Загрузите датасет — planner сам выберет задачи, команды и распределит работу по шести спринтам.</p></div></div>
+            <div class="constructor-dataset-actions"><input id="constructorDatasetInput" type="file" accept=".xlsx,.xlsm" hidden><button class="btn btn-blue" id="uploadConstructorDataset" type="button">Загрузить файл</button></div>
           </div>
         </section>
         <section id="constructorPreview" class="constructor-preview" hidden aria-live="polite"></section>
@@ -88,7 +88,7 @@
 
       <section class="page" id="page-current-sprint" aria-labelledby="currentSprintTitle">
         <div class="current-sprint-toolbar"><button class="btn btn-outline" type="button" data-page="current-plan">← К текущему плану</button><button class="btn btn-danger-outline" type="button" id="openSprintCloseDialog">Завершить спринт</button></div>
-        <div class="page-intro planning-hero current-sprint-hero"><div><h1 id="currentSprintTitle">Текущий спринт</h1><p id="currentSprintIntro" hidden>Задачи, команды и запланированная загрузка.</p></div><div class="page-intro-icon">✓</div></div>
+        <div class="page-intro planning-hero current-sprint-hero"><div><h1 id="currentSprintTitle">Текущий спринт</h1></div><div class="page-intro-icon">✓</div></div>
         <div id="currentSprintNotice"></div>
         <div id="currentSprintSummary" class="current-sprint-summary"></div>
         <article class="panel current-sprint-section"><div class="panel-heading"><div><h2>Задачи спринта</h2><p class="hint">ID, название, SP, Rung и команда. Откройте задачу для подробностей.</p></div><span class="tag" id="currentSprintTaskCount">0</span></div><div id="currentSprintTasks" class="current-sprint-task-list"></div></article>
@@ -133,7 +133,7 @@
       </section>
 
       <section class="page" id="page-engineer-detail" aria-labelledby="engineerDetailTitle">
-        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-engineer-back>← Назад</button><div id="engineerDetailActions"></div></div>
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-engineer-back>← Назад</button></div>
         <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ ИНЖЕНЕРА</div><h1 id="engineerDetailTitle">Инженер</h1><p id="engineerDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◉</div></div>
         <div id="engineerDetailState" aria-live="polite"></div>
         <div id="engineerDetailContent" hidden>
@@ -167,7 +167,7 @@
       </section>
 
       <section class="page" id="page-team-detail" aria-labelledby="teamDetailTitle">
-        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-team-back>← Назад</button><div id="teamDetailActions"></div></div>
+        <div class="entity-detail-toolbar"><button class="btn btn-outline" type="button" data-team-back>← Назад</button></div>
         <div class="page-intro entity-detail-hero"><div><div class="eyebrow">ПРОФИЛЬ КОМАНДЫ</div><h1 id="teamDetailTitle">Команда</h1><p id="teamDetailMeta">Загружаем утверждённый план…</p></div><div class="page-intro-icon" aria-hidden="true">◆</div></div>
         <div id="teamDetailState" aria-live="polite"></div>
         <div id="teamDetailContent" hidden>
@@ -284,8 +284,8 @@
     <div class="app-toast" id="appToast" role="status" aria-live="polite" hidden></div>
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
-  <script src="/api.js?v=20260921-17"></script>
-  <script src="/constructor.js?v=20260922-18"></script>
-  <script src="/app.js?v=20260921-27"></script>
+  <script src="/api.js?v=20260921-15"></script>
+  <script src="/constructor.js?v=20260921-15"></script>
+  <script src="/app.js?v=20260921-26"></script>
 </body>
 </html>

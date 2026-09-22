@@ -19,7 +19,6 @@ window.planConstructor = (() => {
   let activeRecommendationId = null;
   let recommendationUpdateInFlight = false;
   let editingSkillRequirements = [];
-  let formContext = 'scenario';
   let skillExtractionTimer = null;
   let bound = false;
 
@@ -86,8 +85,8 @@ window.planConstructor = (() => {
     return `<article class="recommendation-card ${rejected ? 'recommendation-card--rejected' : ''} ${applying ? 'recommendation-card--loading' : ''}" id="recommendation-${esc(item.recommendation_id)}"><div class="recommendation-card-title"><b>${esc(item.title)}</b><span>${rejected ? `Отклонено · ${esc(label)}` : esc(label)}</span></div>${action ? `<p class="recommendation-action">${esc(action)}</p>` : ''}<div class="recommendation-effect">${effectLines}</div><p class="recommendation-description">${esc(effect.summary || 'План станет выполнимее.')}</p><details><summary>Подробнее</summary><div class="recommendation-details">${details || '<p>Изменение рассчитано в сохранённом варианте плана.</p>'}</div></details><div class="recommendation-actions">${!rejected ? `<button type="button" class="btn btn-outline" data-recommendation-reject="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>Отклонить</button>` : ''}<button type="button" class="btn btn-blue" data-recommendation-apply="${esc(item.recommendation_id)}" ${recommendationUpdateInFlight ? 'disabled' : ''}>${applying ? 'Применяем…' : 'Применить'}</button></div></article>`;
   }
 
-  function optimizationSummaryCard(label, summary) {
-    return `<div class="optimization-summary-card"><span>${label}</span><b>${number(summary.planned_tasks)} задач</b><small>${number(summary.initiatives)} инициатив завершится полностью</small></div>`;
+  function optimizationSummaryCard(label, summary, className = '') {
+    return `<div class="optimization-summary-card ${className}"><span>${label}</span><b>${number(summary.planned_tasks)} задач</b><small>${number(summary.initiatives)} инициатив завершится полностью</small></div>`;
   }
 
   function optimizationSummary() {
@@ -95,7 +94,7 @@ window.planConstructor = (() => {
     const base = optimization.base_summary || {};
     const current = optimization.current_summary || {};
     const best = optimization.optimized_summary || {};
-    return `<section class="optimization-summary">${optimizationSummaryCard('Базовый план', base)}${optimizationSummaryCard('Текущий вариант', current)}${optimizationSummaryCard('Лучший найденный вариант', best)}</section>`;
+    return `<section class="optimization-summary">${optimizationSummaryCard('Базовый план', base)}${optimizationSummaryCard('Текущий вариант', current)}${optimizationSummaryCard('Лучший найденный вариант', best, 'optimization-summary-card--best')}</section>`;
   }
 
   function acceptedChangesPanel() {
@@ -135,7 +134,7 @@ window.planConstructor = (() => {
     const rejected = [...locallyRejectedRecommendations.values()];
     const rejectedSection = rejected.length ? `<section class="recommendation-group recommendation-group--rejected"><h4>Отклонённые <small>${rejected.length}</small></h4><div class="recommendation-list">${rejected.map((item) => recommendationCard(item, true)).join('')}</div></section>` : '';
     const activeContent = groups.length ? `<div class="recommendation-groups-scroll">${cards}</div>` : '<p class="muted">Дополнительных улучшений не найдено.</p>';
-    return `<section class="preview-section recommendations-section"><div class="recommendations-heading"><div><h3>Как можно улучшить план</h3><p>Отдельные изменения рассчитаны в сохранённом лучшем варианте и применяются независимо.</p></div><label class="recommendations-change-toggle"><input id="showPlanChanges" type="checkbox" ${showPlanChanges ? 'checked' : ''}><span>Показывать изменения</span></label></div><div class="recommendation-comparison"><div><span>Текущий вариант</span><b>${number(current.planned_tasks)} задач · ${number(current.initiatives)} инициатив</b></div><div><span>Лучший найденный</span><b>${number(best.planned_tasks)} задач · ${number(best.initiatives)} инициатив</b></div></div>${applyAll}${activeContent}${rejectedSection}</section>`;
+    return `<section class="preview-section recommendations-section"><div class="recommendations-heading"><div><h3>Как можно улучшить план</h3><p>Отдельные изменения рассчитаны в сохранённом лучшем варианте и применяются независимо.</p></div><label class="recommendations-change-toggle"><input id="showPlanChanges" type="checkbox" ${showPlanChanges ? 'checked' : ''}><span>Показывать изменения</span></label></div><div class="recommendation-comparison"><div><span>Текущий вариант</span><b>${number(current.planned_tasks)} задач · ${number(current.initiatives)} инициатив</b></div><div class="recommendation-comparison-best"><span>Лучший найденный</span><b>${number(best.planned_tasks)} задач · ${number(best.initiatives)} инициатив</b></div></div>${applyAll}${activeContent}${rejectedSection}</section>`;
   }
 
   function invalidatePreview() {
@@ -166,6 +165,21 @@ window.planConstructor = (() => {
     return previewReasons(task).map((message) => `<div class="preview-reason-block"><span>${esc(message)}</span></div>`).join('');
   }
 
+  function appliedRecommendationTaskIds() {
+    const ids = new Set();
+    const add = (value) => { if (value) ids.add(String(value)); };
+    (previewPlan?.optimization?.accepted_changes || []).forEach((item) => {
+      add(item.task_id);
+      (item.tasks || []).forEach(add);
+      const action = item.action || {};
+      add(action.task_id);
+      (action.tasks || []).forEach(add);
+      (action.changes || []).forEach((change) => add(change.task_id));
+    });
+    changedTaskEffects.forEach((item) => add(item.task_id));
+    return ids;
+  }
+
   function previewSprintCard(task, sprint) {
     const continuation = Number(task.start_sprint) < sprint;
     const sprintSp = Number(task.sp_load_by_sprint?.[String(sprint)] || 0);
@@ -175,7 +189,8 @@ window.planConstructor = (() => {
     const reassigned = task.team_reassigned && task.original_team_id
       ? `<small class="preview-reassigned">Исходная команда: ${esc(task.original_team_id)}</small>` : '';
     const changed = changedTaskEffects.some((item) => item.task_id === task.task_id);
-    return `<article class="preview-task-card ${continuation ? 'preview-continuation' : ''} ${changed ? 'task-card--just-added' : ''}" data-preview-task="${esc(task.task_id)}" data-preview-sprint="${sprint}"><div><b>${continuation ? '↳ ' : ''}${esc(task.task_id)}</b><span class="rung-badge">R${esc(task.rung)}</span></div><strong>${continuation ? 'Продолжение' : esc(task.title)}</strong><small>Всего задачи: ${number(task.story_points)} SP</small><small>В Sprint ${sprint}: ${number(sprintSp)} SP</small><small>Часы в спринте: ${number(sprintHours)} ч</small><small>${esc(task.assigned_team_id || 'Команда не назначена')}</small>${reassigned}${helperNote}</article>`;
+    const recommended = appliedRecommendationTaskIds().has(String(task.task_id));
+    return `<article class="preview-task-card ${continuation ? 'preview-continuation' : ''} ${recommended ? 'preview-task-card--recommended' : ''} ${changed ? 'task-card--just-added' : ''}" data-preview-task="${esc(task.task_id)}" data-preview-sprint="${sprint}"><div><b>${continuation ? '↳ ' : ''}${esc(task.task_id)}</b><span class="rung-badge">R${esc(task.rung)}</span></div><strong>${continuation ? 'Продолжение' : esc(task.title)}</strong><small>Всего задачи: ${number(task.story_points)} SP</small><small>В Sprint ${sprint}: ${number(sprintSp)} SP</small><small>Часы в спринте: ${number(sprintHours)} ч</small><small>${esc(task.assigned_team_id || 'Команда не назначена')}</small>${reassigned}${helperNote}</article>`;
   }
 
   function previewCrossTeamRows(plan) {
@@ -226,7 +241,7 @@ window.planConstructor = (() => {
       if (stored && Array.isArray(stored.teams) && Array.isArray(stored.tasks)) {
         draft = {
           teams: stored.teams,
-          engineers: [],
+          engineers: Array.isArray(stored.engineers) ? stored.engineers : [],
           tasks: stored.tasks.map((task) => ({...task, team_id: null})),
         };
       }
@@ -485,7 +500,7 @@ window.planConstructor = (() => {
       setDatasetStatus(String(error?.message || error).replaceAll('\n', ' · '), 'error');
     } finally {
       button.disabled = false;
-      button.textContent = 'Загрузить и построить план';
+      button.textContent = 'Загрузить файл';
       $c('#constructorDatasetInput').value = '';
     }
   }
@@ -559,22 +574,20 @@ window.planConstructor = (() => {
 
   function renderCatalogs() {
     const teamQuery = searchValue('#constructorTeamSearch');
-    const allTeams = catalog.teams;
+    // Include newly created scenario-only teams in the same picker as the
+    // persistent catalog. They remain selected until the user removes them
+    // from the draft and disappear only after that explicit action.
+    const allTeams = catalogWithDraft('teams');
     const teams = allTeams
       .filter((team) => `${team.team_id} ${team.name}`.toLowerCase().includes(teamQuery))
       .sort((left, right) => (
-        Number(right.expected_velocity_sp ?? right.capacity_sp ?? 0) - Number(left.expected_velocity_sp ?? left.capacity_sp ?? 0)
+        Number(right.expected_velocity_sp || 0) - Number(left.expected_velocity_sp || 0)
         || String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru')
       ));
-      $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => {
-        const capacityLabel = team.expected_velocity_sp != null
-          ? `Исторический velocity: ${esc(team.expected_velocity_sp)} SP`
-          : (team.capacity_sp != null ? `Ручная capacity: ${esc(team.capacity_sp)} SP` : 'Capacity не задана');
-        return `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${capacityLabel}</small></span></label>`;
-      }).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
+    $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP${team.source === 'draft' ? ' · Новая команда' : ''}</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
 
     const taskQuery = searchValue('#constructorTaskSearch');
-    const allTasks = catalog.tasks;
+    const allTasks = catalogWithDraft('tasks');
     const tasks = allTasks.filter((task) => `${task.task_id} ${task.title} ${task.initiative_id || ''}`.toLowerCase().includes(taskQuery));
     const selectableTasks = allTasks.filter((task) => !isHistoricalDoneTask(task));
     $c('#constructorTaskCatalog').innerHTML = `${!taskQuery && selectableTasks.length ? selectAllControl('tasks', selectableTasks) : ''}${tasks.map((task) => { const completed = isHistoricalDoneTask(task); return `<div class="constructor-option constructor-task-option ${completed ? 'constructor-task-completed' : ''}"><label class="constructor-task-pick"><input type="checkbox" data-constructor-pick="tasks" value="${esc(task.task_id)}" ${completed || findDraft('tasks', task.task_id) ? 'checked' : ''} ${completed ? 'disabled' : ''}><span><b>${esc(task.task_id)} · ${esc(task.title)}</b><small>R${esc(task.rung)} · ${number(task.story_points)} SP</small>${completed ? '<small>✓ Завершена до начала планирования</small>' : ''}</span></label><button type="button" class="constructor-task-open" data-open-task="${esc(task.task_id)}" aria-label="Открыть задачу ${esc(task.task_id)}">↗</button></div>`; }).join('') || '<div class="empty-state">Задачи не найдены.</div>'}`;
@@ -588,33 +601,51 @@ window.planConstructor = (() => {
 
   function renderDraft() {
     $c('#constructorCounters').innerHTML = [
-      ['Команды', draft.teams.length], ['Задачи', draft.tasks.length],
+      ['Команды', draft.teams.length], ['Инженеры', draft.engineers.length], ['Задачи', draft.tasks.length],
     ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
     $c('#constructorDraftEntities').innerHTML = [
-      entityRows('Команды', 'teams', draft.teams, (item) => item.expected_velocity_sp != null ? `Исторический velocity: ${item.expected_velocity_sp} SP` : `Ручная capacity: ${item.capacity_sp ?? 'не задана'} SP`),
+      entityRows('Команды', 'teams', draft.teams, (item) => `${item.expected_velocity_sp} SP`),
+      entityRows('Инженеры', 'engineers', draft.engineers, (item) => {
+        const assignment = item.assignments?.[0];
+        return [assignment?.team_id, assignment?.role, assignment?.grade].filter(Boolean).join(' · ');
+      }),
       entityRows('Задачи', 'tasks', draft.tasks, () => ''),
     ].join('');
   }
 
   function automaticEngineers() {
     const selectedTeams = new Set(draft.teams.map((team) => team.team_id));
-    return catalog.engineers.map((engineer) => {
-      const assignments = engineer.assignments
-        .filter((assignment) => selectedTeams.has(assignment.team_id))
-        .map((assignment) => clone(assignment));
-      // An engineer without a team is a shared pool resource. Preserve the
-      // null team bucket so the planner can lend this capacity to any
-      // selected team instead of dropping the engineer from the scenario.
-      if (engineer.free_assignment && Number(engineer.available_capacity_rate ?? engineer.free_assignment.capacity_rate ?? 0) > 0) {
-        assignments.push({
-          team_id: null,
-          role: engineer.free_assignment.role,
-          grade: engineer.free_assignment.grade || null,
-          capacity_rate: Number(engineer.available_capacity_rate ?? engineer.free_assignment.capacity_rate),
-        });
-      }
-      return {...clone(engineer), assignments};
-    }).filter((engineer) => engineer.assignments.length > 0);
+    const engineers = catalog.engineers.map((engineer) => ({
+      ...clone(engineer),
+      assignments: engineer.assignments.filter((assignment) => selectedTeams.has(assignment.team_id)),
+    })).filter((engineer) => engineer.assignments.length > 0);
+    const usedIds = new Set(engineers.map((engineer) => engineer.engineer_id));
+    draft.engineers.forEach((engineer) => {
+      const scenarioAssignments = (engineer.assignments || []).filter((assignment) => selectedTeams.has(assignment.team_id));
+      if (!scenarioAssignments.length) return;
+      const scenarioEngineer = {...clone(engineer), assignments: scenarioAssignments};
+      const existingIndex = engineers.findIndex((item) => item.engineer_id === engineer.engineer_id);
+      if (existingIndex >= 0) engineers[existingIndex] = scenarioEngineer;
+      else engineers.push(scenarioEngineer);
+      usedIds.add(engineer.engineer_id);
+    });
+    draft.teams.forEach((team) => (team.engineer_ids || []).forEach((engineerId) => {
+      if (usedIds.has(engineerId)) return;
+      const source = findCatalog('engineers', engineerId);
+      const availability = source?.free_assignment;
+      if (!source || source.assignments.length || !availability?.role) return;
+      engineers.push({
+        ...clone(source),
+        assignments: [{
+          team_id: team.team_id,
+          role: availability.role,
+          grade: availability.grade || null,
+          capacity_rate: Number(availability.capacity_rate || 1),
+        }],
+      });
+      usedIds.add(engineerId);
+    }));
+    return engineers;
   }
 
   function errorsForDraft() {
@@ -623,11 +654,9 @@ window.planConstructor = (() => {
     if (!draft.teams.length) errors.push('Выберите или добавьте хотя бы одну команду.');
     if (!draft.tasks.length) errors.push('Выберите или добавьте хотя бы одну задачу.');
     const engineers = automaticEngineers();
-    const engineerTeams = new Set(engineers.flatMap((engineer) => engineer.assignments.map((assignment) => assignment.team_id).filter(Boolean)));
-    const hasSharedPool = engineers.some((engineer) => engineer.assignments.some((assignment) => !assignment.team_id));
+    const engineerTeams = new Set(engineers.flatMap((engineer) => engineer.assignments.map((assignment) => assignment.team_id)));
     draft.teams.forEach((team) => {
-      if (!engineerTeams.has(team.team_id) && !hasSharedPool) errors.push(`Для команды ${team.name || team.team_id} не выбран ни один доступный инженер.`);
-      if (team.expected_velocity_sp == null && team.capacity_sp == null) errors.push(`Для команды ${team.name || team.team_id} укажите ручную capacity за спринт.`);
+      if (!engineerTeams.has(team.team_id)) errors.push(`Для команды ${team.name || team.team_id} не выбран ни один доступный инженер.`);
     });
     if (draft.teams.length && !engineers.length) errors.push('Для выбранных команд в исходном датасете не найден доступный ресурс.');
     draft.tasks.forEach((task) => {
@@ -722,7 +751,7 @@ window.planConstructor = (() => {
   }
 
   function engineerTeamOptions(selectedTeamId = '') {
-    const teams = [...catalog.teams].sort((left, right) => String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru'));
+    const teams = catalogWithDraft('teams').sort((left, right) => String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru'));
     return teams.map((team) => `<option value="${esc(team.team_id)}" ${team.team_id === selectedTeamId ? 'selected' : ''}>${esc(team.name || team.team_id)}</option>`).join('');
   }
 
@@ -731,7 +760,8 @@ window.planConstructor = (() => {
       .filter((team) => team.team_id !== currentTeamId)
       .flatMap((team) => team.engineer_ids || []));
     return catalog.engineers.filter((engineer) => (
-      Number(engineer.available_capacity_rate ?? (engineer.assignments.length ? 0 : 1)) > 0
+      engineer.assignments.length === 0
+      && engineer.free_assignment?.role
       && !reservedByOtherTeams.has(engineer.engineer_id)
     ));
   }
@@ -740,12 +770,11 @@ window.planConstructor = (() => {
     const selected = new Set(team.engineer_ids || []);
     const engineers = freeEngineerCandidates(team.team_id);
     const options = engineers.map((engineer) => {
-      const assignment = engineer.free_assignment || engineer.assignments?.[0] || {};
-      const available = Number(engineer.available_capacity_rate ?? assignment.capacity_rate ?? 1);
-      const details = [assignment.role, assignment.grade, `доступно ${number(available * 100)}%`].filter(Boolean).join(' · ');
+      const assignment = engineer.free_assignment;
+      const details = [assignment.role, assignment.grade, `${number(Number(assignment.capacity_rate || 1) * 100)}%`].filter(Boolean).join(' · ');
       return `<label class="constructor-option"><input type="checkbox" name="team_engineer_id" value="${esc(engineer.engineer_id)}" ${selected.has(engineer.engineer_id) ? 'checked' : ''}><span><b>${esc(engineer.name || engineer.engineer_id)}</b><small>${esc(details)}</small></span></label>`;
     }).join('');
-    return `<fieldset class="constructor-free-engineers"><legend>Инженеры с доступной долей участия</legend><p class="muted">Показан актуальный каталог. Пустую команду можно сохранить без инженеров.</p><div class="constructor-pick-list">${options || '<div class="empty-state">Нет инженеров со свободной долей. Команду всё равно можно создать пустой.</div>'}</div></fieldset>`;
+    return `<fieldset class="constructor-free-engineers"><legend>Свободные инженеры</legend><p class="muted">Можно выбрать только специалистов, которые не закреплены за другой командой.</p><div class="constructor-pick-list">${options || '<div class="empty-state">Свободных инженеров сейчас нет.</div>'}</div></fieldset>`;
   }
 
   function updateDependencyView() {
@@ -767,23 +796,18 @@ window.planConstructor = (() => {
     menu.classList.toggle('opens-up', spaceBelow < menuHeight && spaceAbove > spaceBelow);
   }
 
-  function openForm(type, id = null, context = 'scenario') {
-    formContext = context;
+  function openForm(type, id = null) {
     const dialog = $c('#constructorDialog');
     const item = id ? clone(findDraft(type, id)) : null;
     const content = $c('#constructorDialogContent');
     if (type === 'teams') {
-      const team = item || {team_id: '', name: '', expected_velocity_sp: null, capacity_sp: '', engineer_ids: []};
-      const historicalVelocity = team.expected_velocity_sp != null;
-      const scenarioCapacity = historicalVelocity
-        ? `<p class="muted">Исторический velocity: <b>${esc(team.expected_velocity_sp)} SP</b>. Capacity команды будет рассчитана по историческим данным.</p>`
-        : `<label>Ручная capacity за спринт, SP<input name="capacity_sp" type="number" inputmode="numeric" min="0" step="1" value="${esc(team.capacity_sp ?? '')}" required><small>Для новой команды укажите capacity целым числом SP за спринт.</small></label>`;
-      content.innerHTML = `<h2>${item ? 'Изменить настройки сценария для' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" ${item ? 'readonly' : ''} required></label>${scenarioCapacity}${!item ? freeEngineerPicker(team) : ''}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      const team = item || {team_id: '', name: '', expected_velocity_sp: 20, engineer_ids: []};
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label>${freeEngineerPicker(team)}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'engineers') {
       const engineer = item || {engineer_id: '', name: '', assignments: [{team_id: '', role: '', grade: '', capacity_rate: 1}], skills: []};
       const assignment = engineer.assignments?.[0] || {team_id: '', role: '', grade: '', capacity_rate: 1};
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда (необязательно)<select name="team_id"><option value="">Команда не назначена</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required><small>Если роли ещё нет, введите новое название.</small></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior"></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.01" inputmode="decimal" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL"></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность, от 0 до 1<input name="capacity_rate" type="number" min="0.01" max="1" step="0.01" inputmode="decimal" value="${esc(assignment.capacity_rate ?? 1)}" required><small>Например, 1 — полная доступность, 0.5 — половина времени.</small></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], required_skills: [], depends_on: []};
@@ -800,7 +824,7 @@ window.planConstructor = (() => {
     }
   }
 
-  async function saveEntity(form) {
+  function saveEntity(form) {
     const type = form.dataset.formType;
     const values = new FormData(form);
     const key = idField(type);
@@ -816,36 +840,26 @@ window.planConstructor = (() => {
     }
     let entity;
     if (type === 'teams') {
-      const capacityValue = String(values.get('capacity_sp') || '').trim();
-      const capacity = capacityValue ? Number(capacityValue) : null;
-      if (capacity != null && (!Number.isFinite(capacity) || !Number.isInteger(capacity))) {
-        const input = form.elements.capacity_sp;
-        input.setCustomValidity('Ручная capacity указывается целым числом SP.');
-        input.reportValidity();
-        input.addEventListener('input', () => input.setCustomValidity(''), {once: true});
-        return;
-      }
-      entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: findCatalog('teams', id)?.expected_velocity_sp ?? null, capacity_sp: capacity, engineer_ids: values.getAll('team_engineer_id').map(String), source: 'catalog'};
+      entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: Number(values.get('expected_velocity_sp')), engineer_ids: values.getAll('team_engineer_id').map(String), source: existing?.source || 'draft'};
     }
     if (type === 'engineers') {
       const teamId = String(values.get('team_id') || '').trim();
       entity = {
         engineer_id: id,
         name: String(values.get('name') || '').trim(),
-        assignments: teamId ? [{
+        assignments: [{
           team_id: teamId,
           role: String(values.get('role') || '').trim(),
           grade: String(values.get('grade') || '').trim(),
           capacity_rate: Number(values.get('capacity_rate')),
-        }] : [],
-        free_assignment: teamId ? null : {
-          role: String(values.get('role') || '').trim(),
-          grade: String(values.get('grade') || '').trim() || null,
-          capacity_rate: Number(values.get('capacity_rate')),
-        },
+        }],
         skills: csvValues(values.get('skills')),
-        source: 'catalog',
+        source: existing?.source || 'draft',
       };
+      if (!findDraft('teams', teamId)) {
+        const sourceTeam = findCatalog('teams', teamId);
+        if (sourceTeam) draft.teams.push(clone(sourceTeam));
+      }
     }
     if (type === 'tasks') {
       const storyPoints = Number(String(values.get('story_points')).replace(',', '.'));
@@ -855,53 +869,28 @@ window.planConstructor = (() => {
         skills: csvValues($c('[name="requirement_skills"]', row).value),
       }));
       const dependsOn = $$c('[name="dependency_id"]:checked', form).map((input) => input.value);
-      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, required_skills: clone(editingSkillRequirements), depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: 'catalog'};
+      entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, required_skills: clone(editingSkillRequirements), depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: existing?.source || 'draft'};
+      dependsOn.forEach((dependencyId) => {
+        if (findDraft('tasks', dependencyId)) return;
+        const source = findCatalog('tasks', dependencyId);
+        if (source && !isHistoricalDoneTask(source)) draft.tasks.push(clone(source));
+      });
     }
-    const submit = form.querySelector('[type="submit"]');
-    submit.disabled = true;
-    submit.textContent = 'Сохраняем…';
-    try {
-      if (!editing) {
-        if (type === 'engineers') {
-          const assignment = entity.assignments?.[0] || entity.free_assignment;
-          await api.createEngineer({
-            engineer_id: entity.engineer_id, name: entity.name,
-            team_id: entity.assignments?.[0]?.team_id || null,
-            role: assignment.role, grade: assignment.grade || null,
-            capacity_rate: assignment.capacity_rate, skills: entity.skills,
-          });
-        }
-        if (type === 'teams') await api.createTeam({team_id: entity.team_id, name: entity.name, engineer_ids: entity.engineer_ids, capacity_sp: entity.capacity_sp});
-        if (type === 'tasks') await api.createTask(entity);
-        catalog = await api.getConstructorCatalog();
-        onCatalogUpdated(catalog);
-      }
-      const canonical = findCatalog(type, id) || entity;
-      if (formContext === 'scenario' && type !== 'engineers') {
-        const scenarioEntity = clone(canonical);
-        if (type === 'teams') {
-          scenarioEntity.expected_velocity_sp = entity.expected_velocity_sp;
-          scenarioEntity.capacity_sp = entity.capacity_sp;
-        }
-        if (type === 'tasks') scenarioEntity.team_id = null;
-        if (existing) draft[type] = draft[type].map((item) => item[key] === id ? scenarioEntity : item);
-        else if (!findDraft(type, id)) draft[type].push(scenarioEntity);
-      }
-      if (type === 'tasks' && !editing) $c('#constructorTaskSearch').value = '';
-      invalidatePreview();
-      saveDraft();
-      $c('#constructorDialog').close();
-      render();
-      window.dispatchEvent(new CustomEvent('postcode:catalog-entity-created', {detail: {
-        type, id, selectedInScenario: formContext === 'scenario' && type !== 'engineers', catalog,
-      }}));
-    } catch (error) {
-      const box = form.querySelector('.constructor-form-error') || document.createElement('div');
-      box.className = 'constructor-form-error';
-      box.textContent = String(error?.message || error);
-      if (!box.parentElement) form.querySelector('.constructor-form-actions')?.before(box);
-      submit.disabled = false;
-      submit.textContent = 'Сохранить';
+    if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
+    else draft[type].push(entity);
+    if (type === 'tasks' && !editing) $c('#constructorTaskSearch').value = '';
+    invalidatePreview();
+    saveDraft();
+    $c('#constructorDialog').close();
+    render();
+    if (type === 'tasks' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-task-added', {detail: {taskId: id}}));
+    }
+    if (type === 'engineers' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-engineer-added', {detail: {engineerId: id}}));
+    }
+    if (type === 'teams' && !editing) {
+      window.dispatchEvent(new CustomEvent('postcode:constructor-team-added', {detail: {teamId: id}}));
     }
   }
 
@@ -1007,8 +996,8 @@ window.planConstructor = (() => {
     if (bound) return;
     bound = true;
     ['#constructorTeamSearch', '#constructorTaskSearch'].forEach((selector) => $c(selector).addEventListener('input', renderCatalogs));
-    $c('#addConstructorTeam').addEventListener('click', () => openForm('teams', null, 'scenario'));
-    $c('#addConstructorTask').addEventListener('click', () => openForm('tasks', null, 'scenario'));
+    $c('#addConstructorTeam').addEventListener('click', () => openForm('teams'));
+    $c('#addConstructorTask').addEventListener('click', () => openForm('tasks'));
     $c('#uploadConstructorDataset').addEventListener('click', () => $c('#constructorDatasetInput').click());
     $c('#constructorDatasetInput').addEventListener('change', (event) => {
       const file = event.target.files?.[0];
@@ -1042,7 +1031,7 @@ window.planConstructor = (() => {
       const selectAll = event.target.closest('[data-constructor-select-all]');
       if (selectAll) {
         const type = selectAll.dataset.constructorSelectAll;
-        toggleAllCatalog(type, type === 'teams' ? catalog.teams : catalog.tasks.filter((task) => !isHistoricalDoneTask(task)), selectAll.checked);
+        toggleAllCatalog(type, type === 'teams' ? catalogWithDraft('teams') : catalogWithDraft('tasks').filter((task) => !isHistoricalDoneTask(task)), selectAll.checked);
         return;
       }
       const pick = event.target.closest('[data-constructor-pick]');
@@ -1202,15 +1191,15 @@ window.planConstructor = (() => {
   }
 
   function openTaskForm() {
-    openForm('tasks', null, 'catalog');
+    openForm('tasks');
   }
 
   function openEngineerForm() {
-    openForm('engineers', null, 'catalog');
+    openForm('engineers');
   }
 
   function openTeamForm() {
-    openForm('teams', null, 'catalog');
+    openForm('teams');
   }
 
   return Object.freeze({initialize, updateCatalog, render, openTaskForm, openEngineerForm, openTeamForm});
