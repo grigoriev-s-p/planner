@@ -298,8 +298,9 @@ function renderArchiveImpact(impact) {
   const teamBlocked = (impact.external_blocked_task_ids || []).length ? `<div class="archive-impact-note danger">При варианте «Убрать задачи» останутся зависимые задачи: ${escapeHtml(impact.external_blocked_task_ids.join(', '))}. Выберите перераспределение или измените зависимости.</div>` : '';
   const unplannable = (impact.unplannable_task_ids || []).length ? `<div class="archive-impact-note danger">После пересчёта могут не войти в план: ${escapeHtml(impact.unplannable_task_ids.join(', '))}.</div>` : '';
   const optimization = impact.optimization_available ? `<div class="archive-impact-note">После удаления план можно оптимизировать: раньше поставить ${escapeHtml((impact.improved_task_ids || []).join(', '))}.</div>` : '';
+  const noPlanImpact = impact.plan_impact_skipped ? '<div class="archive-impact-note">Задача не входит в утверждённый план. Пересчёт и проверка влияния на план не требуются.</div>' : '';
   const simulationError = impact.simulation_error ? `<div class="archive-impact-note danger">Не удалось проверить новый план: ${escapeHtml(impact.simulation_error)}</div>` : '';
-  $('#archiveImpact').innerHTML = `<div class="archive-impact-summary"><div><b>${engineerCount}</b><span>сотрудников</span></div><div><b>${taskCount}</b><span>задач</span></div><div><b>${allocationCount}</b><span>allocations</span></div></div>${decisions.join('')}${replacementRows}${blocked}${teamBlocked}${unplannable}${optimization}${simulationError}`;
+  $('#archiveImpact').innerHTML = `<div class="archive-impact-summary"><div><b>${engineerCount}</b><span>сотрудников</span></div><div><b>${taskCount}</b><span>задач</span></div><div><b>${allocationCount}</b><span>allocations</span></div></div>${noPlanImpact}${decisions.join('')}${replacementRows}${blocked}${teamBlocked}${unplannable}${optimization}${simulationError}`;
   const requiresReplan = state.archive.entityType !== 'task' || impact.requires_replan || impact.optimization_available;
   state.archive = {...state.archive, impact, impactLoaded: true, requiresReplan};
   $('#archiveReplanField').hidden = !requiresReplan;
@@ -2730,9 +2731,9 @@ function bindEvents() {
   $('#resetDataConfirm')?.addEventListener('change', (event) => { $('#confirmResetData').disabled = !event.target.checked; });
   $('#resetDataForm')?.addEventListener('submit', submitResetData);
   $('#resetDataDialog')?.addEventListener('click', (event) => { if (event.target === $('#resetDataDialog')) closeResetDataDialog(); });
-  $('#addTaskFromTasks')?.addEventListener('click', () => window.planConstructor.openTaskForm());
-  $('#addEngineerFromEngineers')?.addEventListener('click', () => window.planConstructor.openEngineerForm());
-  $('#addTeamFromTeams')?.addEventListener('click', () => window.planConstructor.openTeamForm());
+  $('#addTaskFromTasks')?.addEventListener('click', () => window.planConstructor.openTaskForm({saveTarget: 'catalog'}));
+  $('#addEngineerFromEngineers')?.addEventListener('click', () => window.planConstructor.openEngineerForm({saveTarget: 'catalog'}));
+  $('#addTeamFromTeams')?.addEventListener('click', () => window.planConstructor.openTeamForm({saveTarget: 'catalog'}));
   window.addEventListener('postcode:constructor-task-added', (event) => {
     show('planning');
     showToast(`Задача ${event.detail?.taskId || ''} добавлена в черновик сценария и выбрана.`);
@@ -2741,6 +2742,21 @@ function bindEvents() {
     show('planning');
     showToast(`Инженер ${event.detail?.engineerId || ''} добавлен в черновик сценария.`);
   });
+  const refreshCatalogAfterCreate = async (entityType, entityId) => {
+    const page = {task: 'tasks', engineer: 'engineers', team: 'teams'}[entityType];
+    const label = {task: 'Задача', engineer: 'Инженер', team: 'Команда'}[entityType];
+    const verb = {task: 'добавлена', engineer: 'добавлен', team: 'добавлена'}[entityType];
+    try {
+      hydrate(await window.postcodeApi.getDashboard());
+      show(page);
+      showToast(`${label} ${entityId || ''} ${verb} в каталог.`);
+    } catch (error) {
+      showToast(`${label} ${entityId || ''} ${verb}. Обновите страницу, чтобы увидеть его в списке.`);
+    }
+  };
+  window.addEventListener('postcode:catalog-engineer-added', (event) => refreshCatalogAfterCreate('engineer', event.detail?.id));
+  window.addEventListener('postcode:catalog-task-added', (event) => refreshCatalogAfterCreate('task', event.detail?.id));
+  window.addEventListener('postcode:catalog-team-added', (event) => refreshCatalogAfterCreate('team', event.detail?.id));
   window.addEventListener('postcode:constructor-team-added', (event) => {
     show('planning');
     showToast(`Команда ${event.detail?.teamId || ''} добавлена в черновик сценария и выбрана.`);

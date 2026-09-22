@@ -2,6 +2,7 @@
 
 window.planConstructor = (() => {
   const STORAGE_KEY = 'postcode.plan-constructor.v2';
+  const UNASSIGNED_TEAM_VALUE = '__shared_pool__';
   const emptyDraft = () => ({teams: [], engineers: [], tasks: []});
   let catalog = {teams: [], engineers: [], tasks: [], options: {roles: [], skills: [], grades: []}};
   let draft = emptyDraft();
@@ -836,29 +837,31 @@ window.planConstructor = (() => {
     menu.classList.toggle('opens-up', spaceBelow < menuHeight && spaceAbove > spaceBelow);
   }
 
-  function openForm(type, id = null) {
+  function openForm(type, id = null, options = {}) {
     const dialog = $c('#constructorDialog');
     const item = id ? clone(findDraft(type, id)) : null;
     const content = $c('#constructorDialogContent');
+    const saveTarget = options.saveTarget === 'catalog' ? 'catalog' : 'scenario';
     if (type === 'teams') {
       const team = item || {team_id: '', name: '', expected_velocity_sp: null, capacity_sp: '', engineer_ids: []};
       const historicalVelocity = team.expected_velocity_sp != null;
       const scenarioCapacity = historicalVelocity
         ? `<p class="muted">Исторический velocity: <b>${number(team.expected_velocity_sp)} SP</b>. Capacity команды будет рассчитана по историческим данным.</p>`
         : `<label>Ручная capacity за спринт, SP<input name="capacity_sp" type="number" inputmode="numeric" min="0" step="1" value="${esc(team.capacity_sp ?? '')}" required><small>Для новой команды укажите capacity целым числом SP за спринт.</small></label>`;
-      content.innerHTML = `<h2>${item ? 'Изменить настройки сценария для' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" ${item ? 'readonly' : ''} required></label>${scenarioCapacity}${!item ? freeEngineerPicker(team) : ''}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить настройки сценария для' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-save-target="${saveTarget}" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" ${item ? 'readonly' : ''} required></label>${scenarioCapacity}${!item ? freeEngineerPicker(team) : ''}<div id="constructorEntityError" class="constructor-errors" hidden></div><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'engineers') {
       const engineer = item || {engineer_id: '', name: '', assignments: [{team_id: '', role: '', grade: '', capacity_rate: 1}], skills: []};
       const assignment = engineer.assignments?.[0] || {team_id: '', role: '', grade: '', capacity_rate: 1};
       const capacityRate = Number(assignment.capacity_rate) === 0.5 ? 0.5 : 1;
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность<select name="capacity_rate" required><option value="1" ${capacityRate === 1 ? 'selected' : ''}>1 — полная доступность</option><option value="0.5" ${capacityRate === 0.5 ? 'selected' : ''}>0.5 — половина времени</option></select></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      const unassignedSelected = item && !assignment.team_id ? 'selected' : '';
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} инженера</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="engineers" data-save-target="${saveTarget}" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID инженера<input name="engineer_id" value="${esc(engineer.engineer_id)}" ${item ? 'readonly' : ''} required></label><label>Имя<input name="name" value="${esc(engineer.name)}" required></label><label>Команда<select name="team_id" required><option value="">Выберите команду</option><option value="${UNASSIGNED_TEAM_VALUE}" ${unassignedSelected}>Без команды — общий специалист</option>${engineerTeamOptions(assignment.team_id)}</select></label><label>Роль<input name="role" list="constructorRoleOptions" value="${esc(assignment.role)}" required></label><label>Грейд<input name="grade" list="constructorGradeOptions" value="${esc(assignment.grade || '')}" placeholder="Junior, Middle, Senior" required></label><label>Доступность<select name="capacity_rate" required><option value="1" ${capacityRate === 1 ? 'selected' : ''}>1 — полная доступность</option><option value="0.5" ${capacityRate === 0.5 ? 'selected' : ''}>0.5 — половина времени</option></select></label><label class="constructor-wide-field">Навыки через запятую<input name="skills" value="${esc((engineer.skills || []).join(', '))}" placeholder="Python, Kafka, PostgreSQL" required></label></div>${sharedDataLists()}<div id="constructorEntityError" class="constructor-errors" hidden></div><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'tasks') {
       const task = item || {task_id: '', title: '', initiative_id: '', team_id: null, status: 'ToDo', rung: 0, story_points: 1, role_requirements: [{role: '', required_hours: 8, skills: []}], required_skills: [], depends_on: []};
       editingSkillRequirements = clone(task.required_skills || []);
       const skillOptions = (catalog.options.skills || []).map((skill) => `<option value="${esc(skill)}"></option>`).join('');
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button><section class="constructor-skills"><h3>Требуемые компетенции</h3><p class="muted">Точные технологии из названия добавляются автоматически. Предложения можно подтвердить или отклонить.</p><div class="constructor-skill-add"><input id="constructorSkillSearch" list="constructorSkillOptions" placeholder="Найти навык или алиас"><datalist id="constructorSkillOptions">${skillOptions}</datalist><button type="button" class="btn btn-outline" data-add-task-skill>Добавить</button></div><div id="constructorSkillRequirementList"></div></section>${sharedDataLists()}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} задачу</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="tasks" data-save-target="${saveTarget}" data-editing="${Boolean(item)}"><div class="constructor-form-grid"><label>ID задачи<input name="task_id" value="${esc(task.task_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="title" value="${esc(task.title)}" required></label><label>Инициатива<input name="initiative_id" list="constructorInitiativeOptions" value="${esc(task.initiative_id)}" placeholder="Выберите или введите PRODF"></label><label>Статус<select name="status">${optionList(['ToDo', 'InProgress', 'Done'], task.status)}</select></label><label>Приоритет Rung<input name="rung" type="number" step="0.01" value="${esc(task.rung)}" required></label><label class="constructor-sp-field">Story Points<input name="story_points" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${esc(task.story_points)}" required><small>Отдельно от человеко-часов.</small></label>${dependencyPicker(task)}</div><h3>Трудозатраты</h3><div id="constructorRequirementRows">${task.role_requirements.map(requirementRow).join('')}</div><button class="text-button" type="button" data-add-requirement>+ Добавить роль</button><section class="constructor-skills"><h3>Требуемые компетенции</h3><p class="muted">Точные технологии из названия добавляются автоматически. Предложения можно подтвердить или отклонить.</p><div class="constructor-skill-add"><input id="constructorSkillSearch" list="constructorSkillOptions" placeholder="Найти навык или алиас"><datalist id="constructorSkillOptions">${skillOptions}</datalist><button type="button" class="btn btn-outline" data-add-task-skill>Добавить</button></div><div id="constructorSkillRequirementList"></div></section>${sharedDataLists()}<div id="constructorEntityError" class="constructor-errors" hidden></div><div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     document.body.classList.add('constructor-modal-open');
     dialog.showModal();
@@ -869,7 +872,7 @@ window.planConstructor = (() => {
     }
   }
 
-  function saveEntity(form) {
+  async function saveEntity(form) {
     const type = form.dataset.formType;
     const values = new FormData(form);
     const key = idField(type);
@@ -888,7 +891,8 @@ window.planConstructor = (() => {
       entity = {team_id: id, name: String(values.get('name') || '').trim(), expected_velocity_sp: Number(values.get('expected_velocity_sp')), engineer_ids: values.getAll('team_engineer_id').map(String), source: existing?.source || 'draft'};
     }
     if (type === 'engineers') {
-      const teamId = String(values.get('team_id') || '').trim();
+      const selectedTeamId = String(values.get('team_id') || '').trim();
+      const teamId = selectedTeamId === UNASSIGNED_TEAM_VALUE ? '' : selectedTeamId;
       entity = {
         engineer_id: id,
         name: String(values.get('name') || '').trim(),
@@ -915,11 +919,62 @@ window.planConstructor = (() => {
       }));
       const dependsOn = $$c('[name="dependency_id"]:checked', form).map((input) => input.value);
       entity = {task_id: id, title: String(values.get('title') || '').trim(), initiative_id: String(values.get('initiative_id') || '').trim() || null, team_id: existing?.team_id || null, status: String(values.get('status')), rung: Number(values.get('rung')), story_points: storyPoints, role_requirements: requirements, required_skills: clone(editingSkillRequirements), depends_on: dependsOn, planned_start: existing?.planned_start || null, deadline: existing?.deadline || null, source: existing?.source || 'draft'};
-      dependsOn.forEach((dependencyId) => {
-        if (findDraft('tasks', dependencyId)) return;
-        const source = findCatalog('tasks', dependencyId);
-        if (source && !isHistoricalDoneTask(source)) draft.tasks.push(clone(source));
-      });
+      if (form.dataset.saveTarget !== 'catalog') {
+        dependsOn.forEach((dependencyId) => {
+          if (findDraft('tasks', dependencyId)) return;
+          const source = findCatalog('tasks', dependencyId);
+          if (source && !isHistoricalDoneTask(source)) draft.tasks.push(clone(source));
+        });
+      }
+    }
+    if (form.dataset.saveTarget === 'catalog') {
+      const button = $c('[type="submit"]', form);
+      const errorBox = $c('#constructorEntityError', form);
+      button.disabled = true;
+      errorBox.hidden = true;
+      try {
+        if (type === 'teams') await api.createTeam({
+          team_id: entity.team_id,
+          name: entity.name,
+          engineer_ids: entity.engineer_ids,
+          capacity_sp: Number(values.get('capacity_sp')),
+        });
+        if (type === 'engineers') await api.createEngineer({
+          engineer_id: entity.engineer_id,
+          name: entity.name,
+          team_id: entity.assignments[0].team_id,
+          role: entity.assignments[0].role,
+          grade: entity.assignments[0].grade,
+          capacity_rate: entity.assignments[0].capacity_rate,
+          skills: entity.skills,
+        });
+        if (type === 'tasks') await api.createTask({
+          task_id: entity.task_id,
+          title: entity.title,
+          initiative_id: entity.initiative_id,
+          team_id: entity.team_id,
+          status: entity.status,
+          rung: entity.rung,
+          story_points: entity.story_points,
+          planned_start: entity.planned_start,
+          deadline: entity.deadline,
+          role_requirements: entity.role_requirements,
+          required_skills: entity.required_skills,
+          depends_on: entity.depends_on,
+        });
+        const refreshedCatalog = await api.getConstructorCatalog();
+        catalog = refreshedCatalog;
+        onCatalogUpdated(refreshedCatalog);
+        $c('#constructorDialog').close();
+        render();
+        window.dispatchEvent(new CustomEvent(`postcode:catalog-${type.slice(0, -1)}-added`, {detail: {id}}));
+      } catch (error) {
+        errorBox.textContent = String(error?.message || error);
+        errorBox.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+      return;
     }
     if (existing) draft[type] = draft[type].map((item) => item[key] === id ? entity : item);
     else draft[type].push(entity);
@@ -1240,16 +1295,16 @@ window.planConstructor = (() => {
     render();
   }
 
-  function openTaskForm() {
-    openForm('tasks');
+  function openTaskForm(options = {}) {
+    openForm('tasks', null, options);
   }
 
-  function openEngineerForm() {
-    openForm('engineers');
+  function openEngineerForm(options = {}) {
+    openForm('engineers', null, options);
   }
 
-  function openTeamForm() {
-    openForm('teams');
+  function openTeamForm(options = {}) {
+    openForm('teams', null, options);
   }
 
   return Object.freeze({initialize, updateCatalog, render, openTaskForm, openEngineerForm, openTeamForm});

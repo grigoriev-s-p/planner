@@ -3649,6 +3649,25 @@ def _deletion_impact(entity_type: str, entity_id: str) -> dict:
         "allocations": affected_allocations,
         "requires_replan": bool(affected_allocations),
     }
+    if entity_type == "task" and not any(
+        task.get("task_id") == entity_id and task.get("status") == "PLANNED"
+        for task in current.get("tasks", [])
+    ):
+        # A task outside the approved plan has no allocations or current-plan
+        # capacity to release. Keep dependency validation in the catalog layer,
+        # but skip the expensive planner simulation and any optimisation claim.
+        impact.update({
+            "task_ids": [],
+            "allocation_count": 0,
+            "allocations": [],
+            "requires_replan": False,
+            "plan_impact_skipped": True,
+            "optimization_available": False,
+            "improved_task_ids": [],
+            "replacement_options": [],
+            "unplannable_task_ids": [],
+        })
+        return impact
     simulation_engineer_action = "UNASSIGN" if entity_type == "team" else None
     simulation_task_action = "REDISTRIBUTE" if entity_type == "team" else None
     try:
@@ -3802,6 +3821,31 @@ def _archive_entity(
         return {
             **operation,
             "message": "Сущность архивирована в каталоге. Утверждённый план отсутствует.",
+            "current_plan_unchanged": True,
+            "dashboard": _dashboard_with_lifecycle(),
+            "unplannable_task_ids": [],
+            "requires_plan_change": False,
+            "warning": None,
+        }
+    if entity_type == "task" and not references:
+        # The task is not part of the approved plan. Archiving it must not
+        # rebuild that plan merely to discover possible future optimisations.
+        try:
+            operation = repository.archive_with_relations(
+                entity_type,
+                entity_id,
+                request.reason_code,
+                request.reason_text,
+            )
+        except CatalogNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ArchiveValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ArchiveConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            **operation,
+            "message": "Задача удалена из активного каталога. Текущий план не затронут.",
             "current_plan_unchanged": True,
             "dashboard": _dashboard_with_lifecycle(),
             "unplannable_task_ids": [],
