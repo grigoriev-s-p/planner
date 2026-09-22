@@ -101,7 +101,7 @@
       <section class="page" id="page-tasks" aria-labelledby="tasksListTitle">
         <div class="page-intro tasks-list-hero"><div><h1 id="tasksListTitle">Задачи</h1><p>Все задачи текущего набора: приоритет, команда, инициатива и положение в квартальном плане.</p></div><div class="page-intro-icon page-intro-image" aria-hidden="true"><img src="/assets/page-icons/tasks.png" alt=""></div></div>
         <article class="panel tasks-list-panel">
-          <div class="panel-heading"><div><h2>Список задач</h2><p class="hint">Нажмите на ID или строку, чтобы открыть карточку задачи.</p></div><div class="tasks-list-controls"><button class="btn btn-blue" id="addTaskFromTasks" type="button">+ Добавить задачу</button><span class="tag" id="tasksListCount">0</span></div></div>
+          <div class="panel-heading"><h2>Список задач</h2><div class="tasks-list-controls"><button class="btn btn-blue" id="addTaskFromTasks" type="button">+ Добавить задачу</button><span class="tag" id="tasksListCount">0</span></div></div>
           <div id="tasksListState" aria-live="polite"></div>
           <div class="table-scroll" id="tasksTableWrap"><table class="data-table tasks-table"><thead><tr>
             <th><button class="sort-button" type="button" data-task-sort="task_id">ID <span aria-hidden="true"></span></button></th>
@@ -119,7 +119,7 @@
       <section class="page" id="page-engineers" aria-labelledby="engineersListTitle">
         <div class="page-intro entity-list-hero"><div><h1 id="engineersListTitle">Инженеры</h1><p>Состав команд, роли, грейды, навыки и доступность специалистов в текущем спринте.</p></div><div class="page-intro-icon page-intro-image" aria-hidden="true"><img src="/assets/page-icons/engineers.png" alt=""></div></div>
         <article class="panel entity-list-panel">
-          <div class="panel-heading"><div><h2>Список инженеров</h2><p class="hint">Нажмите на инженера, чтобы открыть его профиль.</p></div><div class="entity-list-controls"><button class="btn btn-blue" id="addEngineerFromEngineers" type="button">+ Добавить инженера</button><span class="tag" id="engineersListCount">0</span></div></div>
+          <div class="panel-heading"><h2>Список инженеров</h2><div class="entity-list-controls"><button class="btn btn-blue" id="addEngineerFromEngineers" type="button">+ Добавить инженера</button><span class="tag" id="engineersListCount">0</span></div></div>
           <div id="engineersListState" aria-live="polite"></div>
           <div class="table-scroll" id="engineersTableWrap"><table class="data-table entity-catalog-table engineers-table"><thead><tr>
             <th><button class="sort-button" type="button" data-engineer-sort="engineer_id">ID <span aria-hidden="true"></span></button></th>
@@ -219,14 +219,14 @@
             <div class="risk-toolbar-left"><span>Показать:</span><div id="riskFilters" class="filter-buttons"><button class="chip selected" data-risk-filter="Все" type="button">Все</button><button class="chip" data-risk-filter="Сроки" type="button">Сроки</button><button class="chip" data-risk-filter="Ресурсы" type="button">Ресурсы</button><button class="chip" data-risk-filter="Зависимости" type="button">Зависимости</button></div></div>
             <label class="risk-search-label" for="riskSearch"><span>Поиск задачи / риска</span><input id="riskSearch" class="risk-search-input" type="search" placeholder="Например, AI-303, дефицит, PRODF-7125"></label>
           </div>
-          <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2><p class="hint">Нажмите на строку, чтобы открыть подробную карточку риска.</p></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
+          <article class="panel risk-list-panel"><div class="panel-heading"><div><div class="eyebrow">АКТУАЛЬНЫЙ ПЛАН</div><h2>Список рисков</h2></div><span class="tag" id="riskCount"></span></div><div class="table-scroll"><table class="data-table risk-table"><thead><tr><th>Уровень</th><th>Риск</th><th>Тип</th><th>Объект</th><th>Спринт</th><th>Причина</th><th>Последствие</th></tr></thead><tbody id="riskRows"></tbody></table></div></article>
         </div>
       </section>
     </main>
     <dialog class="data-preflight-dialog" id="dataPreflightDialog" aria-labelledby="dataPreflightTitle">
       <div class="data-preflight-shell">
         <header class="data-preflight-header">
-          <div><div class="eyebrow">ПЕРЕД ПОСТРОЕНИЕМ ПЛАНА</div><h2 id="dataPreflightTitle">Проверка данных</h2><p id="dataPreflightSubtitle"></p></div>
+          <div><h2 id="dataPreflightTitle">Проверка данных</h2><p id="dataPreflightSubtitle"></p></div>
           <button class="drawer-close" type="button" data-close-data-preflight aria-label="Закрыть">×</button>
         </header>
         <div class="data-preflight-summary" id="dataPreflightSummary"></div>
@@ -293,7 +293,7 @@
     <div class="drawer" id="employeeDrawer" aria-hidden="true"><button class="drawer-shade" type="button" data-close-drawer aria-label="Закрыть карточку"></button><aside class="drawer-content" role="dialog" aria-modal="true" aria-label="Карточка сотрудника"><button class="drawer-close" type="button" data-close-drawer aria-label="Закрыть">×</button><div id="employeeContent"></div></aside></div>
   </div>
   <script src="/api.js?v=20260921-17"></script>
-  <script src="/constructor.js?v=20260922-18"></script>
-  <script src="/app.js?v=20260921-27"></script>
+  <script src="/constructor.js?v=20260922-26"></script>
+  <script src="/app.js?v=20260922-32"></script>
 </body>
 </html>

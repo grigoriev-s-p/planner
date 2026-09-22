@@ -377,6 +377,24 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("window.planConstructor.openTaskForm()", self.app)
         self.assertIn("postcode:constructor-task-added", self.app)
 
+    def test_main_sections_use_supplied_page_icons(self) -> None:
+        icon_names = (
+            "current-plan", "planning", "current-sprint", "tasks",
+            "engineers", "teams", "risks", "development",
+        )
+        for icon_name in icon_names:
+            relative_path = f"/assets/page-icons/{icon_name}.png"
+            self.assertIn(f'src="{relative_path}"', self.html)
+            self.assertTrue((self.frontend / relative_path.removeprefix("/")).is_file())
+        self.assertIn(".page-intro-icon.page-intro-image", self.styles)
+        self.assertIn(".page-intro-image img", self.styles)
+
+    def test_header_logo_is_constrained_to_brand_icon(self) -> None:
+        self.assertIn('src="/assets/postcode-logo-transparent.png" width="47" height="47"', self.html)
+        self.assertTrue((self.frontend / "assets/postcode-logo-transparent.png").is_file())
+        self.assertIn(".brand-icon{overflow:hidden;border:0;border-radius:0}", self.styles)
+        self.assertIn(".brand-icon img{display:block;width:100%;height:100%;object-fit:cover}", self.styles)
+
     def test_engineer_and_team_catalogs_use_backend_collections(self) -> None:
         self.assertIn('id="page-engineers"', self.html)
         self.assertIn('id="engineersTableBody"', self.html)
@@ -402,6 +420,16 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn('data-engineer-sort="current_task"', self.html)
         self.assertNotIn('data-engineer-sort="free_hours"', self.html)
         self.assertIn("Нет активной задачи", self.app)
+
+    def test_engineer_catalog_and_profile_omit_redundant_hints(self) -> None:
+        for phrase in (
+            "Нажмите на инженера, чтобы открыть его профиль.",
+            "Capacity bucket каждого membership показан отдельно.",
+            "Только плановые назначения из утверждённого плана.",
+            "Квартальный расчёт всех подходящих направлений.",
+        ):
+            self.assertNotIn(phrase, self.html)
+            self.assertNotIn(phrase, self.app)
 
     def test_team_roles_show_plain_role_badges(self) -> None:
         self.assertIn('class="team-role-badge"', self.app)
@@ -465,6 +493,64 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("Внешняя помощь", constructor_source)
         self.assertIn("Команда выполняет", constructor_source)
         self.assertNotIn("KPI: ${percent(effect.before_kpi)}", constructor_source)
+        self.assertIn("function appliedRecommendationTaskIds()", constructor_source)
+        self.assertIn("previewPlan?.optimization?.accepted_changes", constructor_source)
+        self.assertIn("changedTaskEffects.forEach", constructor_source)
+
+    def test_constructor_preview_prioritizes_recommendations_and_groups_exclusions(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertLess(
+            constructor_source.index('id="constructorSprintPlan"'),
+            constructor_source.index('${recommendationPanel()}'),
+        )
+        self.assertIn('id="previewExclusionSort"', constructor_source)
+        self.assertIn("function exclusionReasonMeta", constructor_source)
+        self.assertIn("Не хватает специалистов", constructor_source)
+        self.assertIn("Задача заблокирована зависимостью", constructor_source)
+        self.assertIn("Не хватает доступного времени специалистов", constructor_source)
+        self.assertIn("Недостаточно ресурсов команды", constructor_source)
+        self.assertIn("Не помещается в текущем квартале", constructor_source)
+        self.assertNotIn(">По причине</option>", constructor_source)
+        self.assertIn("function filteredExcludedTasks", constructor_source)
+        self.assertIn("Задач с причиной «${reason.label}» нет.", constructor_source)
+        self.assertIn("preview-exclusion-empty", constructor_source)
+        self.assertIn("MISSING_SPECIALIST", constructor_source)
+        self.assertIn("DEPENDENCY_NOT_COMPLETED", constructor_source)
+        self.assertIn("INSUFFICIENT_TEAM_CAPACITY", constructor_source)
+        self.assertIn(".preview-help-list{max-height:280px", self.styles)
+        self.assertIn(".preview-exclusion--critical", self.styles)
+        self.assertIn(".preview-exclusion--capacity", self.styles)
+        self.assertIn(".preview-exclusion--dependency", self.styles)
+        self.assertIn(".recommendation-apply-button", self.styles)
+        self.assertIn(".recommendation-reject-button", self.styles)
+        self.assertNotIn("Отдельные изменения рассчитаны", constructor_source)
+        self.assertNotIn("Сохранённый вариант не меняется", constructor_source)
+        self.assertNotIn("Выберите причину, чтобы оставить", constructor_source)
+        self.assertNotIn("Проверьте распределение перед утверждением", constructor_source)
+
+    def test_header_navigation_uses_sliding_active_indicators(self) -> None:
+        self.assertIn('class="nav-active-indicator"', self.html)
+        self.assertIn('class="workspace-mode-indicator"', self.html)
+        self.assertIn("function positionSlidingIndicator", self.app)
+        self.assertIn("function updateHeaderIndicators", self.app)
+        self.assertIn("requestAnimationFrame(updateHeaderIndicators)", self.app)
+        self.assertIn(".nav.indicator-ready .nav-active-indicator", self.styles)
+        self.assertIn(".workspace-mode-switch.indicator-ready .workspace-mode-indicator", self.styles)
+        self.assertIn("cubic-bezier(.22,1,.36,1)", self.styles)
+
+    def test_planning_opens_dataset_upload_before_manual_constructor(self) -> None:
+        constructor_source = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        self.assertIn("let mode = 'upload';", constructor_source)
+        self.assertIn('class="constructor-mode-button active" type="button" role="tab" aria-selected="true" data-constructor-mode="upload"', self.html)
+        self.assertIn('id="constructorManualMode" class="constructor-mode-view" hidden', self.html)
+        self.assertIn('id="constructorUploadMode" class="constructor-mode-view"', self.html)
+        self.assertLess(
+            self.html.index('data-constructor-mode="upload"'),
+            self.html.index('data-constructor-mode="manual"'),
+        )
+        self.assertIn('<span class="constructor-upload-icon" aria-hidden="true"><svg', self.html)
+        self.assertNotIn('class="constructor-upload-icon" aria-hidden="true">↑', self.html)
+        self.assertIn(".constructor-upload-icon svg", self.styles)
 
     def test_task_detail_groups_owner_team_and_external_help(self) -> None:
         self.assertIn("Основная команда —", self.app)
@@ -545,6 +631,10 @@ class FrontendRefinementTests(unittest.TestCase):
             "function renderSprintCloseDialog", 1
         )[0]
         self.assertIn('id="currentSprintTasks"', current_sprint_page)
+        self.assertEqual(current_sprint_page.count('data-current-sprint-sort='), 5)
+        self.assertNotIn("Откройте задачу для подробностей", current_sprint_page)
+        self.assertNotIn("Story Points и человеко-часы показаны раздельно", current_sprint_page)
+        self.assertNotIn("Только реальные cross-team назначения текущего спринта", current_sprint_page)
         self.assertNotIn("Не в текущем спринте", current_sprint_page)
         self.assertNotIn("currentSprintLaterTasks", self.app)
         self.assertIn("current-sprint-task-more", render_current_sprint)
@@ -555,7 +645,14 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("Задействованные инженеры", render_current_sprint)
         self.assertIn("assignment.task_hours", render_current_sprint)
         self.assertIn("assignment.team_ids", render_current_sprint)
+        self.assertIn("state.currentSprintSortKey", render_current_sprint)
+        self.assertIn("state.currentSprintSortDirection", render_current_sprint)
+        self.assertIn("data-current-sprint-sort", self.app)
+        self.assertIn("current-sprint-task-title", render_current_sprint)
         self.assertIn(".current-sprint-task-list{grid-template-columns:1fr", self.styles)
+        self.assertIn(".current-sprint-task-sort,.current-sprint-task-summary{display:grid", self.styles)
+        self.assertIn("minmax(125px,.7fr) 155px", self.styles)
+        self.assertIn("text-overflow:ellipsis;white-space:nowrap", self.styles)
         self.assertIn(".current-sprint-engineer-load", self.styles)
 
     def test_initiatives_and_excluded_tasks_use_backend_results(self) -> None:
@@ -566,6 +663,14 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("REASON_GROUPS", self.app)
         self.assertIn("Другая причина", self.app)
 
+    def test_risk_list_and_detail_omit_redundant_hints(self) -> None:
+        self.assertNotIn(
+            "Нажмите на строку, чтобы открыть подробную карточку риска.",
+            self.html,
+        )
+        self.assertNotIn("context.availability_note", self.app)
+        self.assertNotIn("risk-bf-note", self.app)
+
     def test_task_catalog_and_detail_are_contextual(self) -> None:
         self.assertIn('id="page-tasks"', self.html)
         self.assertIn('id="page-task-detail"', self.html)
@@ -575,6 +680,22 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn("taskReturnPage", self.app)
         self.assertIn("taskReturnPage: 'home'", self.app)
         self.assertIn("show('task-detail')", self.app)
+
+    def test_task_page_has_compact_copy_and_aligned_detail_actions(self) -> None:
+        constructor = (self.frontend / "constructor.js").read_text(encoding="utf-8")
+        detail = self.app.split("function renderTaskDetail()", 1)[1].split(
+            "function riskEvidenceValue", 1
+        )[0]
+        self.assertNotIn("Нажмите на ID или строку, чтобы открыть карточку задачи.", self.html)
+        self.assertNotIn("Требуемые компетенции не указаны.", constructor)
+        self.assertNotIn("Положение в квартальном плане", detail)
+        self.assertNotIn(
+            "Роли и трудозатраты из исходных требований задачи", detail
+        )
+        self.assertIn("#taskTopActions{display:flex", self.styles)
+        self.assertIn("gap:12px;flex-wrap:wrap", self.styles)
+        self.assertIn(".task-hero-meta{display:grid;justify-self:end;justify-items:stretch", self.styles)
+        self.assertIn(".task-hero-status{display:flex;align-items:center;justify-content:center;width:100%", self.styles)
 
     def test_task_catalog_sorts_every_required_column(self) -> None:
         for key in (
@@ -749,6 +870,8 @@ class FrontendRefinementTests(unittest.TestCase):
 
         self.assertIn('id="dataPreflightDialog"', self.html)
         self.assertIn("Проверка данных", self.html)
+        self.assertNotIn("ПЕРЕД ПОСТРОЕНИЕМ ПЛАНА", self.html)
+        self.assertNotIn("Перед построением плана нашли", constructor_source)
         self.assertIn("Продолжить с этими данными", constructor_source)
         self.assertIn("Загрузить исправленный файл", constructor_source)
         self.assertIn("preflightConstructorDataset", api_source)
