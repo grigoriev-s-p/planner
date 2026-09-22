@@ -389,6 +389,11 @@ class FrontendRefinementTests(unittest.TestCase):
         self.assertIn(".page-intro-icon.page-intro-image", self.styles)
         self.assertIn(".page-intro-image img", self.styles)
 
+    def test_header_logo_is_constrained_to_brand_icon(self) -> None:
+        self.assertIn('src="/assets/postcode-logo.jpg" width="47" height="47"', self.html)
+        self.assertIn(".brand-icon{overflow:hidden}", self.styles)
+        self.assertIn(".brand-icon img{display:block;width:100%;height:100%;object-fit:cover}", self.styles)
+
     def test_engineer_and_team_catalogs_use_backend_collections(self) -> None:
         self.assertIn('id="page-engineers"', self.html)
         self.assertIn('id="engineersTableBody"', self.html)
