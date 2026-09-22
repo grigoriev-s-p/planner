@@ -208,6 +208,21 @@ window.planConstructor = (() => {
     return reason ? `Задач с причиной «${reason.label}» нет.` : 'Задач с выбранной причиной нет.';
   }
 
+  function appliedRecommendationTaskIds() {
+    const ids = new Set();
+    const add = (value) => { if (value) ids.add(String(value)); };
+    (previewPlan?.optimization?.accepted_changes || []).forEach((item) => {
+      add(item.task_id);
+      (item.tasks || []).forEach(add);
+      const action = item.action || {};
+      add(action.task_id);
+      (action.tasks || []).forEach(add);
+      (action.changes || []).forEach((change) => add(change.task_id));
+    });
+    changedTaskEffects.forEach((item) => add(item.task_id));
+    return ids;
+  }
+
   function previewSprintCard(task, sprint) {
     const continuation = Number(task.start_sprint) < sprint;
     const sprintSp = Number(task.sp_load_by_sprint?.[String(sprint)] || 0);
