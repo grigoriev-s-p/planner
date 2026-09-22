@@ -75,6 +75,20 @@ def _request(mode="HALF", sprints=None, resolutions=None):
     )
 
 
+def test_training_active_marker_uses_exact_selected_sprint() -> None:
+    class Repository:
+        @staticmethod
+        def training_plans():
+            return [
+                {"engineer_id": "E-active", "selected_sprints": [2, 4], "status": "SCHEDULED"},
+                {"engineer_id": "E-future", "selected_sprints": [5], "status": "SCHEDULED"},
+                {"engineer_id": "E-completed", "selected_sprints": [4], "status": "COMPLETED"},
+            ]
+
+    assert api._active_training_engineer_ids(Repository(), 4) == {"E-active"}
+    assert api._active_training_engineer_ids(Repository(), 3) == set()
+
+
 def test_no_conflict_training_persists_canonical_constraint(scenario):
     repository, store = scenario
     approved = store.approved()

@@ -9,7 +9,7 @@ from typing import Any
 from .service import PlanningAPIService
 from src.planning.ownership import evaluate_ownership_rows
 from .lifecycle import capture_closed_sprint
-from .kpi_projection import project_management_kpis
+from .kpi_projection import freeze_sprint_baseline, project_management_kpis
 
 
 def _task_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -234,6 +234,11 @@ def _snapshot_diff(
         str(task_id)
         for task_id in ((after.get("_planning_state") or {}).get("actual_completed_tasks") or {})
     )
+    early_completed = {
+        str(row.get("task_id"))
+        for row in ((after.get("_planning_state") or {}).get("actual_results") or [])
+        if row.get("completed_early") and row.get("task_id")
+    }
     changes: list[dict[str, Any]] = []
     unchanged: list[str] = []
     affected_teams: set[str] = set()
@@ -272,6 +277,9 @@ def _snapshot_diff(
                 continue
             if old_in_future:
                 fields = ["TASK_COMPLETED" if task_id in completed else "TASK_REMOVED"]
+                allocation_changes = _allocation_changes(old_view["allocations"], [])
+                if allocation_changes:
+                    fields.append("ALLOCATION_CHANGED")
         else:
             if not old_in_future and not new_in_future and carry_over is None:
                 unchanged.append(task_id)
@@ -346,7 +354,11 @@ def _snapshot_diff(
             )
             classification = "CARRY_OVER"
         elif fields[0] == "TASK_COMPLETED":
-            reason = "Фактически завершена в закрытом спринте."
+            reason = (
+                "Досрочно завершена в закрытом спринте; будущие назначения освобождены."
+                if task_id in early_completed
+                else "Фактически завершена в закрытом спринте."
+            )
             classification = "REQUIRED_BY_ACTUAL"
         elif "ADDED_TO_REMAINING_QUARTER" in fields:
             reason = "Включена после пересчёта доступного будущего горизонта."
@@ -463,6 +475,168 @@ def _merge_task(
     return result
 
 
+def build_selected_remaining_horizon(
+    approved: dict[str, Any],
+    replanned: dict[str, Any],
+    sprint_number: int,
+    selected_task_ids: set[str],
+) -> dict[str, Any]:
+    """Compose a review draft from individual manager decisions.
+
+    Every retained task uses its exact Approved allocation; every accepted
+    change uses the already feasible optimized allocation. The merged result
+    is checked again for shared team SP and engineer capacity before it can be
+    approved.
+    """
+
+    candidate = deepcopy(replanned)
+    completed_ids = {
+        str(task_id)
+        for task_id in ((candidate.get("_planning_state") or {}).get(
+            "actual_completed_tasks"
+        ) or {})
+    }
+    old_plan = approved.get("plan") or {}
+    before_tasks = _task_map(approved)
+    optimized_tasks = _task_map(replanned)
+    all_task_ids = set(before_tasks) | set(optimized_tasks)
+    tasks = []
+    for task_id in sorted(all_task_ids):
+        if task_id in completed_ids:
+            continue
+        source = optimized_tasks.get(task_id) if task_id in selected_task_ids else before_tasks.get(task_id)
+        if source is not None:
+            tasks.append(deepcopy(source))
+
+    plan = candidate.setdefault("plan", {})
+    old_sprints = {
+        int(row.get("sprint_number") or 0): row
+        for row in old_plan.get("sprints") or []
+    }
+    optimized_sprints = {
+        int(row.get("sprint_number") or 0): row
+        for row in (replanned.get("plan") or {}).get("sprints") or []
+    }
+    plan_sprints = []
+    for number in range(1, 7):
+        if number <= sprint_number:
+            plan_sprints.append(deepcopy(optimized_sprints.get(number) or old_sprints.get(number) or {"sprint_number": number, "tasks": []}))
+            continue
+        before_rows = {
+            str(row.get("task_id") or ""): row
+            for row in (old_sprints.get(number) or {}).get("tasks") or []
+        }
+        optimized_rows = {
+            str(row.get("task_id") or ""): row
+            for row in (optimized_sprints.get(number) or {}).get("tasks") or []
+        }
+        ordered_ids = list(dict.fromkeys([
+            *(str(row.get("task_id") or "") for row in (old_sprints.get(number) or {}).get("tasks") or []),
+            *(str(row.get("task_id") or "") for row in (optimized_sprints.get(number) or {}).get("tasks") or []),
+        ]))
+        rows = []
+        for task_id in ordered_ids:
+            if not task_id or task_id in completed_ids:
+                continue
+            row = optimized_rows.get(task_id) if task_id in selected_task_ids else before_rows.get(task_id)
+            if row is not None:
+                rows.append(deepcopy(row))
+        source_sprint = deepcopy(optimized_sprints.get(number) or old_sprints.get(number) or {"sprint_number": number})
+        source_sprint["tasks"] = rows
+        for team in source_sprint.get("teams") or []:
+            team_id = str(team.get("team_id") or "")
+            used_sp = sum(
+                float(row.get("capacity_sp_load") or 0.0)
+                for row in rows if str(row.get("assigned_team_id") or "") == team_id
+            )
+            team["used_sp"] = used_sp
+            team["remaining_sp"] = max(float(team.get("capacity_sp") or 0.0) - used_sp, 0.0)
+        plan_sprints.append(source_sprint)
+    plan["sprints"] = plan_sprints
+    candidate["tasks"] = tasks
+    plan["tasks"] = deepcopy(tasks)
+    plan["allocations"] = [
+        {"task_id": task["task_id"], **deepcopy(row)}
+        for task in tasks for row in task.get("allocations") or []
+    ]
+    _validate_selected_horizon(candidate, sprint_number)
+    candidate.setdefault("replanning", {})["diff"] = _snapshot_diff(
+        approved, candidate, sprint_number
+    )
+    return project_management_kpis(candidate)
+
+
+def _validate_selected_horizon(candidate: dict[str, Any], sprint_number: int) -> None:
+    """Reject a mixed review choice that breaks capacity or dependencies."""
+
+    from src.planning.availability import availability_rate_index
+
+    state = candidate.get("_planning_state") or {}
+    tables = state.get("tables") or {}
+    rates = availability_rate_index(tables.get("engineer_availability") or [])
+    bucket_capacity: dict[tuple[str, str], float] = {}
+    for row in tables.get("engineers") or []:
+        engineer_id = str(row.get("engineer_id") or "")
+        team_id = str(row.get("team_id") or "")
+        if engineer_id and team_id:
+            capacity = 80.0 * float(row.get("capacity_rate") or 0.0)
+            key = (engineer_id, team_id)
+            bucket_capacity[key] = min(bucket_capacity.get(key, capacity), capacity)
+    usage: dict[tuple[int, str, str], float] = defaultdict(float)
+    for task in candidate.get("tasks") or []:
+        for row in task.get("allocations") or []:
+            sprint = int(row.get("sprint") or 0)
+            if sprint <= sprint_number:
+                continue
+            engineer_id = str(row.get("engineer_id") or "")
+            team_id = str(row.get("source_team_id") or "")
+            if engineer_id and team_id:
+                usage[(sprint, engineer_id, team_id)] += float(row.get("allocated_hours") or 0.0)
+    for (sprint, engineer_id, team_id), hours in usage.items():
+        allowed = bucket_capacity.get((engineer_id, team_id), 0.0) * rates.get(sprint, {}).get(engineer_id, 1.0)
+        if hours > allowed + 1e-9:
+            raise ValueError(
+                f"Выбранные изменения перегружают {engineer_id} в Sprint {sprint}; оставьте одну из связанных задач по прежнему плану."
+            )
+    capacities = {
+        (int(sprint.get("sprint_number") or 0), str(team.get("team_id") or "")): float(team.get("capacity_sp") or 0.0)
+        for sprint in (candidate.get("plan") or {}).get("sprints") or []
+        for team in sprint.get("teams") or []
+    }
+    used_sp: dict[tuple[int, str], float] = defaultdict(float)
+    for sprint in (candidate.get("plan") or {}).get("sprints") or []:
+        number = int(sprint.get("sprint_number") or 0)
+        if number <= sprint_number:
+            continue
+        for row in sprint.get("tasks") or []:
+            used_sp[(number, str(row.get("assigned_team_id") or ""))] += float(row.get("capacity_sp_load") or 0.0)
+    for key, used in used_sp.items():
+        if used > capacities.get(key, 0.0) + 1e-9:
+            raise ValueError(
+                f"Выбранные изменения превышают SP capacity команды {key[1]} в Sprint {key[0]}."
+            )
+
+    # A mixed review must keep the dependency order that the base and the
+    # optimized variants each satisfied on their own. Completed tasks are not
+    # present in ``candidate['tasks']`` and therefore already satisfy their
+    # outgoing dependencies.
+    planned_by_id = _task_map(candidate)
+    for dependency in tables.get("task_dependencies") or []:
+        blocker_id = str(dependency.get("blocking_task_id") or "")
+        blocked_id = str(dependency.get("blocked_task_id") or "")
+        blocker = planned_by_id.get(blocker_id)
+        blocked = planned_by_id.get(blocked_id)
+        if blocker is None or blocked is None:
+            continue
+        blocker_completion = int(blocker.get("completion_sprint") or 0)
+        blocked_start = int(blocked.get("start_sprint") or 0)
+        if blocker_completion and blocked_start and blocked_start <= blocker_completion:
+            raise ValueError(
+                f"Выбранные изменения нарушают зависимость {blocker_id} → {blocked_id}; "
+                "оставьте одну из связанных задач по прежнему плану."
+            )
+
+
 def build_remaining_horizon_plan(
     approved: dict[str, Any],
     sprint_number: int,
@@ -471,6 +645,10 @@ def build_remaining_horizon_plan(
 ) -> dict[str, Any]:
     """Freeze closed sprints and rebuild only the open horizon."""
 
+    # Freeze this exact approved commitment before facts and the remaining
+    # horizon can change it. The caller's Approved Plan stays untouched until
+    # the review draft is explicitly approved.
+    approved = freeze_sprint_baseline(deepcopy(approved), sprint_number)
     state = deepcopy(approved.get("_planning_state") or {})
     tables = deepcopy(state.get("tables") or {})
     if not tables:

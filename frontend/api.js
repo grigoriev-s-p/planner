@@ -37,6 +37,9 @@ window.postcodeApi = (() => {
     getReplanDraft: () => request('/api/replanning/draft'),
     retryReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/retry`, {method: 'POST'}),
     approveReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/approve`, {method: 'POST'}),
+    selectReplanTaskChanges: (workflowId, selectedTaskIds) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/task-choices`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({selected_task_ids: selectedTaskIds}),
+    }),
     cancelReplanDraft: (workflowId) => request(`/api/replanning/drafts/${encodeURIComponent(workflowId)}/cancel`, {method: 'POST'}),
     getSprintExpansion: () => request('/api/sprint-expansion'),
     refreshSprintExpansion: () => request('/api/sprint-expansion/refresh', {method: 'POST'}),
