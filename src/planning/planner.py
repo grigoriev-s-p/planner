@@ -863,9 +863,13 @@ class BaselineQuarterPlanner:
                         story_points - assigned_capacity_sp,
                         0.0,
                     )
-                # Keep persisted SP splits deterministic when role-hour
-                # arithmetic contains tiny floating-point residue.
-                capacity_sp_load = round(capacity_sp_load, 9)
+                elif story_points is not None and story_points > 0 and team_id is not None:
+                    # The hour limit is derived from available SP. Floating
+                    # point division can put its inverse a few ulps above that
+                    # exact limit (for example 8.00000000001 instead of 8).
+                    # Cap the intermediate load without rounding away SP that
+                    # the remaining hours still need in a later sprint.
+                    capacity_sp_load = min(capacity_sp_load, assignable_sp)
                 allocation = TaskAllocation(
                     task_id=task_id,
                     sprint_number=sprint_number,

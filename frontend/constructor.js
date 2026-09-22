@@ -568,8 +568,8 @@ window.planConstructor = (() => {
       ));
       $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => {
         const capacityLabel = team.expected_velocity_sp != null
-          ? `Исторический velocity: ${esc(team.expected_velocity_sp)} SP`
-          : (team.capacity_sp != null ? `Ручная capacity: ${esc(team.capacity_sp)} SP` : 'Capacity не задана');
+          ? `Исторический velocity: ${number(team.expected_velocity_sp)} SP`
+          : (team.capacity_sp != null ? `Ручная capacity: ${number(team.capacity_sp)} SP` : 'Capacity не задана');
         return `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${capacityLabel}</small></span></label>`;
       }).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
 
@@ -591,7 +591,7 @@ window.planConstructor = (() => {
       ['Команды', draft.teams.length], ['Задачи', draft.tasks.length],
     ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
     $c('#constructorDraftEntities').innerHTML = [
-      entityRows('Команды', 'teams', draft.teams, (item) => item.expected_velocity_sp != null ? `Исторический velocity: ${item.expected_velocity_sp} SP` : `Ручная capacity: ${item.capacity_sp ?? 'не задана'} SP`),
+      entityRows('Команды', 'teams', draft.teams, (item) => item.expected_velocity_sp != null ? `Исторический velocity: ${number(item.expected_velocity_sp)} SP` : `Ручная capacity: ${item.capacity_sp == null ? 'не задана' : number(item.capacity_sp)} SP`),
       entityRows('Задачи', 'tasks', draft.tasks, () => ''),
     ].join('');
   }
@@ -776,7 +776,7 @@ window.planConstructor = (() => {
       const team = item || {team_id: '', name: '', expected_velocity_sp: null, capacity_sp: '', engineer_ids: []};
       const historicalVelocity = team.expected_velocity_sp != null;
       const scenarioCapacity = historicalVelocity
-        ? `<p class="muted">Исторический velocity: <b>${esc(team.expected_velocity_sp)} SP</b>. Capacity команды будет рассчитана по историческим данным.</p>`
+        ? `<p class="muted">Исторический velocity: <b>${number(team.expected_velocity_sp)} SP</b>. Capacity команды будет рассчитана по историческим данным.</p>`
         : `<label>Ручная capacity за спринт, SP<input name="capacity_sp" type="number" inputmode="numeric" min="0" step="1" value="${esc(team.capacity_sp ?? '')}" required><small>Для новой команды укажите capacity целым числом SP за спринт.</small></label>`;
       content.innerHTML = `<h2>${item ? 'Изменить настройки сценария для' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" ${item ? 'readonly' : ''} required></label>${scenarioCapacity}${!item ? freeEngineerPicker(team) : ''}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
