@@ -1044,22 +1044,6 @@ window.planConstructor = (() => {
     changedTaskEffects = [];
   }
 
-  function applyOptimisticDelta(recommendationId) {
-    const optimization = previewPlan?.optimization || {};
-    const recommendation = (optimization.recommendations || []).find((item) => item.recommendation_id === recommendationId);
-    const delta = recommendation?.plan_delta;
-    if (!delta || (optimization.accepted_changes || []).length || delta.base_fingerprint !== optimization.input_plan_fingerprint || delta.recommendation_signature !== recommendationId) return false;
-    const states = new Map((delta.task_states || []).map((task) => [task.task_id, task]));
-    previewPlan.tasks = (previewPlan.tasks || []).map((task) => states.has(task.task_id) ? clone(states.get(task.task_id)) : task);
-    previewPlan.optimization.current_summary = clone(delta.resulting_summary || optimization.current_summary);
-    previewPlan.optimization.changed_tasks = clone(delta.changed_tasks || []);
-    previewPlan.optimization.current_changes = clone(delta.changed_tasks || []);
-    changedTaskEffects = clone(delta.changed_tasks || []);
-    renderPreview();
-    focusChangedTasks(changedTaskEffects);
-    return true;
-  }
-
   async function updateRecommendation(action, id) {
     if (!previewPlan?.draft?.id || recommendationUpdateInFlight) return;
     const draftId = previewPlan.draft.id;
@@ -1076,7 +1060,6 @@ window.planConstructor = (() => {
       return;
     }
     try {
-      if (action === 'apply') applyOptimisticDelta(id);
       if (action === 'apply') previewPlan = await api.applyConstructorRecommendation(draftId, id);
       if (action === 'undo') previewPlan = await api.undoConstructorChange(draftId, id);
       if (action === 'reset') previewPlan = await api.resetConstructorDraft(draftId);
