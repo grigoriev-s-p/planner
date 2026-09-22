@@ -1717,6 +1717,14 @@ async function retryReplan(workflowId) {
 
 async function approveReplan(workflowId) {
   const training = data.replanWorkflow?.kind === 'TRAINING_REVIEW';
+  const approveButton = [...document.querySelectorAll('[data-approve-replan]')]
+    .find((button) => button.dataset.approveReplan === workflowId);
+  if (approveButton) {
+    approveButton.disabled = true;
+    approveButton.setAttribute('aria-busy', 'true');
+    approveButton.dataset.originalLabel = approveButton.textContent;
+    approveButton.textContent = 'Подтверждаем…';
+  }
   try {
     const approval = await window.postcodeApi.approveReplanDraft(workflowId);
     const dashboard = await window.postcodeApi.getDashboard();
@@ -1727,6 +1735,11 @@ async function approveReplan(workflowId) {
     const quarterDone = data.plan?.sprints?.every((item) => item.presentation_state === 'CLOSED');
     showToast(training ? 'Новый план и обучение утверждены вместе.' : quarterDone ? 'Sprint 6 подтверждён. Квартал завершён.' : approval.sprint_expansion?.status === 'EMPTY' ? 'Факт подтверждён. Дополнительных задач для включения не найдено.' : 'Факт подтверждён. Открыт следующий спринт.');
   } catch (error) {
+    if (approveButton) {
+      approveButton.disabled = false;
+      approveButton.removeAttribute('aria-busy');
+      approveButton.textContent = approveButton.dataset.originalLabel || 'Подтвердить';
+    }
     showToast(`Не удалось утвердить план: ${error?.message || error}`);
   }
 }
@@ -1765,7 +1778,7 @@ function renderExpansion() {
     const allocations = (rec.tasks || []).flatMap((task) => (task.allocations || []).map((row) => `<li>${escapeHtml(task.task_id)} · ${escapeHtml(row.engineer_id)} · ${escapeHtml(row.role)} · Sprint ${number(row.sprint)} · ${number(row.allocated_hours)} ч${row.cross_team ? ` · помощь из ${escapeHtml(row.source_team_id)}` : ''}</li>`)).join('');
     return `<article class="panel expansion-card ${dismissed ? 'dismissed' : ''}"><div class="expansion-card-head"><div><h2>${escapeHtml(rec.title)}</h2><p>${rec.type === 'ATOMIC_PACKAGE' ? 'Эти задачи выполнимы только вместе.' : 'Новая задача без переноса уже запланированных работ.'}</p></div><span class="tag">${applied ? 'Выбрано' : dismissed ? 'Отклонено' : 'Доступно'}</span></div><div class="expansion-task-list">${taskRows}</div><div class="expansion-effect"><span>+${number(rec.effect?.added_tasks)} задач</span><span>+${number(rec.effect?.added_initiatives)} инициатив</span></div><details><summary>Подробнее</summary><p>${escapeHtml(rec.reason)}</p><p>Проверены ёмкость команды, роли, часы инженеров, зависимости и границы квартала.</p><ul>${allocations}</ul></details><div class="expansion-card-actions"><button class="btn btn-outline" type="button" data-expansion-recommendation="${attr(rec.recommendation_id)}" data-expansion-action="${applied || dismissed ? 'undo' : 'reject'}">${applied || dismissed ? 'Отменить выбор' : 'Отклонить'}</button>${!applied ? `<button class="btn btn-blue" type="button" data-expansion-recommendation="${attr(rec.recommendation_id)}" data-expansion-action="apply">Применить</button>` : ''}</div></article>`;
   }).join('');
-  target.innerHTML = `<article class="panel expansion-overview"><div><h2>Расширение плана после Sprint ${number(proposal.triggered_by_sprint)}</h2><p>Выберите дополнения и утвердите новую версию плана. Существующие задачи не перемещаются.</p><div class="expansion-effect"><span>Было: ${number(proposal.before?.tasks)} задач · ${number(proposal.before?.initiatives)} инициатив</span><span>Можно добавить: +${number(proposal.best_effect?.added_tasks)} задач · +${number(proposal.best_effect?.added_initiatives)} инициатив</span></div><b>Выбрано: +${number(view.effect?.added_tasks)} задач · +${number(view.effect?.added_initiatives)} инициатив</b></div><div class="expansion-overview-actions"><button class="btn btn-outline" type="button" data-expansion-action="refresh">Обновить</button><button class="btn btn-outline" type="button" data-expansion-action="ignore">Пропустить</button><button class="btn btn-outline" type="button" data-expansion-action="apply-all">Применить все совместимые</button><button class="btn btn-blue" type="button" data-expansion-action="approve" ${selected.size ? '' : 'disabled'}>Утвердить дополнения</button></div></article><div class="expansion-list">${cards}</div>`;
+  target.innerHTML = `<article class="panel expansion-overview"><div><h2>Расширение плана после Sprint ${number(proposal.triggered_by_sprint)}</h2><p>Выберите дополнения и утвердите решение. Можно оставить утверждённый план без изменений.</p><div class="expansion-effect"><span>Было: ${number(proposal.before?.tasks)} задач · ${number(proposal.before?.initiatives)} инициатив</span><span>Можно добавить: +${number(proposal.best_effect?.added_tasks)} задач · +${number(proposal.best_effect?.added_initiatives)} инициатив</span></div><b>Выбрано: +${number(view.effect?.added_tasks)} задач · +${number(view.effect?.added_initiatives)} инициатив</b></div><div class="expansion-overview-actions"><button class="btn btn-outline" type="button" data-expansion-action="refresh">Сбросить</button><button class="btn btn-outline" type="button" data-expansion-action="apply-all">Применить все совместимые</button><button class="btn btn-blue" type="button" data-expansion-action="approve">Утвердить дополнения</button></div></article><div class="expansion-list">${cards}</div>`;
 }
 
 async function handleExpansionAction(action, recommendationId) {
@@ -1780,7 +1793,7 @@ async function handleExpansionAction(action, recommendationId) {
       hydrate(await window.postcodeApi.getDashboard());
       data.expansion = await window.postcodeApi.getSprintExpansion();
       show('current-sprint');
-      showToast('Дополнительные задачи добавлены в утверждённый план.');
+      showToast('Решение по дополнениям утверждено.');
       return;
     } else data.expansion = await window.postcodeApi.selectSprintExpansion(recommendationId, action);
     renderExpansion();
