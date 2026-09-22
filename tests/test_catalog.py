@@ -478,6 +478,41 @@ class ArchiveTests(unittest.TestCase):
             sum(item["used"] for item in after_team["sp_by_sprint"].values()),
         )
 
+    def test_unplanned_task_archive_skips_planner_simulation(self) -> None:
+        tables = catalog_tables()
+        tables["tasks"].append({
+            "task_id": "TASK-OUTSIDE", "initiative_id": "INIT-OUTSIDE",
+            "summary": "No QA capacity", "team_id": "Team-A", "status": "ToDo",
+            "rung": 1, "story_points": 1, "is_placeholder": False,
+        })
+        tables["task_role_effort"].append(
+            {"task_id": "TASK-OUTSIDE", "role": "QA", "required_hours": 8}
+        )
+        repo = CatalogRepository(Path(self.temp.name) / "outside-plan.sqlite3", seed_tables=tables)
+        current = PlanningAPIService.from_tables(repo.active_planning_tables()).dashboard
+        self.assertNotEqual(
+            next(item for item in current["tasks"] if item["task_id"] == "TASK-OUTSIDE")["status"],
+            "PLANNED",
+        )
+        plan_drafts.replace_approved(current)
+        client = TestClient(app)
+
+        with patch("src.web.api.get_catalog_repository", return_value=repo), patch(
+            "src.web.api._build_deletion_candidate"
+        ) as build_candidate:
+            impact = client.get("/api/tasks/TASK-OUTSIDE/deletion-impact")
+            response = client.post(
+                "/api/tasks/TASK-OUTSIDE/archive",
+                json={"reason_code": "TASK_CANCELLED"},
+            )
+
+        self.assertEqual(impact.status_code, 200, impact.text)
+        self.assertTrue(impact.json()["plan_impact_skipped"])
+        self.assertEqual(impact.json()["task_ids"], [])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["current_plan_unchanged"])
+        build_candidate.assert_not_called()
+
     def test_engineer_delete_uses_existing_planner_for_replacement(self) -> None:
         tables = catalog_tables()
         tables["engineers"].append({
