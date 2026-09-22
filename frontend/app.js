@@ -18,6 +18,9 @@ const state = {
   teamSortKey: 'name', teamSortDirection: 'asc',
   developmentTeam: 'all', developmentRole: 'all', developmentSkill: 'all',
   developmentLoading: false, developmentError: null,
+  selectedTrainingCandidates: {}, expandedTrainingCandidateSelectors: {},
+  trainingProposal: null, trainingConflicts: null,
+  availabilityVisibleEngineers: {page: new Set(), close: new Set()},
 };
 
 const data = {
@@ -26,8 +29,11 @@ const data = {
   status: 'LOADING', dataState: 'LOADING', message: null,
   teamDetails: {}, teamHistories: {}, engineerDetails: {}, engineerHistories: {},
   replanWorkflow: null,
+  expansion: null,
   engineerWorkspace: null, engineerCatalog: [],
   development: null,
+  engineerTrainings: {},
+  availability: null,
 };
 
 const starViewport = {
@@ -52,6 +58,8 @@ const starTeamBy = (id) => data.starMap?.company?.team_id === id
 const starEngineerBy = (id) => data.starMap?.engineers?.find((engineer) => engineer.engineer_id === id);
 const taskBy = (id) => data.tasks.find((task) => task.task_id === id)
   || data.historicalTasks.find((task) => task.task_id === id);
+const expansionBadge = (task) => task?.expansion_origin?.source === 'sprint_expansion'
+  ? `<span class="expansion-badge" title="Задача добавлена по принятой рекомендации после Sprint ${attr(task.expansion_origin.triggered_by_sprint)}">Добавлена после Sprint ${number(task.expansion_origin.triggered_by_sprint)}</span>` : '';
 const historicalTaskFromCatalog = (task) => ({
   task_id: task.task_id, title: task.title, description: task.title,
   initiative_id: task.initiative_id, status: 'DONE',
@@ -84,6 +92,7 @@ const sprintStatus = (sprint) => ({CURRENT: 'Текущий', PLANNED: 'Запл
 const statusClass = (status) => ({DONE: 'done', PLANNED: 'planned', MOVED: 'moved', UNPLANNABLE: 'cancelled'}[status] || 'planned');
 const badge = (task) => `<span class="status ${taskStatusClass(task)}">${escapeHtml(taskDisplayStatus(task))}</span>`;
 const taskDisplayStatus = (task) => {
+  if (task?.opportunity_available && task?.status !== 'PLANNED') return 'Не включена в план';
   const lifecycleStatus = String(task?.current_status || '').toUpperCase();
   if (lifecycleStatus) return ({DONE: 'Завершена', COMPLETED: 'Завершена', IN_PROGRESS: 'В процессе', PLANNED: 'Запланирована', MOVED: 'Перенесена', UNPLANNABLE: 'Невыполнима', CANCELLED: 'Отменена'}[lifecycleStatus] || task?.current_status_label || lifecycleStatus);
   const sourceStatus = String(task?.source_status || '').replaceAll(' ', '').toUpperCase();
@@ -93,7 +102,7 @@ const taskDisplayStatus = (task) => {
 };
 const taskStatusClass = (task) => {
   const label = taskDisplayStatus(task);
-  return ({'Запланирована': 'planned', 'Завершена': 'done', 'В процессе': 'work', 'Отменена': 'cancelled', 'Перенесена': 'moved', 'Невыполнима': 'cancelled'}[label] || 'planned');
+  return ({'Запланирована': 'planned', 'Завершена': 'done', 'В процессе': 'work', 'Отменена': 'cancelled', 'Перенесена': 'moved', 'Невыполнима': 'cancelled', 'Не включена в план': 'not-in-plan'}[label] || 'planned');
 };
 const taskStatusTooltip = (task) => ({
   'Запланирована': 'Задача выполнима и включена в квартальный план.',
@@ -414,7 +423,7 @@ function routeFromLocation() {
   if (window.location.pathname === '/teams' || window.location.pathname === '/teams/') return {page: 'teams', teamId: null};
   if (window.location.pathname === '/engineers' || window.location.pathname === '/engineers/') return {page: 'engineers', engineerId: null};
   const hashPage = window.location.hash.replace(/^#/, '');
-  const knownPages = new Set(['home', 'planning', 'current-plan', 'current-sprint', 'tasks', 'engineers', 'teams', 'risks', 'development', 'recalc', 'star', 'engineer-sprint', 'engineer-quarter', 'engineer-tasks']);
+  const knownPages = new Set(['home', 'planning', 'current-plan', 'current-sprint', 'tasks', 'engineers', 'teams', 'risks', 'development', 'recalc', 'expansion', 'star', 'engineer-sprint', 'engineer-quarter', 'engineer-tasks']);
   const page = knownPages.has(hashPage) ? hashPage : 'home';
   return {page, taskId: null, teamId: null, workspaceMode: page.startsWith('engineer-') ? 'engineer' : (hashPage ? 'manager' : null)};
 }
@@ -446,6 +455,7 @@ function show(page, historyMode = 'push') {
   $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === ({'task-detail': 'tasks', 'team-detail': 'teams', 'engineer-detail': 'engineers'}[page] || page)));
   closeEmployee();
   renderPage(page);
+  if (page === 'current-sprint') loadFutureAvailability();
   if (historyMode) window.history[historyMode === 'replace' ? 'replaceState' : 'pushState']({page, taskId: state.taskId}, '', pageLocation(page));
   window.scrollTo({top: 0, behavior: 'instant'});
 }
@@ -455,7 +465,7 @@ function renderPage(page) {
     renderUnavailable();
     return;
   }
-  ({home: renderPlanning, planning: window.planConstructor.render, 'current-sprint': renderCurrentSprint, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'team-detail': renderTeamDetail, 'engineer-detail': renderEngineerDetail, 'task-detail': renderTaskDetail, risks: renderRisks, development: renderDevelopment, recalc: renderRecalc, 'engineer-sprint': renderEngineerSprint, 'engineer-quarter': renderEngineerQuarter, 'engineer-tasks': renderEngineerTasks})[canonicalPage(page)]?.();
+  ({home: renderPlanning, planning: window.planConstructor.render, 'current-sprint': renderCurrentSprint, tasks: renderTasks, engineers: renderEngineers, teams: renderTeams, 'team-detail': renderTeamDetail, 'engineer-detail': renderEngineerDetail, 'task-detail': renderTaskDetail, risks: renderRisks, development: renderDevelopment, recalc: renderRecalc, expansion: renderExpansion, 'engineer-sprint': renderEngineerSprint, 'engineer-quarter': renderEngineerQuarter, 'engineer-tasks': renderEngineerTasks})[canonicalPage(page)]?.();
 }
 
 function renderUnavailable() {
@@ -638,10 +648,10 @@ function renderPlanning() {
         }
         return taskSprints(task)[0] < sprint
           ? `<button class="sprint-continuation" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b>↳ ${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span>Продолжение</span>${load}<small>${escapeHtml(task.assigned_team_id)}</small></button>`
-          : `<button class="sprint-card" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span>${load}<span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`;
+          : `<button class="sprint-card" type="button" data-plan-task="${attr(task.task_id)}"><span class="sprint-card-top"><b class="card-id">${escapeHtml(task.task_id)}</b>${rungBadge(task)}</span><span class="card-title">${escapeHtml(task.title)}</span>${expansionBadge(task)}${load}<span class="card-team">${escapeHtml(task.assigned_team_id)}</span></button>`;
       })
       .join('') || '<div class="sprint-empty">Нет задач</div>';
-    const kpiBadge = sprintKpi ? `<span class="sprint-column-kpi ${attr(sprintKpi.status || 'UNAVAILABLE')}" title="Sprint Say/Do Ratio">KPI ${sprintKpi.completion_percent == null ? '—' : percent(sprintKpi.completion_percent)}</span>` : '';
+    const kpiBadge = sprintKpi ? `<span class="sprint-column-kpi ${attr(sprintKpi.status || 'UNAVAILABLE')}" title="${sprintKpi.baseline_confirmed ? 'Sprint Say/Do Ratio' : 'Исторический baseline не подтверждён'}">KPI ${sprintKpi.baseline_confirmed && sprintKpi.completion_percent != null ? percent(sprintKpi.completion_percent) : '—'}</span>` : '';
     return `<section class="sprint-column ${sprintData.presentation_state === 'CURRENT' ? 'selected' : ''}" data-sprint-column="${sprint}"><div class="sprint-column-header"><div class="sprint-column-title"><b>Sprint ${sprint}</b>${kpiBadge}</div><span>${escapeHtml(sprintStatus(sprint))}</span></div><div class="sprint-task-shell"><div class="sprint-task-scroll" tabindex="0" aria-label="Задачи Sprint ${sprint}">${tasks}</div><span class="sprint-scroll-thumb" aria-hidden="true"></span></div></section>`;
   }).join('');
   activateSprintScrollbars();
@@ -681,7 +691,7 @@ function renderTasks() {
     body.innerHTML = '<tr><td colspan="8"><div class="empty-state">Задач пока нет.</div></td></tr>';
     return;
   }
-  body.innerHTML = sorted.map((task) => `<tr data-open-task="${attr(task.task_id)}" data-task-row tabindex="0"><td>${tButton(task)}</td><td>${escapeHtml(task.title)}</td><td>${number(task.story_points)}</td><td>${rungBadge(task)}</td><td>${escapeHtml(task.assigned_team_id || '—')}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${task.start_sprint ? `Sprint ${number(task.start_sprint)}` : '—'}</td><td class="task-status-cell">${taskStatusIndicator(task)}</td></tr>`).join('');
+  body.innerHTML = sorted.map((task) => `<tr data-open-task="${attr(task.task_id)}" data-task-row tabindex="0"><td>${tButton(task)}</td><td>${escapeHtml(task.title)} ${expansionBadge(task)}</td><td>${number(task.story_points)}</td><td>${rungBadge(task)}</td><td>${escapeHtml(task.assigned_team_id || '—')}</td><td>${escapeHtml(task.initiative_id || '—')}</td><td>${task.start_sprint ? `Sprint ${number(task.start_sprint)}` : '—'}</td><td class="task-status-cell">${taskStatusIndicator(task)}</td></tr>`).join('');
 }
 
 function catalogSort(items, key, direction, valueFor, numericKeys = new Set()) {
@@ -829,25 +839,158 @@ function developmentTaskCountLabel(value) {
   return `${number(count)} ЗАДАЧ`;
 }
 
-function developmentCandidate(candidate, primary = false) {
-  return `<article class="development-candidate ${primary ? 'primary' : ''} ${candidate.quarter_unassigned ? 'unassigned' : ''}"><div><div class="development-candidate-name"><button type="button" class="table-button" data-open-employee="${attr(candidate.engineer_id)}">${escapeHtml(candidate.name || candidate.engineer_id)} ↗</button>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</div><span>${escapeHtml((candidate.roles || []).join(', ') || 'Роль не указана')} · ${escapeHtml(candidate.grade || 'Grade не указан')}</span></div><b>${number(candidate.score_percent)}%</b><ul>${(candidate.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></article>`;
+function developmentCandidateMeta(candidate) {
+  return `${escapeHtml((candidate.roles || []).join(', ') || 'Роль не указана')} · ${escapeHtml(candidate.grade || 'Grade не указан')}`;
+}
+
+function developmentSelectedCandidate(candidate) {
+  return `<span class="development-selected-candidate-copy"><b>${escapeHtml(candidate.engineer_id)}</b><small>${developmentCandidateMeta(candidate)}</small>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</span><strong>${number(candidate.score_percent)}%</strong><i aria-hidden="true">⌄</i>`;
+}
+
+function developmentCandidateSelector(item, candidates) {
+  const key = String(item.recommendation_id || `${item.team_id}-${item.deficit?.type}-${developmentDeficitTitle(item)}`);
+  if (!candidates.length) {
+    return `<section class="development-training-choice"><span>Кандидат на дообучение</span><div class="development-no-candidates">Подходящих кандидатов нет</div><button class="btn btn-blue development-train-button" type="button" disabled>Дообучить</button></section>`;
+  }
+  const selectedId = candidates.some((candidate) => candidate.engineer_id === state.selectedTrainingCandidates[key])
+    ? state.selectedTrainingCandidates[key]
+    : candidates[0].engineer_id;
+  state.selectedTrainingCandidates[key] = selectedId;
+  const selected = candidates.find((candidate) => candidate.engineer_id === selectedId) || candidates[0];
+  const expanded = Boolean(state.expandedTrainingCandidateSelectors[key]);
+  const listId = `training-candidates-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const rows = candidates.map((candidate) => {
+    const active = candidate.engineer_id === selectedId;
+    return `<button class="development-candidate-option ${active ? 'selected' : ''}" type="button" role="radio" aria-checked="${active}" data-select-training-candidate="${attr(candidate.engineer_id)}" data-training-recommendation="${attr(key)}"><span class="development-candidate-radio" aria-hidden="true"></span><span><b>${escapeHtml(candidate.engineer_id)}</b><small>${developmentCandidateMeta(candidate)}</small>${candidate.quarter_unassigned ? '<em>Не задействован в квартале</em>' : ''}</span><strong>${number(candidate.score_percent)}%</strong></button>`;
+  }).join('');
+  return `<section class="development-training-choice" data-training-selector="${attr(key)}"><span>Кандидат на дообучение</span><button class="development-candidate-selector-toggle" type="button" data-toggle-training-candidates="${attr(key)}" aria-expanded="${expanded}" aria-controls="${attr(listId)}">${developmentSelectedCandidate(selected)}</button><div class="development-candidate-options" id="${attr(listId)}" role="radiogroup" ${expanded ? '' : 'hidden'}>${rows}</div><button class="btn btn-blue development-train-button" type="button" data-train-selected-candidate="${attr(key)}">Дообучить</button></section>`;
+}
+
+function openTrainingDialog(recommendationId) {
+  if (hasPendingReplan()) {
+    showToast('Сначала утвердите или отмените текущий черновик пересчёта.');
+    return;
+  }
+  const recommendation = (data.development?.recommendations || []).find(
+    (item) => item.recommendation_id === recommendationId,
+  );
+  const engineerId = state.selectedTrainingCandidates[recommendationId];
+  const candidate = (recommendation?.recommendation?.candidates || []).find(
+    (item) => item.engineer_id === engineerId,
+  );
+  if (!candidate) { showToast('Кандидат не найден. Обновите рекомендации.'); return; }
+  state.trainingProposal = {
+    recommendation_id: recommendationId, engineer_id: engineerId,
+    selected_sprints: [], availability_mode: 'NO_IMPACT', resolutions: {},
+  };
+  state.trainingConflicts = null;
+  const dialog = $('#trainingDialog');
+  $('#trainingDialogTitle').textContent = `Дообучение · ${candidate.name || engineerId}`;
+  renderTrainingForm(recommendation, candidate);
+  dialog.showModal();
+}
+
+function renderTrainingForm(recommendation, candidate) {
+  const current = currentSprint();
+  const future = Array.from({length: Math.max(6 - current, 0)}, (_, index) => current + index + 1);
+  const goal = [candidate.target_role, candidate.target_skill].filter(Boolean).join(' · ');
+  const profile = [candidate.roles?.join(', '), candidate.grade].filter(Boolean).join(' · ');
+  const base = Number(engineerBy(candidate.engineer_id)?.capacity_hours || 0);
+  $('#trainingDialogBody').innerHTML = `<div class="training-form">
+    <p><b>${escapeHtml(candidate.name || candidate.engineer_id)}</b> <span class="hint">(${escapeHtml(candidate.engineer_id)})${profile ? ` · ${escapeHtml(profile)}` : ''}</span><br>Цель: <b>${escapeHtml(goal || developmentDeficitTitle(recommendation))}</b></p>
+    <section><h3>Когда проходит обучение</h3><div class="training-sprints">${future.map((sprint) => `<label><input type="checkbox" data-training-sprint="${sprint}" ${state.trainingProposal?.selected_sprints?.includes(sprint) ? 'checked' : ''}> Sprint ${sprint}</label>`).join('') || '<p>В этом квартале будущих спринтов нет.</p>'}</div><button class="text-button" type="button" data-training-select-all ${future.length ? '' : 'disabled'}>Выбрать все оставшиеся спринты</button></section>
+    <section><h3>Как обучение влияет на доступность?</h3><div class="training-modes">${[
+      ['NO_IMPACT', 'Не влияет на рабочее время', base],
+      ['HALF', 'Снижает доступность вдвое', base * .5],
+      ['BLOCKED', 'Полностью занимает сотрудника', 0],
+    ].map(([mode, label, hours]) => `<label><input type="radio" name="training-mode" value="${mode}" ${mode === state.trainingProposal?.availability_mode ? 'checked' : ''}><span><b>${label}</b><small>${number(base)} → ${number(hours)} ч из базовой capacity. Другие ограничения могут снизить доступность дополнительно.</small></span></label>`).join('')}</div></section>
+    <p class="hint" id="trainingSummary">Выберите спринты: компетенция станет доступна после последнего выбранного.</p><p class="training-error" id="trainingError" hidden></p>
+    <div class="training-actions"><button class="btn btn-outline" type="button" data-training-close>Отмена</button><button class="btn btn-blue" type="button" data-training-continue ${future.length ? '' : 'disabled'}>Продолжить</button></div>
+  </div>`;
+  updateTrainingSummary();
+}
+
+function updateTrainingSummary() {
+  const summary = $('#trainingSummary');
+  if (!summary) return;
+  const sprints = $$('[data-training-sprint]:checked', $('#trainingDialog')).map((input) => Number(input.dataset.trainingSprint));
+  const mode = $('input[name="training-mode"]:checked', $('#trainingDialog'))?.value;
+  const base = Number(engineerBy(state.trainingProposal?.engineer_id)?.capacity_hours || 0);
+  const rate = {NO_IMPACT: 1, HALF: .5, BLOCKED: 0}[mode] ?? 1;
+  summary.textContent = sprints.length
+    ? `Sprint ${sprints.join(', ')} · ${number(base)} → ${number(base * rate)} ч базовой доступности · новая компетенция с Sprint ${Math.max(...sprints) + 1}.`
+    : 'Выберите хотя бы один будущий спринт.';
+}
+
+function trainingError(message) {
+  const box = $('#trainingError');
+  if (box) { box.textContent = message; box.hidden = false; }
+}
+
+async function continueTraining() {
+  const proposal = state.trainingProposal;
+  proposal.selected_sprints = $$('[data-training-sprint]:checked', $('#trainingDialog')).map((input) => Number(input.dataset.trainingSprint));
+  proposal.availability_mode = $('input[name="training-mode"]:checked', $('#trainingDialog'))?.value || 'NO_IMPACT';
+  if (!proposal.selected_sprints.length) { trainingError('Выберите хотя бы один будущий спринт.'); return; }
+  const button = $('[data-training-continue]', $('#trainingDialog'));
+  button.disabled = true;
+  try {
+    const analysis = await window.postcodeApi.analyzeTraining(proposal);
+    if (!analysis.requires_replanning) {
+      await window.postcodeApi.confirmTraining(proposal);
+      $('#trainingDialog').close();
+      hydrate(await window.postcodeApi.getDashboard());
+      show('development');
+      loadDevelopmentRecommendations(true);
+      showToast('Обучение запланировано. Утверждённый план не изменён.');
+      return;
+    }
+    const conflicts = await Promise.all(analysis.conflicts.map(async (conflict) => {
+      const found = await window.postcodeApi.getReplacementCandidates(
+        conflict.task_id, proposal.engineer_id, conflict.sprint, conflict.role, conflict.hours,
+      );
+      return {...conflict, candidates: (found.roles || []).find((row) => row.role === conflict.role)?.candidates || []};
+    }));
+    state.trainingConflicts = conflicts;
+    $('#trainingDialogBody').innerHTML = `<div class="training-form"><p><b>Обучение влияет на утверждённый план.</b> Выберите решение для каждого назначения. До утверждения нового плана обучение не будет сохранено.</p><div class="training-conflicts">${conflicts.map((row) => `<div class="training-conflict"><b>${escapeHtml(row.task_id)} · Sprint ${number(row.sprint)}</b><p>${escapeHtml(row.role || 'Роль')} · ${number(row.hours)} ч у ${escapeHtml(proposal.engineer_id)} · нехватка ${number(row.deficit_hours)} ч</p><select data-training-resolution="${attr(row.key)}"><option value="">Выберите решение</option>${row.candidates.map((candidate) => `<option value="${attr(candidate.engineer_id)}">Заменить: ${escapeHtml(candidate.engineer_id)} · ${escapeHtml(candidate.team_id || 'без команды')} · свободно ${number(candidate.free_hours)} ч</option>`).join('')}<option value="__MOVE__">Перенести задачу на следующий спринт</option></select></div>`).join('')}</div><p class="training-error" id="trainingError" hidden></p><div class="training-actions"><button class="btn btn-outline" type="button" data-training-back>Назад</button><button class="btn btn-blue" type="button" data-training-resolve>Проверить новый план</button></div></div>`;
+  } catch (error) {
+    trainingError(error?.message || 'Не удалось проверить обучение.');
+    button.disabled = false;
+  }
+}
+
+async function resolveTraining() {
+  const proposal = state.trainingProposal;
+  const choices = Object.fromEntries((state.trainingConflicts || []).map((row) => {
+    const value = $(`[data-training-resolution="${CSS.escape(row.key)}"]`, $('#trainingDialog'))?.value;
+    return [row.key, value === '__MOVE__' ? {action: 'MOVE'} : value ? {action: 'REPLACE', engineer_id: value} : null];
+  }));
+  if (Object.values(choices).some((choice) => !choice)) { trainingError('Выберите решение для каждого назначения.'); return; }
+  const button = $('[data-training-resolve]', $('#trainingDialog'));
+  button.disabled = true;
+  try {
+    const result = await window.postcodeApi.confirmTraining({...proposal, resolutions: choices});
+    if (result.status !== 'READY_FOR_REVIEW') throw new Error('Черновик пересчёта не создан.');
+    $('#trainingDialog').close();
+    data.replanWorkflow = result.workflow;
+    show('recalc');
+    showToast('Проверьте новый план. До утверждения действует прежний план.');
+  } catch (error) {
+    trainingError(error?.message || 'Не удалось собрать новый план.');
+    button.disabled = false;
+  }
 }
 
 function developmentRecommendationCard(item) {
-  const action = item.recommendation?.primary_action;
   const candidates = item.recommendation?.candidates || [];
   const deficit = item.deficit || {};
-  const taskLinks = (item.tasks || []).map((task) => `<button type="button" class="table-button" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}${task.title && task.title !== task.task_id ? ` · ${escapeHtml(task.title)}` : ''}</button>`).join('');
+  const taskLinks = (item.tasks || []).map((task) => `<button type="button" class="development-task-id" data-open-task="${attr(task.task_id)}">${escapeHtml(task.task_id)}</button>`).join('');
   const planCritical = item.category === 'PLAN_CRITICAL';
   const busFactor = deficit.bus_factor == null ? '' : `<div><span>Bus Factor</span><b>BF ${number(deficit.bus_factor)}</b></div>`;
-  const hire = `<div class="development-hire-profile"><span>Альтернатива: профиль для найма</span><b>${escapeHtml(item.recommendation?.hire_profile?.label || 'Дополнительный специалист')}</b><p>Количество специалистов и влияние на план не прогнозируются — план пересчитывается после фактического изменения состава.</p></div>`;
-  const primary = candidates.length
-    ? `<div class="development-primary"><span>Приоритетный кандидат на дообучение</span>${developmentCandidate(candidates[0], true)}</div>`
-    : '<div class="empty-state">Подходящих кандидатов на дообучение в команде не найдено.</div>';
-  const alternatives = candidates.length > 1 ? `<details class="development-alternatives"><summary>Остальные кандидаты (${number(candidates.length - 1)})</summary>${candidates.slice(1).map((candidate) => developmentCandidate(candidate)).join('')}</details>` : '';
+  const candidateSelector = developmentCandidateSelector(item, candidates);
   const title = developmentDeficitTitle(item);
   const scopeLabel = item.scope === 'company' ? 'Вся компания' : item.team_id;
-  return `<details class="panel development-card ${String(item.severity || '').toLowerCase()} ${planCritical ? 'plan-critical' : ''}"><summary class="development-card-summary" aria-label="Открыть рекомендацию: ${attr(title)}"><div class="development-card-summary-copy"><span>${escapeHtml(scopeLabel)}</span><h2>${escapeHtml(title)}</h2></div><div class="development-card-summary-status"><span class="development-action upskill_or_hire">${developmentActionLabel(action)}</span><i aria-hidden="true">⌄</i></div></summary><div class="development-card-body"><div class="eyebrow">${deficit.type === 'ROLE' ? 'РОЛЬ' : 'НАВЫК'} · ${developmentTaskCountLabel(item.priority?.covered_task_count || (item.tasks || []).length)}</div><div class="development-facts">${busFactor}</div><div class="development-task-demand"><span>${planCritical ? 'Незапланированные задачи с этим требованием' : 'Задачи квартала с этим требованием'}</span><div>${taskLinks || '<span class="muted">Связанные задачи не определены</span>'}</div></div>${primary}${alternatives}${hire}</div></details>`;
+  return `<details class="panel development-card ${String(item.severity || '').toLowerCase()} ${planCritical ? 'plan-critical' : ''}"><summary class="development-card-summary" aria-label="Открыть рекомендацию: ${attr(title)}"><div class="development-card-summary-copy"><span>${escapeHtml(scopeLabel)}</span><h2>${escapeHtml(title)}</h2></div><div class="development-card-summary-status"><span class="development-action upskill_or_hire">ДООБУЧИТЬ ИЛИ НАНЯТЬ</span><i aria-hidden="true">⌄</i></div></summary><div class="development-card-body"><div class="eyebrow">${deficit.type === 'ROLE' ? 'РОЛЬ' : 'НАВЫК'} · ${developmentTaskCountLabel(item.priority?.covered_task_count || (item.tasks || []).length)}</div><div class="development-facts">${busFactor}</div><div class="development-task-demand"><span>${planCritical ? 'Незапланированные задачи с этим требованием' : 'Задачи квартала с этим требованием'}</span><div class="development-task-id-list">${taskLinks || '<span class="muted">Связанные задачи не определены</span>'}</div></div>${candidateSelector}<p class="development-card-note">Количество специалистов и влияние на план не прогнозируются.</p></div></details>`;
 }
 
 function developmentCategorySection(title, description, items, critical = false) {
@@ -1014,14 +1157,16 @@ function renderTeamDetail() {
 }
 
 async function loadEngineerDetail(engineerId) {
-  if (data.engineerDetails[engineerId] && data.engineerHistories[engineerId]) return renderEngineerDetail();
+  if (data.engineerDetails[engineerId] && data.engineerHistories[engineerId] && data.engineerTrainings[engineerId]) return renderEngineerDetail();
   try {
-    const [detail, history] = await Promise.all([
+    const [detail, history, trainings] = await Promise.all([
       window.postcodeApi.getEngineer(engineerId),
       window.postcodeApi.getEngineerHistory(engineerId),
+      window.postcodeApi.getEngineerTrainings(engineerId).catch(() => ({trainings: []})),
     ]);
     data.engineerDetails[engineerId] = detail;
     data.engineerHistories[engineerId] = history;
+    data.engineerTrainings[engineerId] = trainings;
     if (state.page === 'engineer-detail' && state.engineerId === engineerId) renderEngineerDetail();
   } catch (error) {
     data.engineerDetails[engineerId] = {load_error: error?.message || 'Не удалось загрузить страницу инженера.'};
@@ -1099,6 +1244,12 @@ function renderEngineerSkills(detail) {
   return `<div class="entity-detail-grid"><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Роли и навыки</h2><p class="hint">Показаны значения из профиля инженера без добавления уровней владения.</p></div></div><h3>Роли</h3><div class="skill-tags">${(detail.roles || []).map((role) => `<span>${escapeHtml(role)}</span>`).join('') || '<span>Нет данных</span>'}</div><h3 class="needs-title">Навыки</h3><div class="skill-tags">${(detail.skills || []).map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></article><article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Критичность для команд</h2><p class="hint">Тот же Bus Factor, который используется в Звёздной карте.</p></div></div><div class="competency-card-grid">${criticality.map((item) => `<button class="competency-summary ${attr(item.risk_level)}" type="button" data-open-team="${attr(item.team_id)}"><div><h3>${escapeHtml(item.team_name || item.team_id)} · ${escapeHtml(item.skill)}</h3><p>${escapeHtml(item.risk_label)}</p></div><b>BF ${number(item.bus_factor)}</b></button>`).join('') || empty('Критичные компетенции для команд не выявлены.')}</div></article></div>`;
 }
 
+function renderEngineerTraining(engineerId) {
+  const plans = data.engineerTrainings[engineerId]?.trainings || [];
+  const labels = {SCHEDULED: 'Запланировано', ACTIVE: 'Проходит обучение', COMPLETED: 'Завершено', CANCELLED: 'Отменено'};
+  return `<article class="panel entity-detail-panel"><div class="panel-heading"><div><h2>Дообучение</h2><p class="hint">Роль или навык появится после закрытия последнего спринта обучения.</p></div></div><div class="training-profile-list">${plans.map((plan) => `<div class="training-profile-item"><b>${escapeHtml([plan.target_role, plan.target_skill].filter(Boolean).join(' · '))}</b><span>${(plan.selected_sprints || []).map((sprint) => `Sprint ${number(sprint)}`).join(', ')} · ${escapeHtml(labels[plan.status] || plan.status)}</span><small>Влияние обучения: ${escapeHtml({NO_IMPACT: 'без изменений', HALF: '50%', BLOCKED: 'полностью занят'}[plan.availability_mode] || 'не указано')} · компетенция доступна с Sprint ${number(plan.effective_from_sprint)}</small><small>Обычная capacity → обучение → ручные/прочие ограничения → итог: ${(plan.selected_sprints || []).map((sprint) => { const item = plan.effective_availability?.[String(sprint)] || {}; return `Sprint ${number(sprint)} — ${number(item.base_hours)} → ${number(item.training_hours)} → ${number(Number(item.base_hours || 0) * Number(item.other_rate ?? 1))} → ${number(item.hours)} ч`; }).join('; ')}</small></div>`).join('') || '<p class="hint">Пока нет запланированного обучения.</p>'}</div></article>`;
+}
+
 function renderEngineerDetail() {
   const detail = data.engineerDetails[state.engineerId];
   const stateBox = $('#engineerDetailState');
@@ -1124,7 +1275,8 @@ function renderEngineerDetail() {
   const planned = (detail.current_allocations || []).reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0);
   $('#engineerDetailSummary').innerHTML = `<div><span>Команд</span><b>${number((detail.memberships || []).length)}</b></div><div><span>Capacity за спринт</span><b>${number(detail.capacity_hours)} ч</b></div><div><span>Плановое участие в Sprint ${number(detail.current_sprint)}</span><b>${number(planned)} ч</b></div>`;
   $$('[data-engineer-detail-tab]').forEach((button) => button.classList.toggle('active', button.dataset.engineerDetailTab === state.engineerDetailTab));
-  $('#engineerDetailBody').innerHTML = ({overview: renderEngineerOverview, tasks: renderEngineerProfileTasks, history: renderEngineerHistory, skills: renderEngineerSkills}[state.engineerDetailTab] || renderEngineerOverview)(detail);
+  $('#engineerDetailBody').innerHTML = ({overview: renderEngineerOverview, tasks: renderEngineerProfileTasks, history: renderEngineerHistory, skills: renderEngineerSkills}[state.engineerDetailTab] || renderEngineerOverview)(detail)
+    + (['overview', 'skills'].includes(state.engineerDetailTab) ? renderEngineerTraining(detail.engineer_id) : '');
 }
 
 function taskRoleRequirements(task) {
@@ -1141,6 +1293,12 @@ function taskRoleRequirements(task) {
 
 function renderTaskExecutionAlert(task) {
   const alert = $('#taskExecutionAlert');
+  alert.classList.toggle('opportunity-available', Boolean(task?.opportunity_available && task?.status !== 'PLANNED'));
+  if (task?.opportunity_available && task?.status !== 'PLANNED') {
+    alert.innerHTML = '<div class="task-execution-alert-icon" aria-hidden="true">i</div><div><div class="eyebrow">АКТУАЛЬНЫЕ РЕСУРСЫ</div><h2>Не включена в план</h2><p>Необходимая компетенция сейчас доступна, но задача не добавлена в утверждённый план.</p></div>';
+    alert.hidden = false;
+    return;
+  }
   const statuses = [task.status, task.current_status].map((value) => String(value || '').toUpperCase());
   if (!statuses.some((status) => ['MOVED', 'UNPLANNABLE'].includes(status))) {
     alert.hidden = true;
@@ -1175,7 +1333,7 @@ function renderTaskDetail() {
   stateBox.innerHTML = '';
   $('#taskDetailTitle').textContent = task.title || 'Название не указано';
   $('#taskHeroId').textContent = task.task_id;
-  $('#taskHeroStatus').innerHTML = `<span class="hero-status-dot ${taskStatusClass(task)}" aria-hidden="true"></span>${escapeHtml(taskDisplayStatus(task))}`;
+  $('#taskHeroStatus').innerHTML = `<span class="hero-status-dot ${taskStatusClass(task)}" aria-hidden="true"></span>${escapeHtml(taskDisplayStatus(task))}${expansionBadge(task)}`;
   renderTaskExecutionAlert(task);
   $('#taskTopActions').innerHTML = state.workspaceMode === 'engineer' ? '' : `${task.archived ? archiveState(task) : `<button class="btn btn-danger" type="button" data-archive-entity="task" data-archive-id="${attr(task.task_id)}" data-current-plan-reference="${inQuarter(task)}">Удалить</button>`}<button class="btn btn-danger-outline" type="button" data-permanent-delete-entity="task" data-permanent-delete-id="${attr(task.task_id)}">Удалить навсегда</button>`;
   const sprints = taskSprints(task);
@@ -1363,8 +1521,12 @@ function renderRecalc() {
     show('current-sprint', 'replace');
     return;
   }
-  $('#recalcTitle').textContent = `Изменения после Sprint ${number(workflow.sprint_number)}`;
-  $('#recalcSubtitle').textContent = 'Проверьте только изменения оставшегося плана и подтвердите новую редакцию.';
+  $('#recalcTitle').textContent = workflow.kind === 'TRAINING_REVIEW'
+    ? 'Изменения плана из-за дообучения'
+    : `Изменения после Sprint ${number(workflow.sprint_number)}`;
+  $('#recalcSubtitle').textContent = workflow.kind === 'TRAINING_REVIEW'
+    ? 'До подтверждения обучение не запланировано, действует прежний утверждённый план.'
+    : 'Проверьте только изменения оставшегося плана и подтвердите новую редакцию.';
   $('#recalcResult').hidden = false;
   renderReplanWorkflow(workflow);
 }
@@ -1439,6 +1601,12 @@ function replanChangeCard(change) {
 
 function renderReplanWorkflow(workflow) {
   const target = $('#recalcResult');
+  if (workflow.kind === 'TRAINING_REVIEW' && workflow.status === 'READY_FOR_REVIEW') {
+    const plan = workflow.training_plan || {};
+    const changes = workflow.diff?.affected_elements || workflow.diff?.changed_tasks || [];
+    target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">ЧЕРНОВИК ДООБУЧЕНИЯ</div><h2>Проверьте новый план</h2><p>${escapeHtml(plan.engineer_id)} · ${escapeHtml([plan.target_role, plan.target_skill].filter(Boolean).join(' · '))} · ${plan.selected_sprints?.map((sprint) => `Sprint ${number(sprint)}`).join(', ')}</p><p>До утверждения доступность инженера и Approved Plan не изменятся.</p></div></div><div class="replan-change-list">${changes.map(replanChangeCard).join('') || '<p class="hint">Задачи остались на прежних местах; изменена только доступность.</p>'}</div><div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">Утвердить план и обучение</button></div></article>`;
+    return;
+  }
   if (workflow.status === 'REPLANNING_FAILED') {
     target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">ФАКТ СОХРАНЁН</div><h2>Пересчёт не завершён</h2><p>Результаты Sprint ${number(workflow.sprint_number)} сохранены. Утверждённый план не изменён.</p></div><span class="status moved">Нужен повтор</span></div><div class="replan-error">${escapeHtml(workflow.error || 'Неизвестная ошибка пересчёта.')}</div><div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-retry-replan="${attr(workflow.workflow_id)}">Повторить пересчёт</button></div></article>`;
     return;
@@ -1449,11 +1617,13 @@ function renderReplanWorkflow(workflow) {
   }
   const diff = workflow.diff || {};
   const changes = diff.affected_elements || diff.changed_tasks || [];
+  const availabilityChanges = diff.availability_changes || [];
   const isQuarterClose = workflow.kind === 'QUARTER_CLOSE_REVIEW';
-  const content = changes.length
-    ? `<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
+  const availabilityContent = availabilityChanges.length ? `<div class="replan-change-list">${availabilityChanges.map((change) => `<article class="replan-change-card"><div class="replan-change-card-heading"><div><b>${escapeHtml(change.engineer_id)}</b><h3>Доступность · Sprint ${number(change.sprint)}</h3></div><div class="replan-change-tags"><span>Изменена доступность</span></div></div><div class="replan-change-details"><div class="replan-detail"><span>Доля capacity</span><b>${percent(Number(change.before_rate) * 100)} → ${percent(Number(change.after_rate) * 100)}</b></div></div></article>`).join('')}</div>` : '';
+  const content = changes.length || availabilityChanges.length
+    ? `${availabilityContent}<div class="replan-change-list">${changes.map(replanChangeCard).join('')}</div>`
     : '<div class="replan-no-changes"><b>Изменений в плане не требуется</b><p>Фактический результат сохранён, а оставшийся план бизнес-эквивалентен утверждённому.</p></div>';
-  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} сохранён как черновик. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length ? 'Утвердить изменения' : 'Подтвердить завершение спринта'}</button></div></article>`;
+  target.innerHTML = `<article class="panel replan-review"><div class="replan-review-heading"><div><div class="eyebrow">${isQuarterClose ? 'ИТОГИ КВАРТАЛА' : 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ'}</div><h2>${changes.length || availabilityChanges.length ? 'Внимание, следующие элементы будут затронуты:' : 'Изменения не требуются'}</h2><p>Факт Sprint ${number(workflow.sprint_number)} сохранён как черновик. До подтверждения действует предыдущий утверждённый план.</p></div></div>${content}<div class="replan-actions"><button class="btn btn-outline" type="button" data-cancel-sprint-actual="${attr(workflow.workflow_id)}">Отменить закрытие</button><button class="btn btn-outline" type="button" data-edit-sprint-actual="${attr(workflow.workflow_id)}">Исправить факт</button><button class="btn btn-blue" type="button" data-approve-replan="${attr(workflow.workflow_id)}">${isQuarterClose ? 'Зафиксировать итоги квартала' : changes.length || availabilityChanges.length ? 'Утвердить изменения' : 'Подтвердить завершение спринта'}</button></div></article>`;
 }
 
 function editSprintActual(workflowId) {
@@ -1464,14 +1634,15 @@ function editSprintActual(workflowId) {
 }
 
 async function cancelSprintActual(workflowId) {
-  if (!window.confirm('Отменить сохранённый факт? Утверждённый план останется без изменений.')) return;
+  const training = data.replanWorkflow?.kind === 'TRAINING_REVIEW';
+  if (!window.confirm(training ? 'Отменить черновик дообучения? Утверждённый план останется без изменений.' : 'Отменить сохранённый факт? Утверждённый план останется без изменений.')) return;
   try {
     await window.postcodeApi.cancelReplanDraft(workflowId);
     const dashboard = await window.postcodeApi.getDashboard();
     hydrate(dashboard);
     data.replanWorkflow = null;
-    show('current-sprint');
-    showToast('Закрытие спринта отменено. Факт можно заполнить заново.');
+    show(training ? 'development' : 'current-sprint');
+    showToast(training ? 'Черновик дообучения отменён.' : 'Закрытие спринта отменено. Факт можно заполнить заново.');
   } catch (error) {
     showToast(`Не удалось отменить закрытие: ${error?.message || error}`);
   }
@@ -1488,16 +1659,77 @@ async function retryReplan(workflowId) {
 }
 
 async function approveReplan(workflowId) {
+  const training = data.replanWorkflow?.kind === 'TRAINING_REVIEW';
   try {
-    await window.postcodeApi.approveReplanDraft(workflowId);
+    const approval = await window.postcodeApi.approveReplanDraft(workflowId);
     const dashboard = await window.postcodeApi.getDashboard();
     hydrate(dashboard);
     data.replanWorkflow = {workflow_id: workflowId, status: 'APPROVED'};
-    show('current-sprint');
+    data.expansion = await window.postcodeApi.getSprintExpansion();
+    show(training ? 'development' : data.expansion?.proposal?.status === 'OPEN' ? 'expansion' : 'current-sprint');
     const quarterDone = data.plan?.sprints?.every((item) => item.presentation_state === 'CLOSED');
-    showToast(quarterDone ? 'Sprint 6 подтверждён. Квартал завершён.' : 'Факт подтверждён. Открыт следующий спринт.');
+    showToast(training ? 'Новый план и обучение утверждены вместе.' : quarterDone ? 'Sprint 6 подтверждён. Квартал завершён.' : approval.sprint_expansion?.status === 'EMPTY' ? 'Факт подтверждён. Дополнительных задач для включения не найдено.' : 'Факт подтверждён. Открыт следующий спринт.');
   } catch (error) {
     showToast(`Не удалось утвердить план: ${error?.message || error}`);
+  }
+}
+
+function renderExpansion() {
+  const target = $('#expansionContent');
+  if (!target) return;
+  const view = data.expansion;
+  const proposal = view?.proposal || {status: 'NONE'};
+  if (proposal.status === 'NONE') {
+    target.innerHTML = '<article class="panel expansion-empty">Сначала подтвердите завершение спринта.</article>';
+    return;
+  }
+  if (proposal.status === 'ERROR') {
+    target.innerHTML = `<article class="panel expansion-empty"><h2>Анализ не завершён</h2><p>${escapeHtml(proposal.message || 'Попробуйте повторить расчёт.')}</p><button class="btn btn-blue" type="button" data-expansion-action="refresh">Повторить анализ</button></article>`;
+    return;
+  }
+  if (proposal.status === 'QUARTER_COMPLETE' || proposal.status === 'EMPTY') {
+    target.innerHTML = `<article class="panel expansion-empty"><h2>${escapeHtml(proposal.message || 'Дополнительных задач нет.')}</h2><button class="btn btn-outline" type="button" data-page="current-sprint">К спринту</button></article>`;
+    return;
+  }
+  if (proposal.status === 'IGNORED' || proposal.status === 'APPROVED') {
+    target.innerHTML = `<article class="panel expansion-empty"><h2>${proposal.status === 'APPROVED' ? 'Дополнительные задачи утверждены' : 'Предложения пропущены'}</h2><button class="btn btn-outline" type="button" data-page="current-sprint">К спринту</button></article>`;
+    return;
+  }
+  if (proposal.stale) {
+    target.innerHTML = '<article class="panel expansion-empty"><h2>Данные изменились</h2><p>Обновите предложения, чтобы учесть состав команд, навыки и доступность.</p><button class="btn btn-blue" type="button" data-expansion-action="refresh">Обновить предложения</button></article>';
+    return;
+  }
+  const selected = new Set(proposal.selected_ids || []);
+  const rejected = new Set(proposal.rejected_ids || []);
+  const cards = (proposal.recommendations || []).map((rec) => {
+    const applied = selected.has(rec.recommendation_id);
+    const dismissed = rejected.has(rec.recommendation_id);
+    const taskRows = (rec.tasks || []).map((task) => `<div class="expansion-task"><b>${escapeHtml(task.task_id)}</b><span>${escapeHtml(task.title)}</span><small>${escapeHtml(task.team_id)} · ${escapeHtml(task.initiative_id || 'Без инициативы')} · Sprint ${number(task.start_sprint)}${task.completion_sprint !== task.start_sprint ? `–${number(task.completion_sprint)}` : ''} · R${number(task.rung)}</small></div>`).join('');
+    const allocations = (rec.tasks || []).flatMap((task) => (task.allocations || []).map((row) => `<li>${escapeHtml(task.task_id)} · ${escapeHtml(row.engineer_id)} · ${escapeHtml(row.role)} · Sprint ${number(row.sprint)} · ${number(row.allocated_hours)} ч${row.cross_team ? ` · помощь из ${escapeHtml(row.source_team_id)}` : ''}</li>`)).join('');
+    return `<article class="panel expansion-card ${dismissed ? 'dismissed' : ''}"><div class="expansion-card-head"><div><h2>${escapeHtml(rec.title)}</h2><p>${rec.type === 'ATOMIC_PACKAGE' ? 'Эти задачи выполнимы только вместе.' : 'Новая задача без переноса уже запланированных работ.'}</p></div><span class="tag">${applied ? 'Выбрано' : dismissed ? 'Отклонено' : 'Доступно'}</span></div><div class="expansion-task-list">${taskRows}</div><div class="expansion-effect"><span>+${number(rec.effect?.added_tasks)} задач</span><span>+${number(rec.effect?.added_initiatives)} инициатив</span></div><details><summary>Подробнее</summary><p>${escapeHtml(rec.reason)}</p><p>Проверены ёмкость команды, роли, часы инженеров, зависимости и границы квартала.</p><ul>${allocations}</ul></details><div class="expansion-card-actions"><button class="btn btn-outline" type="button" data-expansion-recommendation="${attr(rec.recommendation_id)}" data-expansion-action="${applied || dismissed ? 'undo' : 'reject'}">${applied || dismissed ? 'Отменить выбор' : 'Отклонить'}</button>${!applied ? `<button class="btn btn-blue" type="button" data-expansion-recommendation="${attr(rec.recommendation_id)}" data-expansion-action="apply">Применить</button>` : ''}</div></article>`;
+  }).join('');
+  target.innerHTML = `<article class="panel expansion-overview"><div><h2>Расширение плана после Sprint ${number(proposal.triggered_by_sprint)}</h2><p>Выберите дополнения и утвердите новую версию плана. Существующие задачи не перемещаются.</p><div class="expansion-effect"><span>Было: ${number(proposal.before?.tasks)} задач · ${number(proposal.before?.initiatives)} инициатив</span><span>Можно добавить: +${number(proposal.best_effect?.added_tasks)} задач · +${number(proposal.best_effect?.added_initiatives)} инициатив</span></div><b>Выбрано: +${number(view.effect?.added_tasks)} задач · +${number(view.effect?.added_initiatives)} инициатив</b></div><div class="expansion-overview-actions"><button class="btn btn-outline" type="button" data-expansion-action="refresh">Обновить</button><button class="btn btn-outline" type="button" data-expansion-action="ignore">Пропустить</button><button class="btn btn-outline" type="button" data-expansion-action="apply-all">Применить все совместимые</button><button class="btn btn-blue" type="button" data-expansion-action="approve" ${selected.size ? '' : 'disabled'}>Утвердить дополнения</button></div></article><div class="expansion-list">${cards}</div>`;
+}
+
+async function handleExpansionAction(action, recommendationId) {
+  try {
+    if (action === 'refresh') data.expansion = await window.postcodeApi.refreshSprintExpansion();
+    else if (action === 'apply-all') data.expansion = await window.postcodeApi.applyAllSprintExpansion();
+    else if (action === 'ignore') {
+      await window.postcodeApi.ignoreSprintExpansion();
+      data.expansion = await window.postcodeApi.getSprintExpansion();
+    } else if (action === 'approve') {
+      await window.postcodeApi.approveSprintExpansion();
+      hydrate(await window.postcodeApi.getDashboard());
+      data.expansion = await window.postcodeApi.getSprintExpansion();
+      show('current-sprint');
+      showToast('Дополнительные задачи добавлены в утверждённый план.');
+      return;
+    } else data.expansion = await window.postcodeApi.selectSprintExpansion(recommendationId, action);
+    renderExpansion();
+    if (action === 'ignore') show('current-sprint');
+  } catch (error) {
+    showToast(`Не удалось обновить предложения: ${error?.message || error}`);
   }
 }
 
@@ -1519,7 +1751,8 @@ function renderCurrentSprint() {
   ].filter(Boolean));
   const totalSp = sprintRows.reduce((sum, row) => sum + Number(row.capacity_sp_load || 0), 0);
   const totalHours = allocations.reduce((sum, row) => sum + Number(row.allocated_hours || 0), 0);
-  $('#openSprintCloseDialog').disabled = quarterDone || pendingReview;
+  $('#openExpansionHistory').hidden = !data.expansion || data.expansion.proposal?.status === 'NONE';
+  $('#openSprintCloseDialog').disabled = quarterDone || pendingReview || ['OPEN', 'ERROR'].includes(data.expansion?.proposal?.status);
   $('#currentSprintIntro').textContent = pendingReview
     ? `Sprint ${sprint} закрыт · ожидается проверка нового плана`
     : quarterDone
@@ -1527,6 +1760,9 @@ function renderCurrentSprint() {
     : `Sprint ${sprint} · ${sprintTasks.length} задач · ${teamIds.size} команд`;
   if (pendingReview) {
     $('#currentSprintNotice').innerHTML = '<aside class="development-notice pending-review-notice" role="status"><span class="development-icon">↻</span><div><b>Требуется подтверждение факта спринта</b><p>Проверьте сохранённые часы и SP. До подтверждения утверждённый план не изменится.</p></div><button class="btn btn-blue" type="button" data-page="recalc">Открыть проверку</button></aside>';
+  } else if (['OPEN', 'ERROR'].includes(data.expansion?.proposal?.status)) {
+    const stale = data.expansion.proposal.stale;
+    $('#currentSprintNotice').innerHTML = `<aside class="development-notice" role="status"><span class="development-icon">＋</span><div><b>${data.expansion.proposal.status === 'ERROR' ? 'Анализ дополнительных задач не завершён' : stale ? 'Предложения нужно обновить' : 'Обнаружены новые возможности'}</b><p>${data.expansion.proposal.status === 'ERROR' ? 'Повторите анализ перед началом следующего спринта.' : stale ? 'Каталог или доступность изменились.' : `Можно добавить ${number(data.expansion.proposal.best_effect?.added_tasks)} задач и ${number(data.expansion.proposal.best_effect?.added_initiatives)} инициатив без переноса существующих работ.`}</p></div><button class="btn btn-blue" type="button" data-page="expansion">Посмотреть предложения</button>${data.expansion.proposal.status === 'OPEN' && !stale ? '<button class="btn btn-outline" type="button" data-expansion-action="ignore">Игнорировать</button>' : ''}</aside>`;
   } else if (quarterDone) {
     $('#currentSprintNotice').innerHTML = '<aside class="development-notice" role="status"><span class="development-icon">✓</span><div><b>Квартал завершён</b><p>Спринт 6 зафиксирован. Новый спринт не создаётся.</p></div></aside>';
   } else $('#currentSprintNotice').innerHTML = '';
@@ -1567,7 +1803,7 @@ function renderCurrentSprint() {
     const details = expanded
       ? `<section class="current-sprint-task-details" id="${attr(detailId)}"><div class="current-sprint-task-details-heading"><div><h4>Задействованные инженеры</h4><p>${assignmentsByEngineer.size ? `${assignmentsByEngineer.size} чел. · ${number(taskAllocations.reduce((sum, row) => sum + Number(row.allocated_hours || 0), 0))} ч на задачу` : 'Назначений на этот спринт нет'}</p></div></div><div class="current-sprint-engineer-list">${engineerRows || empty('На задачу пока не назначены инженеры.')}</div></section>`
       : '';
-    return `<article class="current-sprint-task ${expanded ? 'expanded' : ''}"><div class="current-sprint-task-summary"><div class="current-sprint-task-primary"><span class="current-sprint-task-id">${escapeHtml(task.task_id)}</span><h3>${escapeHtml(task.title)}</h3></div><span class="current-sprint-task-sp">${number(task.story_points)} SP</span><span class="current-sprint-task-rung">${rungBadge(task)}</span><span class="current-sprint-task-team">${task.assigned_team_id ? `<button class="table-button" type="button" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)}</button>` : 'Команда не указана'}</span><button type="button" class="btn btn-outline current-sprint-task-more" data-toggle-current-sprint-task="${attr(task.task_id)}" aria-expanded="${expanded}" aria-controls="${attr(detailId)}">${expanded ? 'Скрыть' : 'Подробнее'}<span aria-hidden="true">⌄</span></button></div>${details}</article>`;
+    return `<article class="current-sprint-task ${expanded ? 'expanded' : ''}"><div class="current-sprint-task-summary"><div class="current-sprint-task-primary"><span class="current-sprint-task-id">${escapeHtml(task.task_id)}</span><h3>${escapeHtml(task.title)}</h3>${expansionBadge(task)}</div><span class="current-sprint-task-sp">${number(task.story_points)} SP</span><span class="current-sprint-task-rung">${rungBadge(task)}</span><span class="current-sprint-task-team">${task.assigned_team_id ? `<button class="table-button" type="button" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)}</button>` : 'Команда не указана'}</span><button type="button" class="btn btn-outline current-sprint-task-more" data-toggle-current-sprint-task="${attr(task.task_id)}" aria-expanded="${expanded}" aria-controls="${attr(detailId)}">${expanded ? 'Скрыть' : 'Подробнее'}<span aria-hidden="true">⌄</span></button></div>${details}</article>`;
   }).join('') : empty(quarterDone ? 'Квартал завершён.' : 'В текущем спринте нет задач.');
 
   const involvedTeamIds = [...teamIds];
@@ -1575,7 +1811,7 @@ function renderCurrentSprint() {
     const team = teamBy(teamId);
     const sp = teamSprintResource(teamId, sprint);
     const usedHours = Number(team.source_used_hours_by_sprint?.[String(sprint)] || 0);
-    const capacityHours = Number(team.member_capacity_hours || 0);
+    const capacityHours = Number(team.member_capacity_hours_by_sprint?.[String(sprint)] ?? team.member_capacity_hours ?? 0);
     const roleHours = {};
     allocations.filter((row) => row.source_team_id === teamId).forEach((row) => { roleHours[row.role] = Number(roleHours[row.role] || 0) + Number(row.allocated_hours || 0); });
     return `<section class="current-sprint-team-card"><h3><button class="table-button" type="button" data-open-team="${attr(teamId)}">${escapeHtml(team.name || teamId)} ↗</button></h3><div class="team-load-line"><span>SP команды</span><b>${number(sp.used)} / ${number(sp.capacity)} SP</b></div>${meter(sp.used, sp.capacity)}<div class="team-load-line"><span>Часы сотрудников</span><b>${number(usedHours)} / ${number(capacityHours)} ч</b></div>${meter(usedHours, capacityHours)}<div class="team-role-load">${Object.entries(roleHours).map(([role, hours]) => `<span><b>${escapeHtml(role)}</b>${number(hours)} ч запланировано</span>`).join('') || '<span>Назначений по ролям нет</span>'}</div></section>`;
@@ -1584,6 +1820,104 @@ function renderCurrentSprint() {
   const crossTeam = allocations.filter((row) => row.cross_team);
   $('#currentSprintCrossTeam').innerHTML = crossTeam.length ? crossTeam.map((row) => `<article class="current-sprint-help"><button type="button" class="table-button" data-open-employee="${attr(row.engineer_id)}">${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</button><span>${escapeHtml(row.source_team_id)} → ${escapeHtml(row.owner_team_id)}</span><span>${escapeHtml(row.role)}</span><button type="button" class="table-button" data-open-task="${attr(row.task_id)}">${escapeHtml(row.task_id)}</button><strong>${number(row.allocated_hours)} ч</strong></article>`).join('') : empty('Межкомандная помощь в текущем спринте не используется.');
 
+}
+
+function availabilityGridMarkup(payload, scope) {
+  const sprints = [];
+  for (let sprint = Number(payload?.current_sprint || currentSprint()) + 1; sprint <= 6; sprint += 1) sprints.push(sprint);
+  if (!sprints.length) return empty('Будущих спринтов в квартале нет.');
+  const allRows = payload?.engineers || [];
+  const constrained = new Set(allRows.filter((row) => Object.values(row.availability_by_sprint || {}).some((value) => Number(value.availability_rate) !== 1)).map((row) => row.engineer_id));
+  const visible = state.availabilityVisibleEngineers[scope] || new Set();
+  const rows = allRows.filter((row) => constrained.has(row.engineer_id) || visible.has(row.engineer_id));
+  const controls = `<div class="availability-controls"><select data-availability-add-select="${attr(scope)}"><option value="">Выберите инженера</option>${allRows.filter((row) => !rows.includes(row)).map((row) => `<option value="${attr(row.engineer_id)}">${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)} · ${escapeHtml(row.engineer_id)}</option>`).join('')}</select><button class="btn btn-outline" type="button" data-availability-add="${attr(scope)}">+ Добавить</button></div>`;
+  const columns = scope === 'close'
+    ? `grid-template-columns:minmax(145px,1.25fr) repeat(${sprints.length},minmax(88px,1fr))`
+    : `grid-template-columns:minmax(220px,1.3fr) repeat(${sprints.length},minmax(135px,1fr))`;
+  return `${controls}${rows.length ? `<div class="availability-table"><div class="availability-head" style="${columns}"><b>Инженер</b>${sprints.map((sprint) => `<b>Sprint ${sprint}</b>`).join('')}</div>${rows.map((row) => {
+    const engineer = engineerBy(row.engineer_id);
+    return `<div class="availability-row" style="${columns}"><span><strong>${escapeHtml(engineer?.name || row.engineer_id)}</strong><small>${escapeHtml(row.engineer_id)} · база ${number(row.base_capacity_hours)} ч</small></span>${sprints.map((sprint) => {
+      const current = Number(row.availability_by_sprint?.[String(sprint)]?.availability_rate ?? 1);
+      const base = Number(row.base_capacity_hours || 0);
+      return `<select data-availability-scope="${attr(scope)}" data-availability-engineer="${attr(row.engineer_id)}" data-availability-sprint="${sprint}" data-original-rate="${current}"><option value="1" ${current === 1 ? 'selected' : ''}>100% · ${number(base)} ч</option><option value="0.5" ${current === .5 ? 'selected' : ''}>50% · ${number(base * .5)} ч</option><option value="0" ${current === 0 ? 'selected' : ''}>0% · 0 ч</option></select>`;
+    }).join('')}</div>`;
+  }).join('')}</div>` : '<p class="hint">Индивидуальные ограничения пока не заданы.</p>'}`;
+}
+
+function addAvailabilityEngineer(scope) {
+  const select = $(`[data-availability-add-select="${scope}"]`);
+  if (!select?.value) return;
+  state.availabilityVisibleEngineers[scope].add(select.value);
+  renderFutureAvailability();
+}
+
+async function findReplacement(button) {
+  const card = button.closest('[data-close-task]');
+  const row = button.closest('.fact-engineer-row');
+  const engineerId = button.dataset.findReplacement;
+  const input = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, row);
+  const role = input?.dataset.factEngineerRole || '';
+  const hours = Number(input?.value || 0);
+  const select = $('[data-replacement-for]', row);
+  if (!(hours > 0)) { showToast('Сначала укажите положительный остаток часов.'); return; }
+  button.disabled = true;
+  try {
+    const payload = await window.postcodeApi.getReplacementCandidates(
+      card.dataset.closeTask, engineerId, currentSprint() + 1, role, hours,
+    );
+    const candidates = payload.roles?.[0]?.candidates || [];
+    select.innerHTML = `<option value="">Выберите решение</option>${candidates.map((candidate) => `<option value="${attr(candidate.engineer_id)}">${escapeHtml(engineerBy(candidate.engineer_id)?.name || candidate.engineer_id)} · ${escapeHtml(candidate.team_id || 'без команды')} · свободно ${number(candidate.free_hours)} ч${candidate.cross_team ? ' · из другой команды' : ''}</option>`).join('')}<option value="__MOVE__">Перенести задачу</option>`;
+    select.dataset.candidatesLoaded = 'true';
+    select.focus();
+    if (!candidates.length) showToast('Подходящей замены нет. Выберите перенос задачи.');
+  } catch (error) {
+    showToast(`Не удалось подобрать замену: ${error?.message || error}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderFutureAvailability() {
+  if (!data.availability) return;
+  if ($('#futureAvailabilityGrid')) $('#futureAvailabilityGrid').innerHTML = availabilityGridMarkup(data.availability, 'page');
+  if ($('#sprintFutureAvailability')) $('#sprintFutureAvailability').innerHTML = availabilityGridMarkup(data.availability, 'close');
+  if ($('#futureAvailabilityState')) {
+    const conflicts = data.availability.conflicts || [];
+    $('#futureAvailabilityState').innerHTML = conflicts.length
+      ? `<div class="constructor-errors">Найдено конфликтов с утверждённым планом: ${conflicts.length}. После закрытия спринта будет создан черновик пересчёта.</div>`
+      : '';
+  }
+}
+
+async function loadFutureAvailability() {
+  try {
+    data.availability = await window.postcodeApi.getEngineerAvailability();
+    renderFutureAvailability();
+  } catch (error) {
+    if ($('#futureAvailabilityState')) $('#futureAvailabilityState').innerHTML = `<div class="constructor-errors">${escapeHtml(error?.message || 'Не удалось загрузить доступность.')}</div>`;
+  }
+}
+
+function collectAvailabilityUpdates(scope) {
+  return $$(`[data-availability-scope="${scope}"]`).filter((select) => Number(select.value) !== Number(select.dataset.originalRate)).map((select) => ({
+    engineer_id: select.dataset.availabilityEngineer,
+    sprint: Number(select.dataset.availabilitySprint),
+    availability_rate: Number(select.value),
+    source_type: 'MANUAL',
+    source_id: 'manual',
+  }));
+}
+
+async function saveFutureAvailability() {
+  const updates = collectAvailabilityUpdates('page');
+  if (!updates.length) { showToast('Изменений доступности нет.'); return; }
+  try {
+    data.availability = await window.postcodeApi.updateEngineerAvailability(updates);
+    renderFutureAvailability();
+    showToast(data.availability.requires_replanning ? 'Доступность сохранена. План требует пересчёта.' : 'Доступность сохранена.');
+  } catch (error) {
+    showToast(`Не удалось сохранить доступность: ${error?.message || error}`);
+  }
 }
 
 function renderSprintCloseDialog(actual = null) {
@@ -1598,8 +1932,18 @@ function renderSprintCloseDialog(actual = null) {
   $('#sprintCloseTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
     const saved = savedResults.get(String(task.task_id));
     const roles = {...roleHoursForTask(task, sprint), ...(saved?.remaining_role_hours || {})};
+    const allocations = (task.allocations || []).filter((row) => Number(row.sprint) === sprint);
+    const savedWork = new Map((saved?.remaining_engineer_work || []).map((row) => [`${row.engineer_id}\u001f${row.role}`, row]));
+    const unavailable = new Set(saved?.unavailable_engineer_ids || []);
+    const allocatedRoles = new Set(allocations.map((row) => String(row.role)));
+    const engineerWork = allocations.map((row) => {
+      const key = `${row.engineer_id}\u001f${row.role}`;
+      const remaining = savedWork.get(key)?.remaining_hours ?? 0;
+      return `<div class="fact-engineer-row"><span><b>${escapeHtml(engineerBy(row.engineer_id)?.name || row.engineer_id)}</b><small>${escapeHtml(row.role)} · план ${number(row.allocated_hours)} ч</small></span><span class="fact-role-input"><input type="number" min="0" step="any" value="${attr(remaining)}" data-fact-engineer="${attr(row.engineer_id)}" data-fact-engineer-role="${attr(row.role)}" data-fact-planned-hours="${attr(row.allocated_hours)}" disabled><i>ч</i></span><label class="fact-unavailable-person"><input type="checkbox" data-fact-unavailable="${attr(row.engineer_id)}" ${unavailable.has(String(row.engineer_id)) ? 'checked' : ''} disabled><span>Был недоступен</span></label><div class="replacement-picker" hidden><p class="replacement-help">Сначала нажмите «Подобрать замену». После проверки роли и свободных часов доступные инженеры появятся в списке справа.</p><button class="btn btn-outline" type="button" data-find-replacement="${attr(row.engineer_id)}">Подобрать замену</button><select data-replacement-for="${attr(row.engineer_id)}" data-replacement-role="${attr(row.role)}"><option value="">Выберите решение</option><option value="__MOVE__">Перенести задачу</option></select></div></div>`;
+    }).join('');
+    const unallocatedRoles = Object.entries(roles).filter(([role]) => !allocatedRoles.has(String(role))).map(([role, hours]) => `<div class="fact-engineer-row"><span><b>Роль без назначения</b><small>${escapeHtml(role)}</small></span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></div>`).join('');
     const startingSp = Number(task.remaining_story_points ?? task.story_points ?? 0);
-    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность необходимых ресурсов</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="1" max="${attr(startingSp)}" step="1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>Целое число, не более ${number(startingSp)} SP. Выполненное будет рассчитано автоматически.</small></div><p>Сколько ещё потребуется времени</p><div class="fact-roles">${Object.entries(roles).map(([role, hours]) => `<label class="fact-role"><span>${escapeHtml(role)}</span><span class="fact-role-input"><input type="number" min="0" step="any" data-fact-role="${attr(role)}" value="${escapeHtml(hours)}" disabled><i>ч</i></span></label>`).join('')}</div></div></article>`;
+    return `<article class="sprint-close-task" data-close-task="${attr(task.task_id)}" data-starting-sp="${attr(startingSp)}"><label class="sprint-close-check"><input type="checkbox" data-task-deviation disabled><span><b>${escapeHtml(task.task_id)}</b>${escapeHtml(task.title)}</span></label><div class="sprint-close-task-fields" hidden><label class="fact-reason">Причина отклонения<select data-task-reason disabled><option value="">Выберите причину</option><option>Не хватило времени</option><option>Недоступность сотрудника</option><option>Зависимость не была завершена</option><option>Объём задачи оказался больше запланированного</option><option>Изменились приоритеты</option><option>Задача была приостановлена</option><option>Другая организационная причина</option></select></label><div class="fact-sp-block"><label class="fact-sp"><span>Осталось по задаче</span><span class="fact-role-input"><input type="number" min="1" max="${attr(startingSp)}" step="1" data-fact-sp placeholder="0" disabled><i>SP</i></span></label><small>SP будет проверено backend по исходной пропорции часов.</small></div><p>Остаток по назначенным инженерам</p><div class="fact-engineers">${engineerWork}${unallocatedRoles}</div></div></article>`;
   }).join('') : empty('В этом спринте нет задач.');
   $('#sprintUnfinishedSection').hidden = true;
   $$('input[name="hasPlanDeviations"]').forEach((input) => { input.checked = false; });
@@ -1624,6 +1968,7 @@ function renderSprintCloseDialog(actual = null) {
     syncSprintCloseControls();
     $('#confirmCloseCurrentSprint').disabled = false;
   }
+  renderFutureAvailability();
 }
 
 function syncSprintCloseControls() {
@@ -1637,11 +1982,20 @@ function syncSprintCloseControls() {
     $('[data-task-reason]', card).disabled = !taskEnabled;
     $('[data-fact-sp]', card).disabled = !taskEnabled;
     $$('[data-fact-role]', card).forEach((input) => { input.disabled = !taskEnabled; });
+    $$('[data-fact-engineer]', card).forEach((input) => { input.disabled = !taskEnabled; });
+    const unavailableEnabled = taskEnabled && $('[data-task-reason]', card)?.value === 'Недоступность сотрудника';
+    $$('[data-fact-unavailable]', card).forEach((input) => {
+      input.disabled = !unavailableEnabled;
+      if (!unavailableEnabled) input.checked = false;
+      const picker = input.closest('.fact-engineer-row')?.querySelector('.replacement-picker');
+      if (picker) picker.hidden = !(unavailableEnabled && input.checked);
+    });
   });
 }
 
 function openSprintCloseDialog(actual = null) {
   renderSprintCloseDialog(actual);
+  loadFutureAvailability();
   $('#sprintCloseDialog').showModal();
 }
 
@@ -1654,7 +2008,7 @@ function showSprintResult(kpi) {
   const status = kpi.status === 'ON_TARGET' ? 'В пределах бизнес-нормы' : kpi.status === 'BELOW_TARGET' ? 'Ниже бизнес-нормы' : kpi.status === 'ABOVE_TARGET' ? 'Выше бизнес-нормы' : 'Недостаточно данных';
   const transferredSp = kpi.transferred_sp ?? kpi.remaining_sp;
   $('#sprintResultTitle').textContent = `Итоги Sprint ${number(kpi.sprint)}`;
-  $('#sprintResultContent').innerHTML = `<div class="sprint-result-score ${attr(kpi.status)}"><span>Sprint Say/Do</span><strong>${kpi.completion_percent == null ? '—' : percent(kpi.completion_percent)}</strong><p>${escapeHtml(status)} · норма ${number(kpi.target_min_percent)}–${number(kpi.target_max_percent)}%</p></div><div class="sprint-result-metrics"><div><span>Было запланировано</span><b>${number(kpi.baseline_sp)} SP</b></div><div><span>Реально выполнено</span><b>${number(kpi.actual_sp)} SP</b></div><div class="transferred"><span>Перенесено</span><b>${number(transferredSp)} SP</b></div></div>`;
+  $('#sprintResultContent').innerHTML = `<div class="sprint-result-score ${attr(kpi.status)}"><span>Sprint Say/Do</span><strong>${kpi.baseline_confirmed && kpi.completion_percent != null ? percent(kpi.completion_percent) : '—'}</strong><p>${kpi.baseline_confirmed ? `${escapeHtml(status)} · норма ${number(kpi.target_min_percent)}–${number(kpi.target_max_percent)}%` : 'Исторический контрольный план не подтверждён'}</p></div><div class="sprint-result-metrics"><div><span>Было запланировано</span><b>${kpi.baseline_confirmed ? `${number(kpi.baseline_sp)} SP` : '—'}</b></div><div><span>Реально выполнено</span><b>${number(kpi.actual_sp)} SP</b></div><div class="transferred"><span>Перенесено</span><b>${number(transferredSp)} SP</b></div></div>`;
   $('#sprintResultDialog').showModal();
 }
 
@@ -1681,8 +2035,30 @@ async function closeCurrentSprint(event) {
     $$('#sprintCloseTasks [data-close-task]').forEach((card) => {
       if (!$('[data-task-deviation]', card)?.checked) return;
       const remaining = {};
-      $$('[data-fact-role]', card).forEach((input) => { const value = Number(input.value); if (value > 0) remaining[input.dataset.factRole] = value; });
-      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_story_points: Number($('[data-fact-sp]', card)?.value), starting_story_points: Number(card.dataset.startingSp), remaining_role_hours: remaining, remaining_engineer_allocations: {}, unavailable_next_sprint: false, unavailable_engineer_ids: []});
+      const engineerWork = $$('[data-fact-engineer]', card).map((input) => {
+        const value = Number(input.value || 0);
+        if (value > 0) remaining[input.dataset.factEngineerRole] = Number(remaining[input.dataset.factEngineerRole] || 0) + value;
+        return {engineer_id: input.dataset.factEngineer, role: input.dataset.factEngineerRole, planned_hours: Number(input.dataset.factPlannedHours || 0), remaining_hours: value};
+      });
+      $$('[data-fact-role]', card).forEach((input) => {
+        const value = Number(input.value || 0);
+        if (value > 0) remaining[input.dataset.factRole] = Number(remaining[input.dataset.factRole] || 0) + value;
+      });
+      const engineerAllocations = {};
+      engineerWork.forEach((row) => { if (row.remaining_hours > 0) engineerAllocations[row.engineer_id] = Number(engineerAllocations[row.engineer_id] || 0) + row.remaining_hours; });
+      const unavailableIds = $$('[data-fact-unavailable]', card).filter((input) => input.checked).map((input) => input.dataset.factUnavailable);
+      const replacementAllocations = {};
+      let moveRemainingTask = false;
+      unavailableIds.forEach((engineerId) => {
+        const row = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, card)?.closest('.fact-engineer-row');
+        const remainingHours = Number($('[data-fact-engineer]', row)?.value || 0);
+        const decision = $('[data-replacement-for]', row)?.value || '';
+        if (!(remainingHours > 0)) return;
+        if (decision === '__MOVE__') moveRemainingTask = true;
+        else if (decision) replacementAllocations[decision] = Number(replacementAllocations[decision] || 0) + remainingHours;
+      });
+      if (moveRemainingTask) Object.keys(replacementAllocations).forEach((engineerId) => delete replacementAllocations[engineerId]);
+      byTask.set(card.dataset.closeTask, {task_id: card.dataset.closeTask, task_completed: false, incomplete_reason: $('[data-task-reason]', card)?.value || null, remaining_story_points: Number($('[data-fact-sp]', card)?.value), starting_story_points: Number(card.dataset.startingSp), remaining_role_hours: remaining, remaining_engineer_allocations: engineerAllocations, remaining_engineer_work: engineerWork, replacement_engineer_allocations: replacementAllocations, move_remaining_task: moveRemainingTask, unavailable_next_sprint: false, unavailable_engineer_ids: unavailableIds});
     });
   }
   const results = [...byTask.values()];
@@ -1693,6 +2069,25 @@ async function closeCurrentSprint(event) {
   }
   if (results.some((row) => !row.incomplete_reason)) {
     $('#sprintCloseError').textContent = 'Для каждой задачи выберите причину отклонения.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  if (results.some((row) => row.incomplete_reason === 'Недоступность сотрудника' && !row.unavailable_engineer_ids.length)) {
+    $('#sprintCloseError').textContent = 'Для причины «Недоступность сотрудника» выберите хотя бы одного назначенного инженера.';
+    $('#sprintCloseError').hidden = false;
+    return;
+  }
+  const unresolvedReplacement = results.some((result) => {
+    if (result.incomplete_reason !== 'Недоступность сотрудника') return false;
+    const card = $(`[data-close-task="${CSS.escape(result.task_id)}"]`, $('#sprintCloseTasks'));
+    return result.unavailable_engineer_ids.some((engineerId) => {
+      const row = $(`[data-fact-engineer="${CSS.escape(engineerId)}"]`, card)?.closest('.fact-engineer-row');
+      const remainingHours = Number($('[data-fact-engineer]', row)?.value || 0);
+      return remainingHours > 0 && !$('[data-replacement-for]', row)?.value;
+    });
+  });
+  if (unresolvedReplacement) {
+    $('#sprintCloseError').textContent = 'Для каждого недоступного инженера с остатком работы выберите замену или перенос задачи.';
     $('#sprintCloseError').hidden = false;
     return;
   }
@@ -1714,6 +2109,7 @@ async function closeCurrentSprint(event) {
       sprint_number: sprint,
       all_completed: deviationAnswer === 'no',
       results,
+      future_availability: collectAvailabilityUpdates('close'),
     });
   } catch (error) {
     $('#sprintCloseError').textContent = `Не удалось закрыть спринт: ${error?.message || error}`;
@@ -2194,7 +2590,7 @@ function renderEngineerQuarter() {
 
 function engineerTaskCard(task) {
   const blockers = task.dependencies || [];
-  return `<article class="engineer-task-card"><div><h3>${escapeHtml(task.task_id)} · ${escapeHtml(task.title || '')}</h3><p>${escapeHtml(task.status_label || task.status || '—')}</p><div class="engineer-task-card-meta"><span>${escapeHtml(task.owner_team_id || '—')}</span><span>${escapeHtml((task.roles || []).join(', ') || '—')}</span><span>${number(task.allocated_hours)} ч</span><span>${(task.planned_sprints || []).map((sprint) => `S${sprint}`).join(', ')}</span>${task.cross_team ? '<span>Cross-team помощь</span>' : ''}</div>${blockers.length ? `<div class="engineer-blocker">Ожидает: ${blockers.map((item) => escapeHtml(item.blocking_task_id)).join(', ')}</div>` : ''}</div><button class="btn btn-outline" type="button" data-open-task="${attr(task.task_id)}">Открыть</button></article>`;
+  return `<article class="engineer-task-card"><div><h3>${escapeHtml(task.task_id)} · ${escapeHtml(task.title || '')}</h3>${expansionBadge(taskBy(task.task_id))}<p>${escapeHtml(task.status_label || task.status || '—')}</p><div class="engineer-task-card-meta"><span>${escapeHtml(task.owner_team_id || '—')}</span><span>${escapeHtml((task.roles || []).join(', ') || '—')}</span><span>${number(task.allocated_hours)} ч</span><span>${(task.planned_sprints || []).map((sprint) => `S${sprint}`).join(', ')}</span>${task.cross_team ? '<span>Cross-team помощь</span>' : ''}</div>${blockers.length ? `<div class="engineer-blocker">Ожидает: ${blockers.map((item) => escapeHtml(item.blocking_task_id)).join(', ')}</div>` : ''}</div><button class="btn btn-outline" type="button" data-open-task="${attr(task.task_id)}">Открыть</button></article>`;
 }
 
 function renderEngineerTasks() {
@@ -2234,7 +2630,7 @@ function openEmployee(engineerId) {
   const memberships = engineer.capacity_buckets.map((bucket) => bucket.team_id
     ? `<button class="profile-link" data-employee-team="${attr(bucket.team_id)}" type="button">${escapeHtml(bucket.team_id)} · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч ↗</button>`
     : `<div class="profile-link">Без команды · доступность ${percent(Number(bucket.capacity_rate) * 100)} · ${number(bucket.capacity_hours)} ч</div>`).join('');
-  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${memberships || '<p>Без команды</p>'}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
+  $('#employeeContent').innerHTML = `<div class="eyebrow">КАРТОЧКА СОТРУДНИКА</div><h2>${escapeHtml(engineer.name || engineer.engineer_id)}</h2><p>${escapeHtml(engineer.roles.join(', ') || engineer.engineer_id)}${grade}</p><div class="metric-grid employee-metrics"><div class="metric"><span>Команд</span><b>${engineer.team_ids.length}</b></div><div class="metric"><span>Доступно за спринт</span><b>${number(engineer.effective_capacity_hours_by_sprint?.[String(sprint)] ?? engineer.capacity_hours)} ч</b></div><div class="metric"><span>Занято в Sprint ${sprint}</span><b>${number(engineer.used_hours_by_sprint[String(sprint)])} ч</b></div><div class="metric"><span>Свободно</span><b>${number(engineer.free_hours_by_sprint[String(sprint)])} ч</b></div></div><div class="drawer-section"><h3>Команды и участие</h3>${memberships || '<p>Без команды</p>'}</div><div class="drawer-section"><h3>Технологии</h3><div class="skill-tags">${displayedSkills.map((skill) => `<span>${escapeHtml(skill)}</span>`).join('') || '<span>Нет данных</span>'}</div></div><div class="drawer-section"><h3>Критичность для команд</h3><div class="engineer-impact-list">${impact}</div></div><div class="drawer-section"><h3>Назначения Sprint ${sprint}</h3>${allocations.length ? allocations.map((item) => `<p>${escapeHtml(item.task_id)} · ${escapeHtml(item.role)} · ${number(item.allocated_hours)} ч${item.cross_team ? ` · помогает ${escapeHtml(item.assigned_task_team_id)} из ${escapeHtml(item.source_team_id)}` : ''}</p>`).join('') : '<p>Назначений нет.</p>'}</div>${archiveState(engineer)}${engineer.archived ? '' : `<div class="entity-actions"><button class="btn btn-danger" type="button" data-archive-entity="engineer" data-archive-id="${attr(engineer.engineer_id)}" data-current-plan-reference="${engineer.allocations.length > 0}">Удалить</button></div>`}`;
   $('#employeeDrawer').classList.add('open');
   $('#employeeDrawer').setAttribute('aria-hidden', 'false');
 }
@@ -2300,6 +2696,7 @@ function bindEvents() {
   $('#competencyQuarterOnly')?.addEventListener('change', (event) => { state.starQuarterOnly = event.target.checked; state.skillTech = 'all'; renderStarSkills(); });
   $('#criticalOnly').addEventListener('change', (event) => { state.criticalOnly = event.target.checked; renderStarSkills(); });
   $('#openSprintCloseDialog').addEventListener('click', () => openSprintCloseDialog());
+  $('#saveFutureAvailability')?.addEventListener('click', saveFutureAvailability);
   $('#sprintCloseForm').addEventListener('submit', closeCurrentSprint);
   $('#sprintCloseDialog').addEventListener('click', (event) => { if (event.target === $('#sprintCloseDialog')) closeSprintCloseDialog(); });
   $('#confirmSprintResult').addEventListener('click', closeSprintResult);
@@ -2341,8 +2738,73 @@ function bindEvents() {
   $('#archiveDialog').addEventListener('click', (event) => { if (event.target === $('#archiveDialog')) closeArchiveModal(); });
   $('#riskDialog')?.addEventListener('click', (event) => { if (event.target === $('#riskDialog')) closeRiskModal(); });
   $('#riskDialog')?.addEventListener('close', () => { state.riskModalOpen = false; renderRisks(); });
+  $('#trainingDialog')?.addEventListener('change', updateTrainingSummary);
   $('#riskSearch')?.addEventListener('input', (event) => { state.riskSearch = event.target.value; renderRisks(); });
   document.addEventListener('click', (event) => {
+    const expansionAction = event.target.closest('[data-expansion-action]');
+    if (expansionAction) { handleExpansionAction(expansionAction.dataset.expansionAction, expansionAction.dataset.expansionRecommendation); return; }
+    const trainingToggle = event.target.closest('[data-toggle-training-candidates]');
+    if (trainingToggle) {
+      const key = trainingToggle.dataset.toggleTrainingCandidates;
+      const selector = trainingToggle.closest('[data-training-selector]');
+      const options = $('.development-candidate-options', selector);
+      const expanded = trainingToggle.getAttribute('aria-expanded') !== 'true';
+      state.expandedTrainingCandidateSelectors[key] = expanded;
+      trainingToggle.setAttribute('aria-expanded', String(expanded));
+      if (options) options.hidden = !expanded;
+      return;
+    }
+    const trainingCandidate = event.target.closest('[data-select-training-candidate]');
+    if (trainingCandidate) {
+      const key = trainingCandidate.dataset.trainingRecommendation;
+      const engineerId = trainingCandidate.dataset.selectTrainingCandidate;
+      const recommendation = (data.development?.recommendations || []).find(
+        (item) => String(item.recommendation_id) === key,
+      );
+      const candidate = (recommendation?.recommendation?.candidates || []).find(
+        (item) => item.engineer_id === engineerId,
+      );
+      const selector = trainingCandidate.closest('[data-training-selector]');
+      const toggle = $('[data-toggle-training-candidates]', selector);
+      if (!candidate || !toggle) return;
+      state.selectedTrainingCandidates[key] = engineerId;
+      state.expandedTrainingCandidateSelectors[key] = false;
+      toggle.innerHTML = developmentSelectedCandidate(candidate);
+      toggle.setAttribute('aria-expanded', 'false');
+      $$('.development-candidate-option', selector).forEach((option) => {
+        const selected = option.dataset.selectTrainingCandidate === engineerId;
+        option.classList.toggle('selected', selected);
+        option.setAttribute('aria-checked', String(selected));
+      });
+      const options = $('.development-candidate-options', selector);
+      if (options) options.hidden = true;
+      toggle.focus();
+      return;
+    }
+    const trainCandidate = event.target.closest('[data-train-selected-candidate]');
+    if (trainCandidate) { openTrainingDialog(trainCandidate.dataset.trainSelectedCandidate); return; }
+    if (event.target.closest('[data-training-close]')) { $('#trainingDialog').close(); return; }
+    if (event.target.closest('[data-training-select-all]')) {
+      $$('[data-training-sprint]', $('#trainingDialog')).forEach((input) => { input.checked = true; });
+      updateTrainingSummary();
+      return;
+    }
+    if (event.target.closest('[data-training-continue]')) { continueTraining(); return; }
+    if (event.target.closest('[data-training-resolve]')) { resolveTraining(); return; }
+    if (event.target.closest('[data-training-back]')) {
+      const recommendation = (data.development?.recommendations || []).find(
+        (item) => item.recommendation_id === state.trainingProposal?.recommendation_id,
+      );
+      const candidate = (recommendation?.recommendation?.candidates || []).find(
+        (item) => item.engineer_id === state.trainingProposal?.engineer_id,
+      );
+      if (recommendation && candidate) renderTrainingForm(recommendation, candidate);
+      return;
+    }
+    const addAvailability = event.target.closest('[data-availability-add]');
+    if (addAvailability) { addAvailabilityEngineer(addAvailability.dataset.availabilityAdd); return; }
+    const replacement = event.target.closest('[data-find-replacement]');
+    if (replacement) { findReplacement(replacement); return; }
     const approveReplanButton = event.target.closest('[data-approve-replan]');
     if (approveReplanButton) { approveReplan(approveReplanButton.dataset.approveReplan); return; }
     const editSprintActualButton = event.target.closest('[data-edit-sprint-actual]');
@@ -2458,6 +2920,8 @@ function bindEvents() {
     if (event.target.id === 'developmentSkillFilter') { state.developmentSkill = event.target.value; renderDevelopment(); return; }
     if (event.target.id === 'taskSprintSelect') { state.taskSprint = Number(event.target.value); renderTaskDetail(); return; }
     if (event.target.matches('[data-task-deviation]')) { syncSprintCloseControls(); return; }
+    if (event.target.matches('[data-task-reason]')) { syncSprintCloseControls(); return; }
+    if (event.target.matches('[data-fact-unavailable]')) { syncSprintCloseControls(); return; }
     if (event.target.name === 'hasPlanDeviations') { syncSprintCloseControls(); $('#confirmCloseCurrentSprint').disabled = false; $('#sprintCloseError').hidden = true; }
   });
   document.addEventListener('input', (event) => {
@@ -2503,6 +2967,8 @@ function hydrate(payload) {
   data.teamHistories = {};
   data.engineerDetails = {};
   data.engineerHistories = {};
+  data.engineerTrainings = {};
+  data.expansion = null;
   data.development = null;
   state.developmentLoading = false;
   state.developmentError = null;
@@ -2545,11 +3011,12 @@ async function initialize() {
   state.engineerId = initialRoute.engineerId;
   show(initialRoute.page, 'replace');
   try {
-    const [dashboard, constructorCatalog, archiveReasons, replanWorkflow] = await Promise.all([
+    const [dashboard, constructorCatalog, archiveReasons, replanWorkflow, expansion] = await Promise.all([
       window.postcodeApi.getDashboard(),
       window.postcodeApi.getConstructorCatalog(),
       window.postcodeApi.getArchiveReasons(),
       window.postcodeApi.getReplanDraft(),
+      window.postcodeApi.getSprintExpansion(),
     ]);
     data.historicalTasks = (constructorCatalog.tasks || [])
       .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
@@ -2557,15 +3024,22 @@ async function initialize() {
     data.engineerCatalog = constructorCatalog.engineers || [];
     hydrate(dashboard);
     data.replanWorkflow = replanWorkflow.status === 'NONE' ? null : replanWorkflow;
+    data.expansion = expansion;
     data.archiveReasons = archiveReasons;
     window.planConstructor.initialize(constructorCatalog, window.postcodeApi, (plannerResult) => {
       hydrate(plannerResult);
       show('home');
-    }, (updatedCatalog) => {
+    }, async (updatedCatalog) => {
       data.historicalTasks = (updatedCatalog.tasks || [])
         .filter((task) => ['done', 'completed'].includes(String(task.status || '').toLowerCase()))
         .map(historicalTaskFromCatalog);
       data.engineerCatalog = updatedCatalog.engineers || [];
+      try {
+        data.expansion = await window.postcodeApi.getSprintExpansion();
+        if (state.page === 'current-sprint') renderCurrentSprint();
+      } catch (_) {
+        // Catalog editing remains usable even if an optional expansion refresh fails.
+      }
     });
     if (state.workspaceMode === 'engineer') await loadEngineerWorkspace();
     if (hasPendingReplan() && state.page === 'home') show('recalc');

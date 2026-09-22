@@ -1156,7 +1156,13 @@ def build_catalog_snapshot(
         profile["assignments"].sort(key=lambda item: (item["team_id"], item["role"]))
         profile["skills"] = sorted(skills_by_engineer[engineer_id], key=str.casefold)
         profile["is_free"] = not profile["assignments"]
-        profile["membership_rate"] = sum(float(item["capacity_rate"]) for item in profile["assignments"])
+        # Multiple qualified roles share one membership bucket, not extra FTE.
+        membership_rates: dict[str, float] = {}
+        for item in profile["assignments"]:
+            team_id = item["team_id"]
+            rate = float(item["capacity_rate"])
+            membership_rates[team_id] = min(membership_rates.get(team_id, rate), rate)
+        profile["membership_rate"] = sum(membership_rates.values())
         profile["available_capacity_rate"] = (
             float(profile["free_assignment"].get("capacity_rate") or 0)
             if profile["free_assignment"]

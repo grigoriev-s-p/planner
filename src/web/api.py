@@ -47,6 +47,7 @@ from .catalog import (
 from src.star_map import StarMapService
 from .recommendations import RecommendationDraft
 from .replanning import build_remaining_horizon_plan, _immutable_task_baseline, _task_map
+from .training import apply_completed_capabilities, build_training_replan, training_constraints
 from .entity_projections import (
     build_engineer_history,
     build_engineer_projection,
@@ -54,7 +55,8 @@ from .entity_projections import (
     build_team_projection,
 )
 from .lifecycle import capture_closed_sprint, project_lifecycle
-from .kpi_projection import project_management_kpis, sprint_kpi
+from .kpi_projection import freeze_sprint_baseline, project_management_kpis, sprint_kpi
+from .expansion import build_proposal, candidate_ids, merge_additions, simulate_additions
 from .engineer_workspace import build_engineer_workspace
 from src.planning.task_states import is_historical_done
 
@@ -99,6 +101,9 @@ class ActualTaskResultRequest(BaseModel):
     remaining_story_points: float | None = Field(default=None, ge=0)
     remaining_role_hours: dict[str, float] = Field(default_factory=dict)
     remaining_engineer_allocations: dict[str, float] = Field(default_factory=dict)
+    remaining_engineer_work: list[dict[str, object]] = Field(default_factory=list)
+    replacement_engineer_allocations: dict[str, float] = Field(default_factory=dict)
+    move_remaining_task: bool = False
     employee_deviation: dict[str, object] | None = None
     unavailable_next_sprint: bool = False
     unavailable_engineer_ids: list[str] = Field(default_factory=list)
@@ -108,6 +113,28 @@ class SprintActualRequest(BaseModel):
     sprint_number: int = Field(ge=1, le=6)
     all_completed: bool = False
     results: list[ActualTaskResultRequest] = Field(default_factory=list)
+    future_availability: list[dict[str, object]] = Field(default_factory=list)
+
+
+class AvailabilityUpdateRequest(BaseModel):
+    engineer_id: str = Field(min_length=1, max_length=120)
+    sprint: int = Field(ge=1, le=6)
+    availability_rate: Literal[0, 0.5, 1]
+    source_type: str = Field(default="MANUAL", min_length=1, max_length=40)
+    source_id: str = Field(default="manual", min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AvailabilityBatchRequest(BaseModel):
+    updates: list[AvailabilityUpdateRequest] = Field(default_factory=list)
+
+
+class TrainingRequest(BaseModel):
+    recommendation_id: str
+    engineer_id: str
+    selected_sprints: list[int]
+    availability_mode: Literal["NO_IMPACT", "HALF", "BLOCKED"]
+    resolutions: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class ConstructorUploadDecisionRequest(BaseModel):
@@ -217,6 +244,20 @@ def _with_official_week0_kpi_denominator(payload: dict) -> dict:
         holder["kpis"] = kpis
     candidate["_planning_state"] = state
     return candidate
+
+
+def _with_decided_expansion_baseline(payload: dict, repository: object) -> dict:
+    """Project an ignored/empty decision's baseline without editing Approved."""
+
+    proposal = repository.latest_expansion_proposal()
+    baseline = (proposal or {}).get("sprint_baseline")
+    if not baseline or proposal.get("status") not in {"IGNORED", "EMPTY"}:
+        return payload
+    projected = deepcopy(payload)
+    state = projected.setdefault("_planning_state", {})
+    state.setdefault("sprint_baselines", {}).setdefault(str(baseline["sprint"]),
+                                                     deepcopy(baseline))
+    return projected
 
 
 class PlanDraftStore:
@@ -353,6 +394,7 @@ class PlanDraftStore:
                 "closed_sprint": 0,
                 "trigger": "APPROVE",
             }
+            freeze_sprint_baseline(approved, 1)
             if self._repository_provider is not None and draft.tables:
                 # Scenario entities stay draft-only until the plan is approved.
                 # Approval also makes newly created entities part of the
@@ -481,6 +523,51 @@ class PlanDraftStore:
                     + ", ".join(unexpected)
                 )
         for row in results:
+            task_id = str(row.get("task_id") or "")
+            task = current_tasks.get(task_id) or {}
+            allocated_rows = [
+                item for item in task.get("allocations") or []
+                if int(item.get("sprint") or 0) == sprint_number
+            ]
+            allocated_people = {
+                str(item.get("engineer_id") or "") for item in allocated_rows
+                if item.get("engineer_id")
+            }
+            invalid_unavailable = sorted(
+                set(map(str, row.get("unavailable_engineer_ids") or [])) - allocated_people
+            )
+            if invalid_unavailable:
+                raise ValueError(
+                    "Недоступными можно отметить только назначенных на задачу инженеров: "
+                    + ", ".join(invalid_unavailable)
+                )
+            allocated_pairs = {
+                (str(item.get("engineer_id") or ""), str(item.get("role") or ""))
+                for item in allocated_rows
+            }
+            for engineer_id, hours in (row.get("remaining_engineer_allocations") or {}).items():
+                if float(hours) < 0:
+                    raise ValueError(
+                        f"Остаток инженера {engineer_id} не может быть отрицательным."
+                    )
+            for engineer_id, hours in (row.get("replacement_engineer_allocations") or {}).items():
+                if float(hours) < 0:
+                    raise ValueError(
+                        f"Объём замены для инженера {engineer_id} не может быть отрицательным."
+                    )
+            if row.get("move_remaining_task") and row.get("replacement_engineer_allocations"):
+                raise ValueError(
+                    "Для одной задачи нельзя одновременно выбрать замену и перенос."
+                )
+            for item in row.get("remaining_engineer_work") or []:
+                if float(item.get("remaining_hours") or 0.0) < 0:
+                    raise ValueError("Остаток работы инженера не может быть отрицательным.")
+                pair = (str(item.get("engineer_id") or ""), str(item.get("role") or ""))
+                if pair not in allocated_pairs:
+                    raise ValueError(
+                        "Остаток можно указать только для назначения текущего спринта: "
+                        + "/".join(pair)
+                    )
             if not row.get("task_completed") and not row.get("remaining_role_hours"):
                 raise ValueError(
                     f"Для незавершённой задачи {row.get('task_id')} укажите remaining_role_hours."
@@ -516,6 +603,18 @@ class PlanDraftStore:
         self._replan_workflows[saved["workflow_id"]] = deepcopy(saved)
         return deepcopy(saved)
 
+    def invalidate_pending_replans(self, reason: str) -> None:
+        """Prevent approval of a draft calculated with old constraints."""
+
+        with self._lock:
+            workflow = self.replan_workflow()
+            if workflow and workflow.get("status") in {
+                "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+            }:
+                workflow["status"] = "INVALIDATED"
+                workflow["invalidated_reason"] = reason
+                self._save_replan_workflow(workflow)
+
     def replan_workflow(self, workflow_id: str | None = None) -> dict | None:
         with self._lock:
             workflow = self._replan_workflows.get(workflow_id) if workflow_id else None
@@ -537,15 +636,58 @@ class PlanDraftStore:
 
     def _build_replan_workflow(self, workflow: dict, approved: dict) -> dict:
         try:
+            availability = (
+                self._repository_provider().availability_constraints()
+                if self._repository_provider is not None
+                else []
+            )
+            approved_for_replan = deepcopy(approved)
+            if self._repository_provider is not None:
+                completed_training = [
+                    plan for plan in self._repository_provider().training_plans()
+                    if plan.get("status") != "CANCELLED"
+                    and max(int(value) for value in plan["selected_sprints"])
+                    == int(workflow["sprint_number"])
+                ]
+                apply_completed_capabilities(
+                    (approved_for_replan.get("_planning_state") or {}).get("tables") or {},
+                    completed_training,
+                )
             candidate = build_remaining_horizon_plan(
-                approved,
+                approved_for_replan,
                 int(workflow["sprint_number"]),
                 deepcopy(workflow["actual"]["results"]),
+                availability_constraints=availability,
             )
             candidate.setdefault("replanning", {}).update({
                 "workflow_id": workflow["workflow_id"],
                 "review_status": "DRAFT",
             })
+            from src.planning.availability import availability_rate_index
+            before_rates = availability_rate_index(
+                ((approved.get("_planning_state") or {}).get("tables") or {}).get(
+                    "engineer_availability", []
+                )
+            )
+            after_rates = availability_rate_index(availability)
+            availability_changes = []
+            for sprint in sorted(set(before_rates) | set(after_rates)):
+                for engineer_id in sorted(
+                    set(before_rates.get(sprint, {})) | set(after_rates.get(sprint, {}))
+                ):
+                    before = before_rates.get(sprint, {}).get(engineer_id, 1.0)
+                    after = after_rates.get(sprint, {}).get(engineer_id, 1.0)
+                    if before != after:
+                        availability_changes.append({
+                            "engineer_id": engineer_id,
+                            "sprint": sprint,
+                            "before_rate": before,
+                            "after_rate": after,
+                            "reason": "Изменение будущей доступности",
+                        })
+            candidate.setdefault("replanning", {}).setdefault("diff", {})[
+                "availability_changes"
+            ] = availability_changes
             actual_rows = [
                 row for row in (candidate.get("_planning_state") or {}).get("actual_results", [])
                 if int(row.get("sprint_number") or 0) == int(workflow["sprint_number"])
@@ -650,6 +792,13 @@ class PlanDraftStore:
         }
 
         tables = deepcopy(state.get("tables") or {})
+        if self._repository_provider is not None:
+            completed_training = [
+                plan for plan in self._repository_provider().training_plans()
+                if plan.get("status") != "CANCELLED"
+                and max(int(value) for value in plan["selected_sprints"]) == sprint_number
+            ]
+            apply_completed_capabilities(tables, completed_training)
         for task in tables.get("tasks", []):
             if str(task.get("task_id")) in due_ids:
                 task["status"] = "Done"
@@ -742,6 +891,7 @@ class PlanDraftStore:
         sprint_number: int,
         results: list[dict],
         all_completed: bool = False,
+        force_replanning: bool = False,
     ) -> dict:
         """Close a successful sprint or create a review draft for deviations."""
 
@@ -749,6 +899,9 @@ class PlanDraftStore:
             approved = self.approved()
             if approved is None:
                 raise RuntimeError("Сначала утвердите квартальный план.")
+            if self._repository_provider is not None:
+                approved = _with_decided_expansion_baseline(
+                    approved, self._repository_provider())
             self._validate_sprint_actual(
                 approved, sprint_number, results, all_completed=all_completed
             )
@@ -767,7 +920,7 @@ class PlanDraftStore:
             ):
                 if latest.get("actual_fingerprint") == actual_fingerprint:
                     if latest.get("status") == "ACTUAL_SAVED":
-                        if all_completed:
+                        if all_completed and not force_replanning:
                             return self._close_without_replanning(
                                 approved, sprint_number, results, latest
                             )
@@ -786,7 +939,7 @@ class PlanDraftStore:
                         "results": deepcopy(results),
                     },
                     "actual_persisted": True,
-                    "replanning_required": not all_completed,
+                    "replanning_required": force_replanning or not all_completed,
                     "review_required": True,
                     "draft_plan": None,
                     "diff": None,
@@ -798,7 +951,7 @@ class PlanDraftStore:
                 ):
                     latest.pop(key, None)
                 latest = self._save_replan_workflow(latest)
-                if all_completed:
+                if all_completed and not force_replanning:
                     return self._close_without_replanning(
                         approved, sprint_number, results, latest
                     )
@@ -819,7 +972,7 @@ class PlanDraftStore:
                     "results": deepcopy(results),
                 },
                 "actual_persisted": True,
-                "replanning_required": not all_completed,
+                "replanning_required": force_replanning or not all_completed,
                 "review_required": True,
                 "draft_plan": None,
                 "diff": None,
@@ -828,7 +981,7 @@ class PlanDraftStore:
                 "updated_at": now,
             }
             workflow = self._save_replan_workflow(workflow)
-            if all_completed:
+            if all_completed and not force_replanning:
                 return self._close_without_replanning(
                     approved, sprint_number, results, workflow
                 )
@@ -849,7 +1002,10 @@ class PlanDraftStore:
             workflow["status"] = "ACTUAL_SAVED"
             workflow["error"] = None
             workflow = self._save_replan_workflow(workflow)
-            if workflow.get("actual", {}).get("all_completed"):
+            if (
+                workflow.get("actual", {}).get("all_completed")
+                and not workflow.get("replanning_required")
+            ):
                 return self._close_without_replanning(
                     approved,
                     int(workflow["sprint_number"]),
@@ -888,6 +1044,15 @@ class PlanDraftStore:
         approved = self.approved()
         if approved is None:
             raise RuntimeError("Утверждённый план не найден.")
+        # An ignored/empty sprint-expansion decision stores the next-sprint
+        # baseline in the proposal rather than creating a second Approved
+        # revision. Carry that virtual baseline into the next regular
+        # replanning approval so it remains immutable and KPI history is not
+        # lost between close and approval.
+        if self._repository_provider is not None:
+            approved = _with_decided_expansion_baseline(
+                approved, self._repository_provider()
+            )
         with self._lock:
             workflow = self.replan_workflow(workflow_id)
             if workflow is None:
@@ -900,6 +1065,35 @@ class PlanDraftStore:
                 raise RuntimeError("Черновик устарел: утверждённый план уже изменился.")
             candidate = deepcopy(workflow["draft_plan"])
             candidate.setdefault("replanning", {})["review_status"] = "APPROVED"
+            if workflow.get("kind") == "TRAINING_REVIEW":
+                if self._repository_provider is None:
+                    raise RuntimeError("Для дообучения требуется постоянное хранилище.")
+                plan = workflow["training_plan"]
+                if (self._repository_provider().availability_constraints()
+                        != workflow["base_availability_constraints"]):
+                    raise RuntimeError("Доступность изменилась после расчёта черновика.")
+                candidate["revision_context"] = {
+                    "previous_approved_revision": (
+                        approved.get("approved_snapshot") or {}
+                    ).get("revision"),
+                    "closed_sprint": int((approved.get("_planning_state") or {}).get("completed_through_sprint") or 0),
+                    "trigger": "TRAINING_REPLAN_APPROVE",
+                    "workflow_id": workflow_id,
+                }
+                saved, updated = self._repository_provider().save_approved_with_training(
+                    _with_official_week0_kpi_denominator(candidate), plan, workflow
+                )
+                self._approved = deepcopy(saved)
+                self._replan_workflows[workflow_id] = deepcopy(updated)
+                expansion = self._repository_provider().latest_expansion_proposal()
+                if expansion and expansion.get("status") == "OPEN":
+                    # Training changes the active capability catalog. Re-run
+                    # the open post-sprint analysis against that new catalog;
+                    # no task is added until the expansion is approved.
+                    _create_expansion_proposal(
+                        saved, expansion["workflow_id"].removeprefix("expansion-")
+                    )
+                return saved
             candidate["revision_context"] = {
                 "previous_approved_revision": (
                     approved.get("approved_snapshot") or {}
@@ -922,6 +1116,42 @@ class PlanDraftStore:
             })
             self._save_replan_workflow(workflow)
             return saved
+
+    def stage_training_replan(
+        self, plan: dict, constraints: list[dict], candidate: dict
+    ) -> dict:
+        with self._lock:
+            approved = self.approved()
+            if approved is None:
+                raise RuntimeError("Сначала утвердите план.")
+            latest = self.replan_workflow()
+            if latest and latest.get("status") in {
+                "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+            }:
+                raise RuntimeError("Сначала завершите или отмените текущий черновик пересчёта.")
+            now = datetime.now(timezone.utc).isoformat()
+            workflow = {
+                "workflow_id": uuid4().hex,
+                "kind": "TRAINING_REVIEW",
+                "status": "READY_FOR_REVIEW",
+                "sprint_number": _authoritative_current_sprint(),
+                "base_approved_token": self._approved_token(approved),
+                "base_approved_revision": (
+                    approved.get("approved_snapshot") or {}
+                ).get("revision"),
+                "training_plan": deepcopy(plan),
+                "training_constraints": deepcopy(constraints),
+                "base_availability_constraints": [
+                    deepcopy(row) for row in constraints
+                    if not (row.get("source_type") == "TRAINING"
+                            and row.get("source_id") == plan["training_id"])
+                ],
+                "draft_plan": deepcopy(candidate),
+                "diff": deepcopy((candidate.get("replanning") or {}).get("diff") or {}),
+                "created_at": now,
+                "updated_at": now,
+            }
+            return self._save_replan_workflow(workflow)
 
     def replace_approved(self, payload: dict) -> dict:
         with self._lock:
@@ -1075,6 +1305,10 @@ def _catalog_snapshot() -> dict:
 def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
     """Overlay current master data while preserving approved allocations."""
 
+    from src.planning.availability import availability_rate_index
+    availability_rates = availability_rate_index(
+        get_catalog_repository().availability_constraints()
+    )
     approved_engineers = {item["engineer_id"]: item for item in payload.get("engineers", [])}
     engineers = []
     for profile in catalog.get("engineers", []):
@@ -1082,13 +1316,18 @@ def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
         current = deepcopy(approved_engineers.get(engineer_id) or {})
         assignments = list(profile.get("assignments") or [])
         free = profile.get("free_assignment")
+        bucket_rates: dict[str, float] = {}
+        for item in assignments:
+            team_id = str(item["team_id"])
+            rate = float(item.get("capacity_rate") or 0)
+            bucket_rates[team_id] = min(bucket_rates.get(team_id, rate), rate)
         buckets = [
             {
-                "team_id": item.get("team_id"),
-                "capacity_rate": float(item.get("capacity_rate") or 0),
-                "capacity_hours": 80.0 * float(item.get("capacity_rate") or 0),
+                "team_id": team_id,
+                "capacity_rate": rate,
+                "capacity_hours": 80.0 * rate,
             }
-            for item in assignments
+            for team_id, rate in sorted(bucket_rates.items())
         ]
         if free:
             buckets.append({
@@ -1101,6 +1340,10 @@ def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
             if item.get("role")
         }, key=str.casefold)
         capacity = sum(float(item["capacity_hours"]) for item in buckets)
+        effective_capacity_by_sprint = {
+            str(sprint): capacity * availability_rates.get(sprint, {}).get(engineer_id, 1.0)
+            for sprint in range(1, 7)
+        }
         used = current.get("used_hours_by_sprint") or {str(sprint): 0.0 for sprint in range(1, 7)}
         engineers.append({
             **current,
@@ -1114,9 +1357,17 @@ def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
             "team_ids": sorted({item["team_id"] for item in assignments if item.get("team_id")}),
             "capacity_buckets": buckets,
             "capacity_hours": capacity,
+            "effective_capacity_hours_by_sprint": effective_capacity_by_sprint,
+            "availability_rate_by_sprint": {
+                str(sprint): availability_rates.get(sprint, {}).get(engineer_id, 1.0)
+                for sprint in range(1, 7)
+            },
             "used_hours_by_sprint": used,
             "free_hours_by_sprint": {
-                str(sprint): max(capacity - float(used.get(str(sprint), 0)), 0.0)
+                str(sprint): max(
+                    effective_capacity_by_sprint[str(sprint)]
+                    - float(used.get(str(sprint), 0)), 0.0
+                )
                 for sprint in range(1, 7)
             },
             "skills": list(profile.get("skills") or []),
@@ -1158,6 +1409,12 @@ def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
             float((resource or {}).get("capacity") or 0) > 0
             for resource in current_sprints.values()
         )
+        member_capacity_hours = sum(
+            bucket["capacity_hours"]
+            for item in members
+            for bucket in item.get("capacity_buckets", [])
+            if bucket.get("team_id") == team_id
+        )
         teams.append({
             **current,
             "team_id": team_id,
@@ -1177,12 +1434,17 @@ def _overlay_catalog_entities(payload: dict, catalog: dict) -> dict:
                 if current_sprints and (has_current_capacity or catalog_capacity is None)
                 else empty_sprints
             ),
-            "member_capacity_hours": sum(
-                bucket["capacity_hours"]
-                for item in members
-                for bucket in item.get("capacity_buckets", [])
-                if bucket.get("team_id") == team_id
-            ),
+            "member_capacity_hours": member_capacity_hours,
+            "member_capacity_hours_by_sprint": {
+                str(sprint): sum(
+                    bucket["capacity_hours"]
+                    * availability_rates.get(sprint, {}).get(item["engineer_id"], 1.0)
+                    for item in members
+                    for bucket in item.get("capacity_buckets", [])
+                    if bucket.get("team_id") == team_id
+                )
+                for sprint in range(1, 7)
+            },
         })
 
     approved_tasks = {item["task_id"]: item for item in payload.get("tasks", [])}
@@ -1288,7 +1550,8 @@ def _current_dashboard() -> dict:
     # restart as well; an approved in-memory draft still takes precedence.
     approved = plan_drafts.approved()
     current = _current_plan_without_historical_done(
-        approved or _empty_current_dashboard()
+        _with_decided_expansion_baseline(approved, get_catalog_repository())
+        if approved is not None else _empty_current_dashboard()
     )
     history = plan_drafts.history() if approved is not None else []
     current = project_lifecycle(current, history)
@@ -1430,6 +1693,12 @@ def _apply_canonical_expected_initiatives(payload: dict) -> dict:
         row["planned_task_count"] = sum(is_expected_task(task_id) for task_id in row["task_ids"])
         normalized_initiatives.append(row)
 
+    # The Week-0 denominator remains immutable, while newly catalogued
+    # initiatives can still be visible in the current quarter overview.
+    normalized_initiatives.extend(
+        deepcopy(row) for initiative_id, row in sorted(initiatives_by_id.items())
+        if initiative_id not in baseline_tasks_by_initiative
+    )
     payload["initiatives"] = normalized_initiatives
     if isinstance(payload.get("plan"), dict):
         payload["plan"]["initiatives"] = deepcopy(normalized_initiatives)
@@ -1551,6 +1820,7 @@ def _active_star_map(
     catalog: dict,
     approved_star: dict | None,
     approved_tasks: list[dict],
+    bus_payload: dict | None = None,
 ) -> dict:
     """Build current Star Map/BF from catalog without running the planner."""
 
@@ -1562,7 +1832,7 @@ def _active_star_map(
         tasks=approved_tasks,
         current_sprint=current_sprint,
     ).payload()
-    bus = build_bus_factor_payload(active_tables)
+    bus = bus_payload or build_bus_factor_payload(active_tables)
     bus_by_team = {item.get("team_id"): item for item in bus.get("teams", [])}
     profiles = {item["engineer_id"]: item for item in catalog.get("engineers", [])}
     engineer_by_id = {item["engineer_id"]: item for item in base.get("engineers", [])}
@@ -1588,6 +1858,12 @@ def _active_star_map(
             engineer_by_id[engineer_id] = target
         target["name"] = profile.get("name") or engineer_id
         target["skills"] = list(profile.get("skills") or [])
+        target["roles"] = sorted({
+            item.get("role") for item in [*(profile.get("assignments") or []),
+                                          *([profile["free_assignment"]]
+                                            if profile.get("free_assignment") else [])]
+            if item.get("role")
+        }, key=str.casefold)
         target["memberships"] = list(profile.get("assignments") or [])
 
     old_teams = {item.get("team_id"): item for item in approved_star.get("teams", [])}
@@ -1685,6 +1961,33 @@ def _dashboard_with_lifecycle() -> dict:
     repository = get_catalog_repository()
     catalog = _catalog_snapshot()
     payload = _overlay_catalog_entities(payload, catalog)
+    proposal = repository.latest_expansion_proposal()
+    if proposal and proposal.get("status") in {"OPEN", "IGNORED", "APPROVED"}:
+        current_revision = (plan_drafts.approved() or {}).get("approved_snapshot", {}).get("revision")
+        expected_revision = (proposal.get("approved_revision") if proposal.get("status") == "APPROVED"
+                             else proposal.get("base_approved_revision"))
+        if (current_revision == expected_revision
+                and repository.revision() == proposal.get("catalog_revision")
+                and repository.availability_constraints() == proposal.get("base_availability_constraints")):
+            available_ids = set(proposal.get("best_task_ids") or [])
+            for task in payload.get("tasks") or []:
+                if task.get("task_id") in available_ids and task.get("status") != "PLANNED":
+                    task["opportunity_available"] = True
+                    task["status_label"] = "Не включена в план"
+                    task["reason_blocks"] = []
+            payload["risks"] = [risk for risk in payload.get("risks") or []
+                                if risk.get("task_id") not in available_ids
+                                or any(task.get("task_id") == risk.get("task_id")
+                                       and task.get("status") == "PLANNED"
+                                       for task in payload.get("tasks") or [])]
+    active_tables = repository.active_planning_tables()
+    current_bus_factor = build_bus_factor_payload(active_tables)
+    bus_by_team = {row["team_id"]: row for row in current_bus_factor.get("teams", [])}
+    for team in payload.get("teams", []):
+        current_bus = bus_by_team.get(team.get("team_id"))
+        if current_bus:
+            team["bus_factor"] = current_bus.get("summary") or {}
+            team["bus_factor_status"] = current_bus.get("status")
     for collection, entity_type, id_field in (
         ("tasks", "task", "task_id"),
         ("teams", "team", "team_id"),
@@ -1707,7 +2010,8 @@ def _dashboard_with_lifecycle() -> dict:
     # the active catalog for current Bus Factor membership.
     if isinstance(payload.get("star_map"), dict):
         payload["star_map"] = _active_star_map(
-            repository.active_planning_tables(), catalog, payload.get("star_map"), approved_tasks
+            active_tables, catalog, payload.get("star_map"), approved_tasks,
+            current_bus_factor,
         )
         has_approved_plan = plan_drafts.approved() is not None
         payload["star_map"]["quarter_demand_status"] = (
@@ -1803,13 +2107,268 @@ def kpis() -> dict:
     return _current_dashboard()["kpis"]
 
 
+def _authoritative_current_sprint() -> int:
+    approved = plan_drafts.approved()
+    if approved is None:
+        return 1
+    state = approved.get("_planning_state") or {}
+    if state.get("quarter_status") == "COMPLETED":
+        return 6
+    return min(int(state.get("completed_through_sprint") or 0) + 1, 6)
+
+
+def _validate_future_availability(updates: list[dict]) -> None:
+    current_sprint = _authoritative_current_sprint()
+    repository = get_catalog_repository()
+    active = repository.active_planning_tables()
+    active_ids = {
+        str(row.get("engineer_id")) for row in active.get("engineers", [])
+        if row.get("engineer_id")
+    }
+    all_ids = {
+        str(row.get("engineer_id")) for row in repository.tables().get("engineers", [])
+        if row.get("engineer_id")
+    }
+    for row in updates:
+        engineer_id = str(row.get("engineer_id") or "")
+        sprint = int(row.get("sprint") or 0)
+        if engineer_id not in all_ids:
+            raise ValueError(f"Неизвестный engineer_id: {engineer_id}")
+        if engineer_id not in active_ids:
+            raise ValueError(f"Архивному инженеру {engineer_id} нельзя задавать доступность.")
+        if sprint <= current_sprint:
+            raise ValueError(
+                f"Доступность можно менять только после текущего Sprint {current_sprint}."
+            )
+
+
+def _availability_impact(
+    constraints_override: list[dict] | None = None,
+    approved_override: dict | None = None,
+) -> dict:
+    from src.planning.availability import availability_rate_index
+
+    repository = get_catalog_repository()
+    tables = repository.active_planning_tables()
+    constraints = (constraints_override if constraints_override is not None
+                   else repository.availability_constraints())
+    rates = availability_rate_index(constraints)
+    base_buckets: dict[tuple[str, str], float] = {}
+    for row in tables.get("engineers", []):
+        engineer_id = str(row.get("engineer_id") or "")
+        team_id = str(row.get("team_id") or "")
+        if not engineer_id:
+            continue
+        hours = 80.0 * float(row.get("capacity_rate") or 0.0)
+        key = (engineer_id, team_id)
+        base_buckets[key] = min(base_buckets.get(key, hours), hours)
+
+    approved = approved_override if approved_override is not None else (plan_drafts.approved() or {})
+    usage: dict[tuple[int, str, str], float] = {}
+    task_rows: dict[tuple[int, str, str], set[str]] = {}
+    for task in approved.get("tasks") or []:
+        for allocation in task.get("allocations") or []:
+            key = (
+                int(allocation.get("sprint") or 0),
+                str(allocation.get("engineer_id") or ""),
+                str(allocation.get("source_team_id") or ""),
+            )
+            usage[key] = usage.get(key, 0.0) + float(allocation.get("allocated_hours") or 0.0)
+            task_rows.setdefault(key, set()).add(str(task.get("task_id") or ""))
+    conflicts = []
+    for (sprint, engineer_id, team_id), allocated in sorted(usage.items()):
+        effective = base_buckets.get((engineer_id, team_id), 0.0) * rates.get(
+            sprint, {}
+        ).get(engineer_id, 1.0)
+        if allocated > effective + 1e-9:
+            conflicts.append({
+                "engineer_id": engineer_id,
+                "team_id": team_id or None,
+                "sprint": sprint,
+                "allocated_hours": round(allocated, 6),
+                "effective_capacity_hours": round(effective, 6),
+                "deficit_hours": round(allocated - effective, 6),
+                "task_ids": sorted(task_rows.get((sprint, engineer_id, team_id), set())),
+            })
+    engineer_rows = []
+    for engineer_id in sorted({key[0] for key in base_buckets}):
+        buckets = [
+            {"team_id": team_id or None, "base_capacity_hours": hours}
+            for (candidate_id, team_id), hours in sorted(base_buckets.items())
+            if candidate_id == engineer_id
+        ]
+        base_total = sum(row["base_capacity_hours"] for row in buckets)
+        engineer_rows.append({
+            "engineer_id": engineer_id,
+            "base_capacity_hours": round(base_total, 6),
+            "buckets": buckets,
+            "availability_by_sprint": {
+                str(sprint): {
+                    "availability_rate": rates.get(sprint, {}).get(engineer_id, 1.0),
+                    "effective_capacity_hours": round(
+                        base_total * rates.get(sprint, {}).get(engineer_id, 1.0), 6
+                    ),
+                }
+                for sprint in range(_authoritative_current_sprint() + 1, 7)
+            },
+        })
+    return {
+        "current_sprint": _authoritative_current_sprint(),
+        "constraints": constraints,
+        "conflicts": conflicts,
+        "engineers": engineer_rows,
+        "requires_replanning": bool(conflicts),
+    }
+
+
+@app.get("/api/engineers/availability")
+def future_engineer_availability() -> dict:
+    return _availability_impact()
+
+
+@app.put("/api/engineers/availability")
+def update_future_engineer_availability(request: AvailabilityBatchRequest) -> dict:
+    updates = [row.model_dump() for row in request.updates]
+    try:
+        _validate_future_availability(updates)
+        get_catalog_repository().save_availability_constraints(updates)
+        plan_drafts.invalidate_pending_replans(
+            "Доступность инженеров изменилась после расчёта черновика."
+        )
+        return _availability_impact()
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/api/replanning/replacement-candidates")
+def replacement_candidates(
+    task_id: str,
+    engineer_id: str,
+    sprint: int,
+    role: str | None = None,
+    hours: float | None = None,
+) -> dict:
+    """Return deterministic, capacity-safe candidates for an affected allocation."""
+
+    from src.planning.availability import availability_rate_index
+    from src.skills import canonicalize_skill
+
+    approved = plan_drafts.approved()
+    if approved is None:
+        raise HTTPException(status_code=409, detail="Утверждённый план не найден.")
+    task = next(
+        (row for row in approved.get("tasks") or [] if str(row.get("task_id")) == task_id),
+        None,
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Задача не найдена.")
+    affected = [
+        row for row in task.get("allocations") or []
+        if str(row.get("engineer_id")) == engineer_id
+        and int(row.get("sprint") or 0) == sprint
+    ]
+    if not affected and role and hours is not None and hours > 0:
+        affected = [{"role": role, "allocated_hours": hours}]
+    if not affected:
+        raise HTTPException(status_code=404, detail="Назначение инженера не найдено.")
+    repository = get_catalog_repository()
+    tables = repository.active_planning_tables()
+    rates = availability_rate_index(repository.availability_constraints())
+    owner_team = str(task.get("assigned_team_id") or task.get("original_team_id") or "")
+
+    used: dict[tuple[str, str], float] = {}
+    for planned_task in approved.get("tasks") or []:
+        for row in planned_task.get("allocations") or []:
+            if int(row.get("sprint") or 0) != sprint:
+                continue
+            key = (str(row.get("engineer_id") or ""), str(row.get("source_team_id") or ""))
+            used[key] = used.get(key, 0.0) + float(row.get("allocated_hours") or 0.0)
+
+    skills: dict[str, set[str]] = {}
+    for row in tables.get("engineer_skills", []):
+        if int(row.get("effective_from_sprint") or 1) <= sprint:
+            skills.setdefault(str(row.get("engineer_id") or ""), set()).add(
+                canonicalize_skill(row.get("technology"))
+            )
+    requirements: dict[str, set[str]] = {}
+    for row in tables.get("task_skill_requirements", []):
+        if str(row.get("task_id")) == task_id and not row.get("rejected"):
+            requirements.setdefault(str(row.get("role") or ""), set()).add(
+                canonicalize_skill(row.get("technology"))
+            )
+    bucket_rates: dict[tuple[str, str], float] = {}
+    bucket_roles: dict[tuple[str, str], set[str]] = {}
+    for profile in tables.get("engineers", []):
+        key = (
+            str(profile.get("engineer_id") or ""),
+            str(profile.get("team_id") or ""),
+        )
+        rate = float(profile.get("capacity_rate") or 0.0)
+        bucket_rates[key] = min(bucket_rates.get(key, rate), rate)
+        if int(profile.get("effective_from_sprint") or 1) <= sprint:
+            bucket_roles.setdefault(key, set()).add(str(profile.get("role") or ""))
+
+    rows = []
+    for affected_row in affected:
+        role = str(affected_row.get("role") or "")
+        required_hours = float(affected_row.get("allocated_hours") or 0.0)
+        candidates = []
+        for key, capacity_rate in sorted(bucket_rates.items()):
+            candidate_id, team_id = key
+            if (
+                not candidate_id or candidate_id == engineer_id
+                or role not in bucket_roles.get(key, set())
+            ):
+                continue
+            if not requirements.get(role, set()).issubset(skills.get(candidate_id, set())):
+                continue
+            base = 80.0 * capacity_rate
+            effective = base * rates.get(sprint, {}).get(candidate_id, 1.0)
+            free = max(effective - used.get(key, 0.0), 0.0)
+            if free + 1e-9 < required_hours:
+                continue
+            candidates.append({
+                "engineer_id": candidate_id,
+                "role": role,
+                "team_id": team_id or None,
+                "free_hours": round(free, 6),
+                "required_hours": round(required_hours, 6),
+                "cross_team": bool(team_id and team_id != owner_team),
+                "label": "Из другой команды" if team_id and team_id != owner_team else "Своя команда",
+            })
+        candidates.sort(key=lambda row: (
+            row["cross_team"], -float(row["free_hours"]), row["engineer_id"], str(row["team_id"] or "")
+        ))
+        rows.append({"role": role, "required_hours": required_hours, "candidates": candidates})
+    return {"task_id": task_id, "engineer_id": engineer_id, "sprint": sprint, "roles": rows}
+
+
 @app.post("/api/replanning/close-sprint")
 def close_sprint(request: SprintActualRequest) -> dict:
     try:
+        # Only the persistent application store can have a pending expansion
+        # decision that must gate the next close. In-memory planner stores
+        # used by isolated callers/tests have no expansion lifecycle.
+        if getattr(plan_drafts, "_repository_provider", None) is not None:
+            pending_expansion = get_catalog_repository().latest_expansion_proposal()
+            if pending_expansion and pending_expansion.get("status") in {"OPEN", "ERROR"}:
+                raise RuntimeError("Сначала утвердите или пропустите дополнительные задачи.")
+        future_updates = [dict(row) for row in request.future_availability]
+        if future_updates:
+            _validate_future_availability(future_updates)
+            get_catalog_repository().save_availability_constraints(future_updates)
+            plan_drafts.invalidate_pending_replans(
+                "Доступность инженеров изменена в форме закрытия спринта."
+            )
+        # Existing future availability is already part of the approved
+        # scenario. Only updates submitted with this close request can turn
+        # an otherwise completed close into a replanning review.
+        impact = _availability_impact() if future_updates else {"conflicts": []}
         return plan_drafts.close_sprint(
             request.sprint_number,
             [row.model_dump() for row in request.results],
             all_completed=request.all_completed,
+            force_replanning=bool(impact["conflicts"]),
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -1846,7 +2405,42 @@ def retry_replan_draft(workflow_id: str) -> dict:
 @app.post("/api/replanning/drafts/{workflow_id}/approve")
 def approve_replan_draft(workflow_id: str) -> dict:
     try:
-        return plan_drafts.approve_replanning(workflow_id)
+        workflow = plan_drafts.replan_workflow(workflow_id)
+        saved = plan_drafts.approve_replanning(workflow_id)
+        if workflow and workflow.get("kind") != "TRAINING_REVIEW":
+            repository = get_catalog_repository()
+            proposal = repository.load_replan_workflow(f"expansion-{workflow_id}")
+            if proposal is None:
+                try:
+                    proposal = _create_expansion_proposal(saved, workflow_id)
+                except Exception as error:
+                    proposal = repository.save_replan_workflow({
+                        "workflow_id": f"expansion-{workflow_id}",
+                        "kind": "ADDITIVE_EXPANSION", "status": "ERROR",
+                        "triggered_by_sprint": int((saved.get("_planning_state") or {}).get("completed_through_sprint") or 0),
+                        "base_approved_revision": (saved.get("approved_snapshot") or {}).get("revision"),
+                        "catalog_revision": repository.revision(),
+                        "base_availability_constraints": repository.availability_constraints(),
+                        "recommendations": [], "best_task_ids": [], "selected_ids": [],
+                        "rejected_ids": [], "message": f"Анализ дополнительных задач не завершён: {error}",
+                    })
+                next_sprint = int(proposal["triggered_by_sprint"]) + 1
+                if proposal["status"] == "EMPTY" and next_sprint <= 6:
+                    candidate = freeze_sprint_baseline(deepcopy(saved), next_sprint)
+                    proposal["sprint_baseline"] = deepcopy(
+                        candidate["_planning_state"]["sprint_baselines"][str(next_sprint)])
+                    proposal["sprint_baseline"]["source_revision"] = (
+                        saved.get("approved_snapshot") or {}).get("revision")
+                    proposal = repository.save_replan_workflow(proposal)
+            else:
+                saved = plan_drafts.approved() or saved
+            # Expansion proposals are persisted only for the catalog-backed
+            # application store. Keep lightweight in-memory planner callers
+            # compatible with the regular replanning response.
+            if getattr(plan_drafts, "_repository_provider", None) is not None:
+                return {**saved, "sprint_expansion": proposal}
+            return saved
+        return saved
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Черновик пересчёта не найден.") from error
     except RuntimeError as error:
@@ -2054,7 +2648,465 @@ def development_recommendations() -> dict:
         }
     dashboard = _dashboard_with_lifecycle()
     tables = get_catalog_repository().active_planning_tables()
-    return DevelopmentRecommendationService(tables, dashboard).calculate()
+    payload = DevelopmentRecommendationService(tables, dashboard).calculate()
+    active_training = [row for row in get_catalog_repository().training_plans()
+                       if row.get("status") != "CANCELLED"]
+    for item in payload.get("recommendations") or []:
+        candidates = (item.get("recommendation") or {}).get("candidates") or []
+        item["recommendation"]["candidates"] = [
+            candidate for candidate in candidates
+            if not any(
+                plan["engineer_id"] == candidate["engineer_id"]
+                and ((candidate.get("target_skill") and
+                      candidate.get("target_skill") == plan.get("target_skill"))
+                     or (not candidate.get("target_skill") and
+                         candidate.get("target_role") == plan.get("target_role")))
+                for plan in active_training
+            )
+        ]
+        item["recommendation"]["candidate_count"] = len(
+            item["recommendation"]["candidates"]
+        )
+    return payload
+
+
+def _training_proposal(request: TrainingRequest) -> tuple[dict, list[dict], list[dict]]:
+    from src.skills import canonicalize_skill
+
+    approved = plan_drafts.approved()
+    if approved is None:
+        raise ValueError("Сначала утвердите квартальный план.")
+    current = _authoritative_current_sprint()
+    sprints = sorted(set(request.selected_sprints))
+    if not sprints or any(sprint <= current or sprint > 6 for sprint in sprints):
+        raise ValueError(f"Выберите хотя бы один будущий Sprint после Sprint {current}.")
+    recommendations = development_recommendations().get("recommendations") or []
+    item = next((row for row in recommendations
+                 if row.get("recommendation_id") == request.recommendation_id), None)
+    if item is None:
+        raise ValueError("Рекомендация устарела. Обновите список.")
+    candidate = next((row for row in
+                      (item.get("recommendation") or {}).get("candidates") or []
+                      if row.get("engineer_id") == request.engineer_id), None)
+    if candidate is None:
+        raise ValueError("Выбранный инженер больше не является кандидатом.")
+    role = str(candidate.get("target_role") or "").strip() or None
+    skill = canonicalize_skill(candidate.get("target_skill")) or None
+    if not role and not skill:
+        raise ValueError("Рекомендация не содержит цели дообучения.")
+    if any(
+        row.get("status") not in {"CANCELLED", "COMPLETED"}
+        and row.get("engineer_id") == request.engineer_id
+        and ((skill and row.get("target_skill") == skill)
+             or (role and row.get("target_role") == role))
+        for row in get_catalog_repository().training_plans()
+    ):
+        raise ValueError("Для этого инженера такая компетенция уже запланирована.")
+    rate = {"NO_IMPACT": 1.0, "HALF": 0.5, "BLOCKED": 0.0}[request.availability_mode]
+    now = datetime.now(timezone.utc).isoformat()
+    plan = {
+        "training_id": uuid4().hex,
+        "engineer_id": request.engineer_id,
+        "target_type": "SKILL" if skill else "ROLE",
+        "target_role": role,
+        "target_skill": skill,
+        "source_recommendation_id": request.recommendation_id,
+        "team_id": item.get("team_id"),
+        "selected_sprints": sprints,
+        "availability_mode": request.availability_mode,
+        "availability_rate": rate,
+        "effective_from_sprint": max(sprints) + 1,
+        "status": "SCHEDULED",
+        "created_at": now, "updated_at": now,
+    }
+    repository = get_catalog_repository()
+    existing = repository.availability_constraints()
+    constraints = training_constraints(existing, plan)
+    before = _availability_impact(existing)
+    after = _availability_impact(constraints)
+    before_deficits = {
+        (row["sprint"], row["engineer_id"], row["team_id"]): row["deficit_hours"]
+        for row in before["conflicts"]
+    }
+    conflicts = [row for row in after["conflicts"]
+                 if row["engineer_id"] == request.engineer_id
+                 and row["sprint"] in sprints
+                 and row["deficit_hours"] > before_deficits.get(
+                     (row["sprint"], row["engineer_id"], row["team_id"]), 0) + 1e-9]
+    details = []
+    for conflict in conflicts:
+        for task in approved.get("tasks") or []:
+            for allocation in task.get("allocations") or []:
+                if (int(allocation.get("sprint") or 0) != conflict["sprint"]
+                    or str(allocation.get("engineer_id")) != request.engineer_id
+                    or str(allocation.get("source_team_id") or "") != str(conflict["team_id"] or "")):
+                    continue
+                details.append({
+                    "key": f"{task['task_id']}:{conflict['sprint']}:{allocation.get('role') or ''}:{conflict['team_id'] or ''}",
+                    "task_id": task["task_id"], "task_title": task.get("title"),
+                    "sprint": conflict["sprint"],
+                    "role": allocation.get("role"),
+                    "hours": float(allocation.get("allocated_hours") or 0),
+                    "team_id": conflict["team_id"],
+                    "deficit_hours": conflict["deficit_hours"],
+                })
+    grouped: dict[str, dict] = {}
+    for row in details:
+        if row["key"] in grouped:
+            grouped[row["key"]]["hours"] += row["hours"]
+        else:
+            grouped[row["key"]] = row
+    details = list(grouped.values())
+    return plan, constraints, details
+
+
+@app.post("/api/development/trainings/analyze")
+def analyze_training(request: TrainingRequest) -> dict:
+    try:
+        plan, _, conflicts = _training_proposal(request)
+        return {"plan": plan, "conflicts": conflicts,
+                "requires_replanning": bool(conflicts),
+                "current_sprint": _authoritative_current_sprint()}
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/development/trainings/confirm")
+def confirm_training(request: TrainingRequest) -> dict:
+    try:
+        plan, constraints, conflicts = _training_proposal(request)
+        pending = plan_drafts.replan_workflow()
+        if pending and pending.get("status") in {
+            "ACTUAL_SAVED", "READY_FOR_REVIEW", "REPLANNING_FAILED"
+        }:
+            raise RuntimeError("Сначала завершите или отмените текущий черновик пересчёта.")
+        if not conflicts:
+            get_catalog_repository().save_training_plan(plan)
+            return {"status": "SCHEDULED", "plan": plan}
+        required = {row["key"] for row in conflicts}
+        if set(request.resolutions) != required:
+            raise ValueError("Для каждой затронутой задачи выберите замену или перенос.")
+        resolutions = {}
+        for row in conflicts:
+            resolution = dict(request.resolutions[row["key"]])
+            action = resolution.get("action")
+            if action not in {"REPLACE", "MOVE"}:
+                raise ValueError("Для каждой задачи выберите замену или перенос.")
+            if action == "REPLACE":
+                engineer_id = str(resolution.get("engineer_id") or "")
+                if not engineer_id or engineer_id == plan["engineer_id"]:
+                    raise ValueError("Выберите другого инженера на замену.")
+            resolutions[row["key"]] = {**row, **resolution}
+        candidate = build_training_replan(
+            plan_drafts.approved(), constraints, resolutions, plan["engineer_id"]
+        )
+        from src.planning.availability import availability_rate_index
+        before_rates = availability_rate_index(get_catalog_repository().availability_constraints())
+        after_rates = availability_rate_index(constraints)
+        candidate.setdefault("replanning", {}).setdefault("diff", {})[
+            "availability_changes"
+        ] = [{
+            "engineer_id": plan["engineer_id"], "sprint": sprint,
+            "before_rate": before_rates.get(sprint, {}).get(plan["engineer_id"], 1.0),
+            "after_rate": after_rates.get(sprint, {}).get(plan["engineer_id"], 1.0),
+        } for sprint in plan["selected_sprints"]
+            if before_rates.get(sprint, {}).get(plan["engineer_id"], 1.0)
+            != after_rates.get(sprint, {}).get(plan["engineer_id"], 1.0)]
+        remaining = _availability_impact(constraints, candidate)["conflicts"]
+        if remaining:
+            raise ValueError("В черновике остался конфликт часов. Выберите другую замену или перенос.")
+        workflow = plan_drafts.stage_training_replan(plan, constraints, candidate)
+        return {"status": "READY_FOR_REVIEW", "workflow": workflow}
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def _create_expansion_proposal(approved: dict, workflow_id: str) -> dict:
+    repository = get_catalog_repository()
+    proposal = build_proposal(
+        approved, repository.active_planning_tables(),
+        catalog_revision=repository.revision(),
+        availability_constraints=repository.availability_constraints(),
+        workflow_id=workflow_id,
+    )
+    return repository.save_replan_workflow(proposal)
+
+
+def _expansion_proposal(*, require_open: bool = False) -> dict:
+    proposal = get_catalog_repository().latest_expansion_proposal()
+    if proposal is None:
+        raise RuntimeError("Предложения по дополнительным задачам ещё не построены.")
+    if require_open and proposal.get("status") != "OPEN":
+        raise RuntimeError("Эти предложения уже закрыты.")
+    approved = plan_drafts.approved()
+    if approved is None:
+        raise RuntimeError("Утверждённый план не найден.")
+    revision = (approved.get("approved_snapshot") or {}).get("revision")
+    repository = get_catalog_repository()
+    proposal = deepcopy(proposal)
+    proposal["stale"] = (
+        revision != proposal.get("base_approved_revision")
+        or repository.revision() != proposal.get("catalog_revision")
+        or repository.availability_constraints() != proposal.get("base_availability_constraints")
+    )
+    if require_open and proposal["stale"]:
+        raise RuntimeError("План, каталог или доступность изменились. Обновите предложения.")
+    return proposal
+
+
+def _selected_expansion_task_ids(proposal: dict) -> set[str]:
+    by_id = {row["recommendation_id"]: row for row in proposal["recommendations"]}
+    return {task_id for recommendation_id in proposal.get("selected_ids") or []
+            for task_id in by_id[recommendation_id]["task_ids"]}
+
+
+def _expansion_preview(proposal: dict) -> dict:
+    task_ids = _selected_expansion_task_ids(proposal)
+    cached = proposal.get("draft_preview") or {}
+    if cached.get("selected_ids") == sorted(task_ids):
+        return {"proposal": proposal, "effect": deepcopy(cached["effect"]),
+                "tasks": deepcopy(cached["tasks"])}
+    if not task_ids:
+        return {"proposal": proposal,
+                "effect": {"added_tasks": 0, "added_initiatives": 0}, "tasks": []}
+    approved = plan_drafts.approved()
+    tables = get_catalog_repository().active_planning_tables()
+    simulation = simulate_additions(approved, tables, task_ids)
+    if set(simulation["selected_ids"]) != task_ids:
+        raise RuntimeError("Выбранные дополнения вместе невыполнимы. Обновите предложения.")
+    preview = merge_additions(approved, simulation, tables,
+                              triggered_by_sprint=proposal["triggered_by_sprint"])
+    return {"proposal": proposal, "effect": preview["expansion_effect"],
+            "tasks": simulation["tasks"]}
+
+
+@app.get("/api/sprint-expansion")
+def get_sprint_expansion() -> dict:
+    try:
+        proposal = _expansion_proposal()
+        if proposal["status"] == "OPEN" and not proposal["stale"]:
+            return _expansion_preview(proposal)
+        return {"proposal": proposal, "effect": {"added_tasks": 0,
+                                                   "added_initiatives": 0}, "tasks": []}
+    except RuntimeError as error:
+        return {"proposal": {"status": "NONE", "message": str(error)},
+                "effect": {"added_tasks": 0, "added_initiatives": 0}, "tasks": []}
+
+
+@app.post("/api/sprint-expansion/refresh")
+def refresh_sprint_expansion() -> dict:
+    try:
+        approved = plan_drafts.approved()
+        if approved is None:
+            raise RuntimeError("Сначала утвердите план.")
+        closed = int((approved.get("_planning_state") or {}).get("completed_through_sprint") or 0)
+        if not closed:
+            raise RuntimeError("Сначала закройте спринт.")
+        latest = get_catalog_repository().latest_expansion_proposal()
+        if latest and int(latest.get("triggered_by_sprint") or 0) == closed and latest.get("status") not in {"OPEN", "ERROR"}:
+            raise RuntimeError("Решение по этому закрытию уже зафиксировано. Новые возможности будут проверены после следующего спринта.")
+        if str(closed + 1) in ((approved.get("_planning_state") or {}).get("sprint_baselines") or {}):
+            raise RuntimeError("Следующий спринт уже начат; его контрольный план не изменяется.")
+        proposal = _create_expansion_proposal(
+            approved,
+            latest["workflow_id"].removeprefix("expansion-") if latest
+            else f"revision-{(approved.get('approved_snapshot') or {}).get('revision')}")
+        if proposal["status"] == "EMPTY" and closed < 6:
+            candidate = freeze_sprint_baseline(deepcopy(approved), closed + 1)
+            proposal["sprint_baseline"] = deepcopy(
+                candidate["_planning_state"]["sprint_baselines"][str(closed + 1)])
+            proposal["sprint_baseline"]["source_revision"] = (
+                approved.get("approved_snapshot") or {}).get("revision")
+            proposal = get_catalog_repository().save_replan_workflow(proposal)
+        return _expansion_preview(proposal) if proposal["status"] == "OPEN" else {
+            "proposal": proposal, "effect": {"added_tasks": 0,
+                                               "added_initiatives": 0}, "tasks": []}
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/sprint-expansion/recommendations/{recommendation_id}/{action}")
+def select_sprint_expansion(recommendation_id: str, action: Literal["apply", "reject", "undo"]) -> dict:
+    try:
+        proposal = _expansion_proposal(require_open=True)
+        recommendations = {row["recommendation_id"]: row for row in proposal["recommendations"]}
+        if recommendation_id not in recommendations:
+            raise KeyError(recommendation_id)
+        selected = set(proposal.get("selected_ids") or [])
+        rejected = set(proposal.get("rejected_ids") or [])
+        if action == "apply":
+            selected.add(recommendation_id)
+            rejected.discard(recommendation_id)
+        elif action == "reject":
+            selected.discard(recommendation_id)
+            rejected.add(recommendation_id)
+        else:
+            selected.discard(recommendation_id)
+            rejected.discard(recommendation_id)
+        proposal["selected_ids"] = sorted(selected)
+        proposal["rejected_ids"] = sorted(rejected)
+        proposal.pop("draft_preview", None)
+        preview = _expansion_preview(proposal)
+        proposal["draft_preview"] = {"selected_ids": sorted(_selected_expansion_task_ids(proposal)),
+                                     "effect": deepcopy(preview["effect"]),
+                                     "tasks": deepcopy(preview["tasks"])}
+        preview["proposal"] = get_catalog_repository().save_replan_workflow(proposal)
+        return preview
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Рекомендация не найдена.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/sprint-expansion/apply-all")
+def apply_all_sprint_expansion() -> dict:
+    try:
+        proposal = _expansion_proposal(require_open=True)
+        proposal["selected_ids"] = [row["recommendation_id"]
+                                    for row in proposal["recommendations"]]
+        proposal["rejected_ids"] = []
+        proposal.pop("draft_preview", None)
+        preview = _expansion_preview(proposal)
+        proposal["draft_preview"] = {"selected_ids": sorted(_selected_expansion_task_ids(proposal)),
+                                     "effect": deepcopy(preview["effect"]),
+                                     "tasks": deepcopy(preview["tasks"])}
+        preview["proposal"] = get_catalog_repository().save_replan_workflow(proposal)
+        return preview
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/sprint-expansion/ignore")
+def ignore_sprint_expansion() -> dict:
+    try:
+        latest = _expansion_proposal()
+        if latest["status"] == "IGNORED":
+            return latest
+        proposal = _expansion_proposal(require_open=True)
+        approved = plan_drafts.approved()
+        candidate = freeze_sprint_baseline(deepcopy(approved),
+                                           int(proposal["triggered_by_sprint"]) + 1)
+        sprint = str(int(proposal["triggered_by_sprint"]) + 1)
+        proposal["sprint_baseline"] = deepcopy(
+            candidate["_planning_state"]["sprint_baselines"][sprint])
+        proposal["sprint_baseline"]["source_revision"] = (
+            approved.get("approved_snapshot") or {}).get("revision")
+        proposal["status"] = "IGNORED"
+        proposal["selected_ids"] = []
+        return get_catalog_repository().save_replan_workflow(proposal)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/sprint-expansion/approve")
+def approve_sprint_expansion() -> dict:
+    try:
+        latest = _expansion_proposal()
+        if latest["status"] == "APPROVED":
+            return {"approved": plan_drafts.approved(), "proposal": latest}
+        proposal = _expansion_proposal(require_open=True)
+        selected_ids = _selected_expansion_task_ids(proposal)
+        if not selected_ids:
+            raise RuntimeError("Сначала выберите хотя бы одну рекомендацию или пропустите предложения.")
+        approved = plan_drafts.approved()
+        repository = get_catalog_repository()
+        catalog = repository.active_planning_tables()
+        simulation = simulate_additions(approved, catalog, selected_ids)
+        if set(simulation["selected_ids"]) != selected_ids:
+            raise RuntimeError("Выбранные задачи перестали быть выполнимыми.")
+        merged = merge_additions(approved, simulation, catalog,
+                                 triggered_by_sprint=proposal["triggered_by_sprint"])
+        recommendation_by_task = {
+            task_id: row["recommendation_id"]
+            for row in proposal["recommendations"]
+            if row["recommendation_id"] in proposal.get("selected_ids", [])
+            for task_id in row["task_ids"]
+        }
+        approved_at = datetime.now(timezone.utc).isoformat()
+        for collection in (merged.get("tasks") or [], (merged.get("plan") or {}).get("tasks") or []):
+            for task in collection:
+                origin = task.get("expansion_origin")
+                if origin:
+                    origin.update({
+                        "approved_plan_version": proposal["base_approved_revision"] + 1,
+                        "approved_at": approved_at,
+                        "recommendation_id": recommendation_by_task.get(task["task_id"]),
+                    })
+        remaining_ids = set(candidate_ids(merged, catalog))
+        if remaining_ids:
+            diagnostic = simulate_additions(merged, catalog)
+            merged["risks"] = [row for row in merged.get("risks") or []
+                               if str(row.get("task_id") or "") not in remaining_ids]
+            merged["risks"].extend(row for row in diagnostic.get("risks") or []
+                                   if str(row.get("task_id") or "") in remaining_ids)
+        freeze_sprint_baseline(merged, int(proposal["triggered_by_sprint"]) + 1)
+        merged["revision_context"] = {
+            "previous_approved_revision": proposal["base_approved_revision"],
+            "closed_sprint": proposal["triggered_by_sprint"],
+            "trigger": "SPRINT_EXPANSION_APPROVE",
+            "workflow_id": proposal["workflow_id"],
+        }
+        saved, updated = repository.save_approved_with_expansion(merged, proposal)
+        with plan_drafts._lock:
+            plan_drafts._approved = deepcopy(saved)
+            plan_drafts._persistent_loaded = True
+        return {"approved": saved, "proposal": updated}
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/api/engineers/{engineer_id}/trainings")
+def engineer_trainings(engineer_id: str) -> dict:
+    repository = get_catalog_repository()
+    from src.planning.availability import availability_rate_index
+    constraints = repository.availability_constraints()
+    rates = availability_rate_index(constraints)
+    source_rates: dict[tuple[int, str, str], float] = {}
+    for row in constraints:
+        if str(row.get("engineer_id")) != engineer_id:
+            continue
+        sprint = int(row.get("sprint") or 0)
+        source_type = str(row.get("source_type") or "MANUAL").upper()
+        key = (sprint, engineer_id, source_type)
+        rate = float(row.get("availability_rate") or 1.0)
+        source_rates[key] = min(source_rates.get(key, 1.0), rate)
+    buckets = {}
+    for row in repository.active_planning_tables().get("engineers", []):
+        if str(row.get("engineer_id")) == engineer_id:
+            key = str(row.get("team_id") or "")
+            rate = float(row.get("capacity_rate") or 0)
+            buckets[key] = min(buckets.get(key, rate), rate)
+    base_hours = 80.0 * sum(buckets.values())
+    completed = int(((plan_drafts.approved() or {}).get("_planning_state") or {}).get(
+        "completed_through_sprint") or 0)
+    plans = []
+    for row in repository.training_plans(engineer_id):
+        last = max(int(value) for value in row["selected_sprints"])
+        status = ("COMPLETED" if last <= completed else
+                  "ACTIVE" if min(row["selected_sprints"]) <= completed + 1 <= last else
+                  "SCHEDULED")
+        plans.append({**row, "status": status,
+                      "effective_availability": {
+                          str(sprint): {
+                              "rate": rates.get(int(sprint), {}).get(engineer_id, 1.0),
+                              "hours": round(base_hours * rates.get(int(sprint), {}).get(engineer_id, 1.0), 2),
+                              "base_hours": round(base_hours, 2),
+                              "training_rate": source_rates.get((int(sprint), engineer_id, "TRAINING"), 1.0),
+                              "training_hours": round(base_hours * source_rates.get((int(sprint), engineer_id, "TRAINING"), 1.0), 2),
+                              "other_rate": min(
+                                  (rate for (source_sprint, source_engineer, source_type), rate in source_rates.items()
+                                   if source_sprint == int(sprint) and source_engineer == engineer_id
+                                   and source_type != "TRAINING"),
+                                  default=1.0,
+                              ),
+                          }
+                          for sprint in row["selected_sprints"]
+                      }})
+    return {"engineer_id": engineer_id, "trainings": plans,
+            "capabilities": [row for row in repository.capability_overlays()
+                             if row["engineer_id"] == engineer_id]}
 
 
 @app.get("/api/teams")

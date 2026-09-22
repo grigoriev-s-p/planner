@@ -20,6 +20,7 @@ from src.star_map import StarMapService
 from src.planning import FeasibilityContext, build_quarter_plan
 from src.skills import canonicalize_skill, get_skill_registry
 from src.planning.capacity import calculate_team_capacity
+from src.planning.availability import availability_rate_index
 from src.planning.ownership import evaluate_ownership_rows
 from src.planning.task_states import is_historical_done
 from src.replanning import (
@@ -532,6 +533,14 @@ class PlanningAPIService:
                 name: [dict(row) for row in rows] for name, rows in tables.items()
             }
         self.tables.setdefault("task_skill_requirements", [])
+        self.tables.setdefault("engineer_availability", [])
+        if (
+            "engineer_availability_rates_by_sprint" not in self._planner_options
+            and self.tables["engineer_availability"]
+        ):
+            self._planner_options["engineer_availability_rates_by_sprint"] = (
+                availability_rate_index(self.tables["engineer_availability"])
+            )
         seen_engineer_skills: set[tuple[str, str]] = set()
         canonical_engineer_skills: list[dict[str, Any]] = []
         for row in self.tables["engineer_skills"]:
@@ -1176,6 +1185,9 @@ class PlanningAPIService:
                         member_bucket_rates.get(key, rate), rate
                     )
             member_capacity = sum(80.0 * rate for rate in member_bucket_rates.values())
+            availability_rates = availability_rate_index(
+                self.tables.get("engineer_availability", [])
+            )
             output.append(
                 {
                     "team_id": team_id,
@@ -1201,6 +1213,13 @@ class PlanningAPIService:
                         for sprint in self.plan.sprints
                     },
                     "member_capacity_hours": member_capacity,
+                    "member_capacity_hours_by_sprint": {
+                        str(sprint): sum(
+                            80.0 * rate * availability_rates.get(sprint, {}).get(engineer_id, 1.0)
+                            for (engineer_id, _), rate in member_bucket_rates.items()
+                        )
+                        for sprint in range(1, 7)
+                    },
                     "source_used_hours_by_sprint": {
                         str(sprint): sum(
                             item["allocated_hours"]
@@ -1274,6 +1293,9 @@ class PlanningAPIService:
             for allocation in task["allocations"]
         ]
         output = []
+        availability_rates = availability_rate_index(
+            self.tables.get("engineer_availability", [])
+        )
         for engineer_id, profile in sorted(profiles.items()):
             buckets = [
                 {
@@ -1290,6 +1312,11 @@ class PlanningAPIService:
                 item for item in all_allocations if item["engineer_id"] == engineer_id
             ]
             total_capacity = sum(item["capacity_hours"] for item in buckets)
+            effective_capacity_by_sprint = {
+                str(sprint): total_capacity
+                * availability_rates.get(sprint, {}).get(engineer_id, 1.0)
+                for sprint in range(1, 7)
+            }
             used_by_sprint = {
                 str(sprint): sum(
                     item["allocated_hours"] for item in allocations if item["sprint"] == sprint
@@ -1317,10 +1344,15 @@ class PlanningAPIService:
                     "team_ids": sorted(profile["team_ids"]),
                     "capacity_buckets": buckets,
                     "capacity_hours": total_capacity,
+                    "effective_capacity_hours_by_sprint": effective_capacity_by_sprint,
+                    "availability_rate_by_sprint": {
+                        str(sprint): availability_rates.get(sprint, {}).get(engineer_id, 1.0)
+                        for sprint in range(1, 7)
+                    },
                     "used_hours_by_sprint": used_by_sprint,
                     "used_hours_by_team_by_sprint": used_by_team_by_sprint,
                     "free_hours_by_sprint": {
-                        key: max(total_capacity - value, 0.0)
+                        key: max(effective_capacity_by_sprint[key] - value, 0.0)
                         for key, value in used_by_sprint.items()
                     },
                     "skills": sorted(profile["skills"]),

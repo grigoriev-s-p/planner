@@ -11,6 +11,7 @@ from typing import Any
 from src.skills import canonicalize_skill
 
 from .capacity import calculate_engineer_capacity, calculate_team_capacity
+from .availability import effective_capacity_hours
 from .dependency_rules import (
     dependency_is_satisfied,
     dependency_timing,
@@ -102,6 +103,8 @@ class _EngineerProfile:
     roles: set[str] = field(default_factory=set)
     capacity_rate: float = 0.0
     skills: set[str] = field(default_factory=set)
+    role_effective_from: dict[str, int] = field(default_factory=dict)
+    skill_effective_from: dict[str, int] = field(default_factory=dict)
 
 
 class FeasibilityService:
@@ -134,6 +137,10 @@ class FeasibilityService:
             role = _text(row.get("role"))
             if role:
                 profile.roles.add(role)
+                profile.role_effective_from[role] = min(
+                    profile.role_effective_from.get(role, 7),
+                    int(row.get("effective_from_sprint") or 1),
+                )
             if profile.capacity_rate == 0:
                 profile.capacity_rate = rate
             else:
@@ -145,12 +152,27 @@ class FeasibilityService:
                 for profile in profiles.values():
                     if profile.engineer_id == engineer_id:
                         profile.skills.add(technology)
+                        profile.skill_effective_from[technology] = min(
+                            profile.skill_effective_from.get(technology, 7),
+                            int(row.get("effective_from_sprint") or 1),
+                        )
         return profiles
+
+    @staticmethod
+    def _roles_at(profile: _EngineerProfile, sprint: int) -> set[str]:
+        return {role for role in profile.roles
+                if profile.role_effective_from.get(role, 1) <= sprint}
+
+    @staticmethod
+    def _skills_at(profile: _EngineerProfile, sprint: int) -> set[str]:
+        return {skill for skill in profile.skills
+                if profile.skill_effective_from.get(skill, 1) <= sprint}
 
     def _bucket_used_hours(
         self,
         sprint_state: SprintState,
         task_team_id: str,
+        availability_rates: Mapping[str, float] | None = None,
     ) -> dict[tuple[str, str], float]:
         """Return usage attributed to each engineer-team capacity bucket.
 
@@ -191,6 +213,9 @@ class FeasibilityService:
                         "capacity_rate": profile.capacity_rate,
                     }
                 ).nominal_hours
+                capacity = effective_capacity_hours(
+                    capacity, (availability_rates or {}).get(engineer_id, 1.0)
+                )
                 consumed = min(max(capacity - usage[key], 0.0), unattributed)
                 usage[key] += consumed
                 unattributed -= consumed
@@ -255,6 +280,7 @@ class FeasibilityService:
         allow_cross_team: bool = True,
         unavailable_engineer_ids: set[str] | None = None,
         preferred_engineer_ids: set[str] | None = None,
+        availability_rates: Mapping[str, float] | None = None,
     ) -> FeasibilityResult:
         reasons: list[FeasibilityReason] = []
         task = self._tasks.get(task_id)
@@ -419,7 +445,10 @@ class FeasibilityService:
         engineer_rows: list[EngineerAvailability] = []
         any_role_work_possible = not role_requirements
         all_roles_complete = True
-        bucket_used_hours = self._bucket_used_hours(sprint_state, team_id)
+        availability_rates = availability_rates or {}
+        bucket_used_hours = self._bucket_used_hours(
+            sprint_state, team_id, availability_rates
+        )
         shared_matching_buckets: dict[tuple[str, str], float] = {}
         task_skill_candidates: dict[str, set[str]] = defaultdict(set)
 
@@ -433,7 +462,7 @@ class FeasibilityService:
                 (
                     profile
                     for profile in self._profiles.values()
-                    if role in profile.roles
+                    if role in self._roles_at(profile, sprint_state.sprint_number)
                     # A profile with no source team is a shared pool resource
                     # and is always eligible. Team-bound profiles still obey
                     # the caller's cross-team policy.
@@ -444,10 +473,13 @@ class FeasibilityService:
                     profile.engineer_id not in preferred,
                     profile.team_id != team_id,
                     -max(
-                        calculate_engineer_capacity(
-                            {"engineer_id": profile.engineer_id,
-                             "capacity_rate": profile.capacity_rate}
-                        ).nominal_hours
+                        effective_capacity_hours(
+                            calculate_engineer_capacity(
+                                {"engineer_id": profile.engineer_id,
+                                 "capacity_rate": profile.capacity_rate}
+                            ).nominal_hours,
+                            availability_rates.get(profile.engineer_id, 1.0),
+                        )
                         - bucket_used_hours.get(
                             (profile.engineer_id, profile.team_id), 0.0
                         ),
@@ -458,7 +490,8 @@ class FeasibilityService:
                 ),
             )
             matching_profiles = [
-                profile for profile in role_profiles if required_skills.issubset(profile.skills)
+                profile for profile in role_profiles
+                if required_skills.issubset(self._skills_at(profile, sprint_state.sprint_number))
             ]
             available_hours = 0.0
             nominal_hours = 0.0
@@ -470,10 +503,14 @@ class FeasibilityService:
                         "capacity_rate": profile.capacity_rate,
                     }
                 )
+                effective_hours = effective_capacity_hours(
+                    capacity.nominal_hours,
+                    availability_rates.get(profile.engineer_id, 1.0),
+                )
                 used_hours = bucket_used_hours.get(
                     (profile.engineer_id, profile.team_id), 0.0
                 )
-                remaining_hours = max(capacity.nominal_hours - used_hours, 0.0)
+                remaining_hours = max(effective_hours - used_hours, 0.0)
                 matches_skills = profile in matching_profiles
                 engineer_rows.append(
                     EngineerAvailability(
@@ -483,12 +520,12 @@ class FeasibilityService:
                             (team for team in self._engineer_teams[profile.engineer_id] if team is not None),
                             key=str,
                         )),
-                        roles=tuple(sorted(profile.roles)),
+                        roles=tuple(sorted(self._roles_at(profile, sprint_state.sprint_number))),
                         capacity_rate=profile.capacity_rate,
-                        nominal_hours=capacity.nominal_hours,
+                        nominal_hours=effective_hours,
                         used_hours=used_hours,
                         available_hours=remaining_hours,
-                        skills=tuple(sorted(profile.skills)),
+                        skills=tuple(sorted(self._skills_at(profile, sprint_state.sprint_number))),
                         required_role=role,
                         required_technologies=tuple(sorted(required_skills)),
                         matches_required_skills=matches_skills,
@@ -497,13 +534,15 @@ class FeasibilityService:
                 if matches_skills:
                     matching_ids.add(profile.engineer_id)
                     available_hours += remaining_hours
-                    nominal_hours += capacity.nominal_hours
+                    nominal_hours += effective_hours
                     key = (profile.engineer_id, profile.team_id)
                     shared_matching_buckets[key] = max(
                         shared_matching_buckets.get(key, 0.0), remaining_hours
                     )
                 if matches_skills and remaining_hours > 0:
-                    for technology in task_required_skills.intersection(profile.skills):
+                    for technology in task_required_skills.intersection(
+                        self._skills_at(profile, sprint_state.sprint_number)
+                    ):
                         task_skill_candidates[technology].add(profile.engineer_id)
 
             deficit = max(required_hours - available_hours, 0.0)
@@ -580,8 +619,9 @@ class FeasibilityService:
                 for profile in self._profiles.values()
                 if profile.team_id != team_id
                 and profile.engineer_id not in (unavailable_engineer_ids or set())
-                and profile.roles.intersection(role_requirements)
-                and set(unavailable_task_skills).intersection(profile.skills)
+                and self._roles_at(profile, sprint_state.sprint_number).intersection(role_requirements)
+                and set(unavailable_task_skills).intersection(
+                    self._skills_at(profile, sprint_state.sprint_number))
             })
             all_roles_complete = False
             reasons.append(
@@ -646,6 +686,7 @@ def check_task_feasibility(
     story_points_override: float | None = None,
     unavailable_engineer_ids: set[str] | None = None,
     preferred_engineer_ids: set[str] | None = None,
+    availability_rates: Mapping[str, float] | None = None,
 ) -> FeasibilityResult:
     """Public convenience API for one feasibility check."""
 
@@ -658,4 +699,5 @@ def check_task_feasibility(
         story_points_override=story_points_override,
         unavailable_engineer_ids=unavailable_engineer_ids,
         preferred_engineer_ids=preferred_engineer_ids,
+        availability_rates=availability_rates,
     )
