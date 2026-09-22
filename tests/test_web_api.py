@@ -391,7 +391,7 @@ class FrontendRefinementTests(unittest.TestCase):
 
     def test_header_logo_is_constrained_to_brand_icon(self) -> None:
         self.assertIn('src="/assets/postcode-logo.jpg" width="47" height="47"', self.html)
-        self.assertIn(".brand-icon{overflow:hidden}", self.styles)
+        self.assertIn(".brand-icon{overflow:hidden;border:0;border-radius:0}", self.styles)
         self.assertIn(".brand-icon img{display:block;width:100%;height:100%;object-fit:cover}", self.styles)
 
     def test_engineer_and_team_catalogs_use_backend_collections(self) -> None:
