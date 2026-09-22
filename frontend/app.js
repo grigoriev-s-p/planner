@@ -12,6 +12,7 @@ const state = {
   workspaceMode: 'manager', engineerWorkspaceId: null, engineerTaskSearch: '', engineerWorkspaceLoading: false,
   taskReturnPage: 'home', loading: true, error: null, archive: null,
   currentSprintExpandedTaskId: null,
+  currentSprintSortKey: 'task_id', currentSprintSortDirection: 'asc',
   kpiDetailsExpanded: false,
   taskSortKey: 'task_id', taskSortDirection: 'asc',
   engineerSortKey: 'engineer_id', engineerSortDirection: 'asc',
@@ -444,6 +445,26 @@ function canonicalPage(page) {
   return page === 'current-plan' ? 'home' : page;
 }
 
+function positionSlidingIndicator(container, indicator, activeButton) {
+  if (!container || !indicator) return;
+  if (!activeButton || activeButton.hidden || activeButton.offsetParent === null) {
+    indicator.style.opacity = '0';
+    return;
+  }
+  indicator.style.opacity = '1';
+  indicator.style.width = `${activeButton.offsetWidth}px`;
+  indicator.style.height = `${activeButton.offsetHeight}px`;
+  indicator.style.transform = `translate3d(${activeButton.offsetLeft}px, ${activeButton.offsetTop}px, 0)`;
+  if (!container.classList.contains('indicator-ready')) requestAnimationFrame(() => container.classList.add('indicator-ready'));
+}
+
+function updateHeaderIndicators() {
+  const nav = $('.nav');
+  positionSlidingIndicator(nav, $('.nav-active-indicator', nav), $$('.nav-link.active', nav).find((button) => !button.hidden));
+  const modeSwitch = $('.workspace-mode-switch');
+  positionSlidingIndicator(modeSwitch, $('.workspace-mode-indicator', modeSwitch), $('[data-workspace-mode].active', modeSwitch));
+}
+
 function show(page, historyMode = 'push') {
   if (page === 'recalc' && data.ready && !hasPendingReplan()) page = 'current-sprint';
   if (page === 'star') state.riskHubTab = 'teams';
@@ -454,6 +475,11 @@ function show(page, historyMode = 'push') {
   const viewPage = page === 'home' ? 'current-plan' : page;
   $$('.page').forEach((element) => element.classList.toggle('active', element.id === `page-${viewPage}`));
   $$('.nav-link').forEach((element) => element.classList.toggle('active', element.dataset.page === ({'task-detail': 'tasks', 'team-detail': 'teams', 'engineer-detail': 'engineers'}[page] || page)));
+  $$('.nav-link').forEach((element) => {
+    if (element.classList.contains('active')) element.setAttribute('aria-current', 'page');
+    else element.removeAttribute('aria-current');
+  });
+  requestAnimationFrame(updateHeaderIndicators);
   closeEmployee();
   renderPage(page);
   if (page === 'current-sprint') loadFutureAvailability();
@@ -1742,7 +1768,13 @@ function renderCurrentSprint() {
   const quarterDone = data.plan?.quarter?.current_sprint === 6
     && data.plan?.sprints?.every((item) => item.status === 'COMPLETED');
   const sprintRows = sprintBy(sprint)?.tasks || [];
-  const sprintTasks = sprintRows.map((row) => taskBy(row.task_id)).filter(Boolean);
+  const sprintTasks = catalogSort(
+    sprintRows.map((row) => taskBy(row.task_id)).filter(Boolean),
+    state.currentSprintSortKey,
+    state.currentSprintSortDirection,
+    (task, key) => task[key],
+    new Set(['story_points', 'rung']),
+  );
   const allocations = sprintTasks.flatMap((task) => (task.allocations || [])
     .filter((row) => Number(row.sprint) === sprint)
     .map((row) => ({...row, task_id: task.task_id, task_title: task.title, owner_team_id: task.assigned_team_id})));
@@ -1772,6 +1804,12 @@ function renderCurrentSprint() {
     ['Спринт', sprint], ['Задач', sprintTasks.length], ['Команд', teamIds.size], ['Нагрузка', `${spNumber(totalSp)} SP`], ['Назначено', `${number(totalHours)} ч`],
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
   $('#currentSprintTaskCount').textContent = `${sprintTasks.length}`;
+  $$('[data-current-sprint-sort]').forEach((button) => {
+    const active = button.dataset.currentSprintSort === state.currentSprintSortKey;
+    button.classList.toggle('active', active);
+    button.dataset.direction = active ? state.currentSprintSortDirection : '';
+    button.setAttribute('aria-sort', active ? (state.currentSprintSortDirection === 'asc' ? 'ascending' : 'descending') : 'none');
+  });
   $('#currentSprintTasks').innerHTML = sprintTasks.length ? sprintTasks.map((task) => {
     const expanded = state.currentSprintExpandedTaskId === task.task_id;
     const detailId = `current-sprint-task-${String(task.task_id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
@@ -1804,7 +1842,7 @@ function renderCurrentSprint() {
     const details = expanded
       ? `<section class="current-sprint-task-details" id="${attr(detailId)}"><div class="current-sprint-task-details-heading"><div><h4>Задействованные инженеры</h4><p>${assignmentsByEngineer.size ? `${assignmentsByEngineer.size} чел. · ${number(taskAllocations.reduce((sum, row) => sum + Number(row.allocated_hours || 0), 0))} ч на задачу` : 'Назначений на этот спринт нет'}</p></div></div><div class="current-sprint-engineer-list">${engineerRows || empty('На задачу пока не назначены инженеры.')}</div></section>`
       : '';
-    return `<article class="current-sprint-task ${expanded ? 'expanded' : ''}"><div class="current-sprint-task-summary"><div class="current-sprint-task-primary"><span class="current-sprint-task-id">${escapeHtml(task.task_id)}</span><h3>${escapeHtml(task.title)}</h3>${expansionBadge(task)}</div><span class="current-sprint-task-sp">${spNumber(task.story_points)} SP</span><span class="current-sprint-task-rung">${rungBadge(task)}</span><span class="current-sprint-task-team">${task.assigned_team_id ? `<button class="table-button" type="button" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)}</button>` : 'Команда не указана'}</span><button type="button" class="btn btn-outline current-sprint-task-more" data-toggle-current-sprint-task="${attr(task.task_id)}" aria-expanded="${expanded}" aria-controls="${attr(detailId)}">${expanded ? 'Скрыть' : 'Подробнее'}<span aria-hidden="true">⌄</span></button></div>${details}</article>`;
+    return `<article class="current-sprint-task ${expanded ? 'expanded' : ''}"><div class="current-sprint-task-summary"><span class="current-sprint-task-id">${escapeHtml(task.task_id)}</span><div class="current-sprint-task-title"><h3 title="${attr(task.title)}">${escapeHtml(task.title)}</h3>${expansionBadge(task)}</div><span class="current-sprint-task-sp">${spNumber(task.story_points)} SP</span><span class="current-sprint-task-rung">${rungBadge(task)}</span><span class="current-sprint-task-team">${task.assigned_team_id ? `<button class="table-button" type="button" data-open-team="${attr(task.assigned_team_id)}">${escapeHtml(task.assigned_team_id)}</button>` : 'Команда не указана'}</span><button type="button" class="btn btn-outline current-sprint-task-more" data-toggle-current-sprint-task="${attr(task.task_id)}" aria-expanded="${expanded}" aria-controls="${attr(detailId)}">${expanded ? 'Скрыть' : 'Подробнее'}<span aria-hidden="true">⌄</span></button></div>${details}</article>`;
   }).join('') : empty(quarterDone ? 'Квартал завершён.' : 'В текущем спринте нет задач.');
 
   const involvedTeamIds = [...teamIds];
@@ -2837,6 +2875,14 @@ function bindEvents() {
       show(nav.dataset.page);
       return;
     }
+    const currentSprintSort = event.target.closest('[data-current-sprint-sort]');
+    if (currentSprintSort) {
+      const key = currentSprintSort.dataset.currentSprintSort;
+      if (state.currentSprintSortKey === key) state.currentSprintSortDirection = state.currentSprintSortDirection === 'asc' ? 'desc' : 'asc';
+      else { state.currentSprintSortKey = key; state.currentSprintSortDirection = 'asc'; }
+      renderCurrentSprint();
+      return;
+    }
     const taskSort = event.target.closest('[data-task-sort]');
     if (taskSort) {
       const key = taskSort.dataset.taskSort;
@@ -2960,7 +3006,11 @@ function bindEvents() {
     if (route.page === 'engineer-detail' && state.engineerId) loadEngineerDetail(state.engineerId);
     if (state.workspaceMode === 'engineer' && !data.engineerWorkspace) loadEngineerWorkspace();
   });
-  window.addEventListener('resize', () => applyStarViewport($('.star-graph-stage')));
+  window.addEventListener('resize', () => {
+    applyStarViewport($('.star-graph-stage'));
+    updateHeaderIndicators();
+  });
+  document.fonts?.ready.then(updateHeaderIndicators);
 }
 
 function hydrate(payload) {
