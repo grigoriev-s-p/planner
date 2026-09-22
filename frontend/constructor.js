@@ -12,11 +12,11 @@ window.planConstructor = (() => {
   let onCatalogUpdated = null;
   let pendingDatasetUpload = null;
   let shownRecommendationGroups = 3;
+  let exclusionReasonPriority = 'all';
   const shownRecommendations = new Map();
   const locallyRejectedRecommendations = new Map();
   let changedTaskEffects = [];
   let showPlanChanges = true;
-  let exclusionReasonPriority = 'all';
   let activeRecommendationId = null;
   let recommendationUpdateInFlight = false;
   let editingSkillRequirements = [];
@@ -130,7 +130,7 @@ window.planConstructor = (() => {
       return `<section class="recommendation-group"><h4>${group.title}<small>${group.items.length} доступных улучшений</small></h4><div class="recommendation-list">${group.items.slice(0, visible).map(recommendationCard).join('')}</div>${group.items.length > visible ? `<button class="text-button" type="button" data-more-recommendations="${esc(group.key)}">Показать ещё ${group.items.length - visible}</button>` : ''}</section>`;
     }).join('');
     const applyAll = optimization.status === 'ready' && (optimization.optimized_actions || []).length
-      ? `<div class="apply-all-recommendations ${optimization.best_selected ? 'apply-all-recommendations--selected' : ''}"><div><b>Лучший найденный совместимый вариант</b></div><button class="btn recommendation-apply-all-button" type="button" id="applyAllRecommendations" ${recommendationUpdateInFlight || optimization.best_selected ? 'disabled' : ''}>${optimization.best_selected ? '✓ Лучший найденный вариант выбран' : 'Применить все рекомендации'}</button></div>`
+      ? `<div class="apply-all-recommendations ${optimization.best_selected ? 'apply-all-recommendations--selected' : ''}"><div><b>Лучший найденный совместимый вариант</b><small>Сохранённый вариант не меняется при отдельных действиях.</small></div><button class="btn recommendation-apply-all-button" type="button" id="applyAllRecommendations" ${recommendationUpdateInFlight || optimization.best_selected ? 'disabled' : ''}>${optimization.best_selected ? '✓ Лучший найденный вариант выбран' : 'Применить все рекомендации'}</button></div>`
       : '';
     const rejected = [...locallyRejectedRecommendations.values()];
     const rejectedSection = rejected.length ? `<section class="recommendation-group recommendation-group--rejected"><h4>Отклонённые <small>${rejected.length}</small></h4><div class="recommendation-list">${rejected.map((item) => recommendationCard(item, true)).join('')}</div></section>` : '';
@@ -188,17 +188,11 @@ window.planConstructor = (() => {
   }
 
   function filteredExcludedTasks(tasks) {
-    const visible = exclusionReasonPriority === 'all'
-      ? [...tasks]
-      : tasks.filter((task) => exclusionReasonMetas(task).some((group) => group.key === exclusionReasonPriority));
+    const visible = exclusionReasonPriority === 'all' ? [...tasks] : tasks.filter((task) => exclusionReasonMetas(task).some((group) => group.key === exclusionReasonPriority));
     return visible.sort((left, right) => {
-      const leftReasons = exclusionReasonMetas(left);
-      const rightReasons = exclusionReasonMetas(right);
-      const leftReason = leftReasons.find((group) => group.key === exclusionReasonPriority) || leftReasons[0];
-      const rightReason = rightReasons.find((group) => group.key === exclusionReasonPriority) || rightReasons[0];
-      return leftReason.rank - rightReason.rank
-        || Number(right.rung || 0) - Number(left.rung || 0)
-        || String(left.task_id || '').localeCompare(String(right.task_id || ''), 'ru');
+      const leftReason = exclusionReasonMeta(left);
+      const rightReason = exclusionReasonMeta(right);
+      return leftReason.rank - rightReason.rank || Number(right.rung || 0) - Number(left.rung || 0) || String(left.task_id || '').localeCompare(String(right.task_id || ''), 'ru');
     });
   }
 
@@ -206,21 +200,6 @@ window.planConstructor = (() => {
     if (exclusionReasonPriority === 'all') return 'Все задачи удалось разместить в квартальном плане.';
     const reason = exclusionReasonGroups.find((group) => group.key === exclusionReasonPriority);
     return reason ? `Задач с причиной «${reason.label}» нет.` : 'Задач с выбранной причиной нет.';
-  }
-
-  function appliedRecommendationTaskIds() {
-    const ids = new Set();
-    const add = (value) => { if (value) ids.add(String(value)); };
-    (previewPlan?.optimization?.accepted_changes || []).forEach((item) => {
-      add(item.task_id);
-      (item.tasks || []).forEach(add);
-      const action = item.action || {};
-      add(action.task_id);
-      (action.tasks || []).forEach(add);
-      (action.changes || []).forEach((change) => add(change.task_id));
-    });
-    changedTaskEffects.forEach((item) => add(item.task_id));
-    return ids;
   }
 
   function previewSprintCard(task, sprint) {
@@ -277,7 +256,7 @@ window.planConstructor = (() => {
     const historicalBlock = historicalDone.length ? `<section class="preview-section"><h3>Уже завершены до начала планирования</h3><div class="preview-exclusion-list">${historicalDone.map((task) => `<article class="preview-exclusion"><div><b>${esc(task.task_id)}</b><span>${esc(task.title)}</span></div><small>✓ Завершена до начала планирования</small></article>`).join('')}</div></section>` : '';
     target.hidden = false;
     const reasonOptions = exclusionReasonGroups.map((reason) => `<option value="${esc(reason.key)}" ${exclusionReasonPriority === reason.key ? 'selected' : ''}>${esc(reason.label)}</option>`).join('');
-    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>План построен без перераспределения задач и специалистов между командами.</p></div></div>${optimizationSummary()}<section class="preview-section" id="constructorSprintPlan"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section>${recommendationPanel()}${acceptedChangesPanel()}${historicalBlock}<section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section preview-exclusions-section"><div class="preview-section-heading"><div><h3>Переносы и исключения</h3></div><label class="preview-sort-control"><span>Причина переноса или исключения</span><select id="previewExclusionSort"><option value="all" ${exclusionReasonPriority === 'all' ? 'selected' : ''}>Все причины</option>${reasonOptions}</select></label></div><div class="preview-exclusion-list">${exclusions}</div></section><div class="preview-approval"><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
+    target.innerHTML = `<div class="constructor-preview-heading"><div><h2>Предварительный план</h2><p>План построен без перераспределения задач и специалистов между командами.</p></div></div>${optimizationSummary()}<section class="preview-section" id="constructorSprintPlan"><h3>Распределение по спринтам</h3><div class="preview-board-viewport"><div class="preview-sprint-board">${sprintBoard}</div></div></section>${recommendationPanel()}${acceptedChangesPanel()}${historicalBlock}<section class="preview-section"><h3>Помощь между командами</h3><div class="preview-help-list">${previewCrossTeamRows(previewPlan)}</div></section><section class="preview-section preview-exclusions-section"><div class="preview-section-heading"><div><h3>Переносы и исключения</h3></div><label class="preview-sort-control"><span>Причина переноса или исключения</span><select id="previewExclusionSort"><option value="all" ${exclusionReasonPriority === 'all' ? 'selected' : ''}>Все причины</option>${reasonOptions}</select></label></div><div class="preview-exclusion-list">${exclusions}</div></section><div class="preview-approval"><p>Проверьте распределение перед утверждением. После утверждения этот вариант станет текущим планом.</p><div id="constructorApprovalError" class="constructor-errors" hidden></div><button class="btn btn-blue" id="approveConstructorPlan" type="button">Утвердить план</button></div>`;
   }
 
   function loadDraft() {
@@ -629,7 +608,12 @@ window.planConstructor = (() => {
         Number(right.expected_velocity_sp || 0) - Number(left.expected_velocity_sp || 0)
         || String(left.name || left.team_id).localeCompare(String(right.name || right.team_id), 'ru')
       ));
-    $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${esc(team.expected_velocity_sp)} SP${team.source === 'draft' ? ' · Новая команда' : ''}</small></span></label>`).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
+      $c('#constructorTeamCatalog').innerHTML = `${!teamQuery && allTeams.length ? selectAllControl('teams', allTeams) : ''}${teams.map((team) => {
+        const capacityLabel = team.expected_velocity_sp != null
+          ? `Исторический velocity: ${number(team.expected_velocity_sp)} SP`
+          : (team.capacity_sp != null ? `Ручная capacity: ${number(team.capacity_sp)} SP` : 'Capacity не задана');
+        return `<label class="constructor-option"><input type="checkbox" data-constructor-pick="teams" value="${esc(team.team_id)}" ${findDraft('teams', team.team_id) ? 'checked' : ''}><span><b>${esc(team.name || team.team_id)}</b><small>${capacityLabel}</small></span></label>`;
+      }).join('') || '<div class="empty-state">Команды не найдены.</div>'}`;
 
     const taskQuery = searchValue('#constructorTaskSearch');
     const allTasks = catalogWithDraft('tasks');
@@ -649,11 +633,7 @@ window.planConstructor = (() => {
       ['Команды', draft.teams.length], ['Инженеры', draft.engineers.length], ['Задачи', draft.tasks.length],
     ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
     $c('#constructorDraftEntities').innerHTML = [
-      entityRows('Команды', 'teams', draft.teams, (item) => `${item.expected_velocity_sp} SP`),
-      entityRows('Инженеры', 'engineers', draft.engineers, (item) => {
-        const assignment = item.assignments?.[0];
-        return [assignment?.team_id, assignment?.role, assignment?.grade].filter(Boolean).join(' · ');
-      }),
+      entityRows('Команды', 'teams', draft.teams, (item) => item.expected_velocity_sp != null ? `Исторический velocity: ${number(item.expected_velocity_sp)} SP` : `Ручная capacity: ${item.capacity_sp == null ? 'не задана' : number(item.capacity_sp)} SP`),
       entityRows('Задачи', 'tasks', draft.tasks, () => ''),
     ].join('');
   }
@@ -846,8 +826,12 @@ window.planConstructor = (() => {
     const item = id ? clone(findDraft(type, id)) : null;
     const content = $c('#constructorDialogContent');
     if (type === 'teams') {
-      const team = item || {team_id: '', name: '', expected_velocity_sp: 20, engineer_ids: []};
-      content.innerHTML = `<h2>${item ? 'Изменить' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" required></label><label>Ожидаемая velocity, SP<input name="expected_velocity_sp" type="number" min="0" step="0.01" value="${esc(team.expected_velocity_sp)}" required></label>${freeEngineerPicker(team)}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
+      const team = item || {team_id: '', name: '', expected_velocity_sp: null, capacity_sp: '', engineer_ids: []};
+      const historicalVelocity = team.expected_velocity_sp != null;
+      const scenarioCapacity = historicalVelocity
+        ? `<p class="muted">Исторический velocity: <b>${number(team.expected_velocity_sp)} SP</b>. Capacity команды будет рассчитана по историческим данным.</p>`
+        : `<label>Ручная capacity за спринт, SP<input name="capacity_sp" type="number" inputmode="numeric" min="0" step="1" value="${esc(team.capacity_sp ?? '')}" required><small>Для новой команды укажите capacity целым числом SP за спринт.</small></label>`;
+      content.innerHTML = `<h2>${item ? 'Изменить настройки сценария для' : 'Добавить'} команду</h2><form id="constructorEntityForm" class="constructor-form" data-form-type="teams" data-editing="${Boolean(item)}"><label>ID команды<input name="team_id" value="${esc(team.team_id)}" ${item ? 'readonly' : ''} required></label><label>Название<input name="name" value="${esc(team.name)}" ${item ? 'readonly' : ''} required></label>${scenarioCapacity}${!item ? freeEngineerPicker(team) : ''}<div class="constructor-form-actions"><button class="btn btn-blue" type="submit">Сохранить</button><button class="btn btn-outline" type="button" data-close-constructor-form>Отмена</button></div></form>`;
     }
     if (type === 'engineers') {
       const engineer = item || {engineer_id: '', name: '', assignments: [{team_id: '', role: '', grade: '', capacity_rate: 1}], skills: []};

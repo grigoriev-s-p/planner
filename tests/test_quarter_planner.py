@@ -5,6 +5,7 @@ import unittest
 from src.planning import FeasibilityContext, PlanStatus, build_quarter_plan
 from src.planning.capacity import calculate_engineer_capacity
 from src.planning.plan_models import PlacementOutcome, RecommendationType
+from src.planning.ownership import evaluate_task_ownership
 from src.planning.planner import sort_tasks_for_planning
 from src.planning.reasons import ReasonCode
 from src.planning.scoring import PlanningContext, calculate_task_score
@@ -592,6 +593,45 @@ class QuarterPlannerTests(unittest.TestCase):
         self.assertEqual((planned.start_sprint, planned.completion_sprint), (1, 2))
         self.assertEqual([a.capacity_sp_load for a in planned.allocations], [8, 1])
         self.assertEqual([a.completed_sp for a in planned.allocations], [0, 0])
+
+    def test_fractional_sp_split_does_not_rollback_feasible_cross_team_task(self) -> None:
+        plan = build_quarter_plan(
+            context(
+                [task("DB-202", team="Team-Platform", story_points=8)],
+                effort=[
+                    effort("DB-202", 32, "Architect"),
+                    effort("DB-202", 32, "DevOps"),
+                    effort("DB-202", 130, ".NET"),
+                    effort("DB-202", 130, "Java"),
+                ],
+                engineers=[
+                    {"engineer_id": "ARCH", "team_id": "Team-Platform", "role": "Architect", "capacity_rate": 1},
+                    {"engineer_id": "OPS", "team_id": "Team-Platform", "role": "DevOps", "capacity_rate": 1},
+                    {"engineer_id": "NET", "team_id": "Team-Platform", "role": ".NET", "capacity_rate": 1},
+                    {"engineer_id": "JAVA-1", "team_id": "Team-L", "role": "Java", "capacity_rate": 1},
+                    {"engineer_id": "JAVA-2", "team_id": "Team-L", "role": "Java", "capacity_rate": 1},
+                ],
+                history=[
+                    {"team_id": "Team-Platform", "velocity_achieved": 9},
+                    {"team_id": "Team-L", "velocity_achieved": 10},
+                ],
+            ),
+            allow_team_reassignment=False,
+            allow_cross_team=True,
+        )
+        planned = result_by_id(plan, "DB-202")
+        self.assertEqual(planned.status, PlanStatus.PLANNED)
+        self.assertEqual((planned.start_sprint, planned.completion_sprint), (1, 2))
+        self.assertAlmostEqual(sum(row.allocated_hours for row in planned.allocations), 324)
+        self.assertAlmostEqual(planned.capacity_sp_load, 8)
+        self.assertTrue(all(
+            sprint.team_sp_used.get("Team-Platform", 0) <= sprint.team_capacity_sp["Team-Platform"]
+            for sprint in plan.sprints
+        ))
+        ownership = evaluate_task_ownership("Team-Platform", planned.allocations)
+        self.assertTrue(ownership.valid)
+        self.assertAlmostEqual(ownership.owner_hours, 194)
+        self.assertAlmostEqual(ownership.external_hours, 130)
 
     def test_capacity_sp_load_is_fully_rolled_back_when_quarter_is_too_short(self) -> None:
         plan = build_quarter_plan(

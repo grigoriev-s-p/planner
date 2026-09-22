@@ -47,8 +47,10 @@ def test_t01_story_points_are_visible_in_selection_preview_board_and_detail() ->
     assert "Всего задачи: ${number(task.story_points)} SP" in constructor
     assert "В Sprint ${sprint}: ${number(sprintSp)} SP" in constructor
     assert "Часы в спринте: ${number(sprintHours)} ч" in constructor
-    assert "Всего: ${number(task.story_points)} SP" in app
-    assert "Sprint ${sprint}: ${number(sprintSp)} SP" in app
+    assert "const spNumber" in app
+    assert "maximumFractionDigits: 1" in app
+    assert "Всего: ${spNumber(task.story_points)} SP" in app
+    assert "Sprint ${sprint}: ${spNumber(sprintSp)} SP" in app
     assert "Story Points задачи" in app
     assert "Нагрузка Sprint ${selectedSprint}" in app
 
