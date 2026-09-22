@@ -17,7 +17,6 @@ window.planConstructor = (() => {
   const locallyRejectedRecommendations = new Map();
   let changedTaskEffects = [];
   let showPlanChanges = true;
-  let exclusionReasonPriority = 'all';
   let activeRecommendationId = null;
   let recommendationUpdateInFlight = false;
   let editingSkillRequirements = [];

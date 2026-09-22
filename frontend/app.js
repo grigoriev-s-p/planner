@@ -524,6 +524,14 @@ function renderPage(page) {
 
 function renderUnavailable() {
   const message = state.error ? `Backend недоступен: ${state.error}` : 'Загружаем данные planner…';
+  const emptyPlan = $('#planUninitialized');
+  if (emptyPlan && state.page === 'home') {
+    emptyPlan.hidden = false;
+    $('h2', emptyPlan).textContent = state.error ? 'Не удалось открыть данные' : 'Загружаем данные';
+    $('p', emptyPlan).textContent = state.error
+      ? `Откройте «Планирование», чтобы загрузить Excel или собрать сценарий вручную. Причина: ${state.error}`
+      : 'Проверяем доступность каталога и текущего плана…';
+  }
   if ($('#tasksListState')) $('#tasksListState').innerHTML = empty(message);
   if ($('#tasksTableWrap')) $('#tasksTableWrap').hidden = true;
   if ($('#engineersListState')) $('#engineersListState').innerHTML = empty(message);
